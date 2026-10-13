@@ -78,6 +78,16 @@ target_include_directories(pdf_layout PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# Standalone in-memory Tile Cache library (Pure C++20, 0 Qt, 0 PDFium dependencies)
+add_library(pdf_cache STATIC
+    include/cache/TileCache.h
+    src/cache/TileCache.cpp
+)
+
+target_include_directories(pdf_cache PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
 # Core engine library
 add_library(pdf_engine STATIC
     include/engine/IDocument.h
@@ -96,6 +106,7 @@ target_include_directories(pdf_engine PUBLIC
 
 target_link_libraries(pdf_engine PUBLIC
     pdf_layout
+    pdf_cache
     Qt6::Core
     Qt6::Gui
     pdfium
@@ -142,6 +153,15 @@ target_link_libraries(test_layout PRIVATE
     pdf_layout
 )
 
+# Standalone tile cache test (links solely to pdf_cache, 0 Qt, 0 PDFium)
+add_executable(test_tile_cache
+    test_tile_cache.cpp
+)
+
+target_link_libraries(test_tile_cache PRIVATE
+    pdf_cache
+)
+
 # CTest registration
 enable_testing()
 add_test(
@@ -154,14 +174,22 @@ add_test(
     COMMAND test_layout
 )
 
+add_test(
+    NAME TileCacheTestSuite
+    COMMAND test_tile_cache
+)
+
 if(WIN32)
     get_filename_component(COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     get_filename_component(QT_BIN_DIR "${Qt6Core_DIR}/../../../bin" ABSOLUTE)
     set_tests_properties(EngineRenderTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR}"
     )
-    # test_layout has 0 external runtime dependencies, but compiler bin prepend is safe
+    # test_layout and test_tile_cache have 0 external runtime dependencies, but compiler bin prepend is safe
     set_tests_properties(DocumentLayoutTestSuite PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${COMPILER_BIN_DIR}"
+    )
+    set_tests_properties(TileCacheTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${COMPILER_BIN_DIR}"
     )
 endif()
