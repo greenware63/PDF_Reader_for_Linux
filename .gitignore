@@ -1,0 +1,22 @@
+# Build directories
+cmake-build-*/
+build/
+bin/
+out/
+
+# IDE files
+.idea/
+.vscode/
+*.user
+
+# Binaries & Libraries
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# Output artifacts
+test_rendered_page0.png
+generated_test.pdf
