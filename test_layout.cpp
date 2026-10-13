@@ -365,7 +365,7 @@ int main() {
     std::cout << "  -> Passed: Handled 4.21 billion pixels with zero overflow." << std::endl;
 
     // Test 9: ScrollMapper Qt-free bidirectional mapping at 10^9 and 2^31
-    std::cout << "[TEST 9] Testing ScrollMapper bidirectional mapping at 10^9 and 2^31..." << std::endl;
+    std::cout << "[TEST 9] Testing ScrollMapper bidirectional mapping at 10^9, 2^31, and randomized property tests..." << std::endl;
     {
         layout::ScrollMapper mapper(1000000000); // 10^9
 
@@ -421,7 +421,61 @@ int main() {
             std::cerr << "[FAIL] Trillion-pixel coordinate scaling failed: " << terraSlider << std::endl;
             return 1;
         }
-        std::cout << "  -> Passed: ScrollMapper verified across 1:1, 10^9, 2^31, and trillion-pixel spans." << std::endl;
+
+        // Property-based test over 1,000 randomized configurations
+        std::mt19937 propRng(777);
+        for (int iter = 0; iter < 1000; ++iter) {
+            int64_t totalD = 0;
+            if (iter % 3 == 0) totalD = 100 + (propRng() % 500000); // Small 1:1 range
+            else if (iter % 3 == 1) totalD = 2000000000LL + (static_cast<int64_t>(propRng()) % 5000000000LL); // > 2^31
+            else totalD = 1000000000000LL + (static_cast<int64_t>(propRng()) % 1000000000LL); // ~1 trillion
+            int64_t vp = 100 + (propRng() % 2000);
+            int64_t pMaxScroll = std::max<int64_t>(0, totalD - vp);
+
+            int32_t sMax = 0, pStep = 0, sStep = 0;
+            mapper.computeRange(totalD, vp, sMax, pStep, sStep);
+
+            // Property 1: Endpoint consistency
+            if (mapper.docToSlider(0, totalD, vp) != 0 || mapper.sliderToDoc(0, totalD, vp) != 0) {
+                std::cerr << "[FAIL] Zero endpoint invariant violated" << std::endl;
+                return 1;
+            }
+            if (mapper.docToSlider(pMaxScroll, totalD, vp) != sMax) {
+                std::cerr << "[FAIL] docToSlider(pMaxScroll) != sMax" << std::endl;
+                return 1;
+            }
+            if (mapper.sliderToDoc(sMax, totalD, vp) != pMaxScroll) {
+                std::cerr << "[FAIL] sliderToDoc(sMax) != pMaxScroll" << std::endl;
+                return 1;
+            }
+
+            // Property 2: Monotonicity
+            int64_t docA = (pMaxScroll > 0) ? (static_cast<int64_t>(propRng()) % pMaxScroll) : 0;
+            int64_t docB = (pMaxScroll > 0) ? (static_cast<int64_t>(propRng()) % pMaxScroll) : 0;
+            if (docA > docB) std::swap(docA, docB);
+            int32_t sA = mapper.docToSlider(docA, totalD, vp);
+            int32_t sB = mapper.docToSlider(docB, totalD, vp);
+            if (sA > sB) {
+                std::cerr << "[FAIL] Monotonicity violated: docA < docB but sA > sB" << std::endl;
+                return 1;
+            }
+
+            // Property 3: 1:1 round-trip exactness below 10^9
+            if (pMaxScroll <= 1000000000LL) {
+                if (mapper.sliderToDoc(sA, totalD, vp) != docA) {
+                    std::cerr << "[FAIL] 1:1 round trip violated below 10^9!" << std::endl;
+                    return 1;
+                }
+            } else {
+                int64_t roundTrip = mapper.sliderToDoc(sA, totalD, vp);
+                int64_t maxDrift = static_cast<int64_t>(std::ceil(static_cast<double>(pMaxScroll) / 1000000000.0)) + 1;
+                if (std::abs(roundTrip - docA) > maxDrift) {
+                    std::cerr << "[FAIL] Compressed round trip drift exceeded bound!" << std::endl;
+                    return 1;
+                }
+            }
+        }
+        std::cout << "  -> Passed: ScrollMapper verified across 1:1, 10^9, 2^31, trillion-pixel spans, and 1,000 property-based iterations." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

@@ -32,16 +32,16 @@ public:
         const int64_t maxDocScroll = std::max<int64_t>(0, totalDocPixels - viewportPixels);
         if (maxDocScroll == 0) {
             outMaxSlider = 0;
-            outPageStep = static_cast<int32_t>(std::min<int64_t>(viewportPixels, m_maxSliderRange));
-            outSingleStep = static_cast<int32_t>(std::min<int64_t>(singleStepPixels, m_maxSliderRange));
+            outPageStep = static_cast<int32_t>(std::max<int64_t>(1, viewportPixels));
+            outSingleStep = static_cast<int32_t>(std::max<int64_t>(1, singleStepPixels));
             return;
         }
 
         if (maxDocScroll <= m_maxSliderRange) {
-            // 1:1 exact mapping
+            // 1:1 exact mapping: do not clamp pageStep to maxDocScroll so Qt thumb ratio reflects true viewport fraction
             outMaxSlider = static_cast<int32_t>(maxDocScroll);
-            outPageStep = static_cast<int32_t>(std::clamp<int64_t>(viewportPixels, 1, maxDocScroll));
-            outSingleStep = static_cast<int32_t>(std::clamp<int64_t>(singleStepPixels, 1, maxDocScroll));
+            outPageStep = static_cast<int32_t>(std::max<int64_t>(1, viewportPixels));
+            outSingleStep = static_cast<int32_t>(std::max<int64_t>(1, singleStepPixels));
         } else {
             // Compressed ratio mapping for enormous 64-bit documents
             outMaxSlider = m_maxSliderRange;

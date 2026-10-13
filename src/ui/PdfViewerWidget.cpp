@@ -9,8 +9,6 @@
 
 namespace ui {
 
-static constexpr double DESKTOP_100_PERCENT_SCALE = 96.0 / 72.0;
-
 PdfViewerWidget::PdfViewerWidget(QWidget* parent)
     : QAbstractScrollArea(parent),
       m_layout(),
@@ -29,8 +27,21 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
     setStyleSheet(QStringLiteral("QAbstractScrollArea { background-color: #323639; border: none; }"));
 }
 
+PdfViewerWidget::~PdfViewerWidget() {
+    closeDocument();
+}
+
 int PdfViewerWidget::pageCount() const {
     return (m_document && m_document->isOpen()) ? m_document->pageCount() : 0;
+}
+
+void PdfViewerWidget::setDevicePixelRatioOverride(double dpr) {
+    m_dprOverride = dpr > 0.0 ? dpr : 0.0;
+    updateLayoutGeometry();
+}
+
+double PdfViewerWidget::effectiveDpr() const {
+    return (m_dprOverride > 0.0) ? m_dprOverride : pdf::quantizeDpr(devicePixelRatioF());
 }
 
 pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
@@ -119,29 +130,29 @@ void PdfViewerWidget::previousPage() {
 }
 
 void PdfViewerWidget::goToPage(int pageIndex) {
-    if (!m_document || pageIndex < 0 || pageIndex >= pageCount()) {
+    if (!m_document || !m_document->isOpen() || pageCount() == 0) {
         return;
     }
-    m_currentPage = pageIndex;
-    const auto& pl = m_layout.getPageLayout(pageIndex);
-    int64_t targetDocY = std::max<int64_t>(0, pl.topPixel - 16);
-
-    const double dpr = pdf::quantizeDpr(devicePixelRatioF());
-    const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
+    if (pageIndex < 0 || pageIndex >= pageCount()) {
+        return;
+    }
 
     m_navigating = true;
-    verticalScrollBar()->setValue(m_scrollMapper.docToSlider(targetDocY, m_layout.totalDocumentHeight(), vpH));
+    m_currentPage = pageIndex;
+    const auto& pl = m_layout.getPageLayout(pageIndex);
+    // Align page top to viewport top
+    setDocScrollPosition(currentDocScrollX(), pl.topPixel);
     m_navigating = false;
 
-    viewport()->update();
     Q_EMIT pageChanged(m_currentPage + 1, pageCount());
+    viewport()->update();
 }
 
 void PdfViewerWidget::setZoom(double zoom, const QPoint* anchorWidgetPos) {
     double clamped = std::clamp(zoom, 0.05, 30.0);
     double qScale = pdf::quantizeScale(clamped);
 
-    const double dpr = pdf::quantizeDpr(devicePixelRatioF());
+    const double dpr = effectiveDpr();
     const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
     const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
 
@@ -182,19 +193,27 @@ void PdfViewerWidget::zoomFitWidth() {
     if (!m_document || pageCount() == 0) {
         return;
     }
-    const double dpr = pdf::quantizeDpr(devicePixelRatioF());
+    const double dpr = effectiveDpr();
     double pagePtW = m_document->pageSizePoints(m_currentPage).first;
     if (pagePtW <= 0.0) {
         pagePtW = layout::DEFAULT_PLACEHOLDER_WIDTH_POINTS;
     }
 
-    // Reserve vertical scrollbar width to prevent subsequent horizontal scrollbar popup
-    int reservedScrollbarW = verticalScrollBar()->isVisible() ? 0 : verticalScrollBar()->sizeHint().width();
-    int availLogicalW = viewport()->width() - reservedScrollbarW - 32; // 32 = 2 * 16px horizontal margins
-    int64_t availWDevice = static_cast<int64_t>(std::round(availLogicalW * dpr));
+    // Reserve vertical scrollbar width (in logical pixels) if not already visible
+    int reservedScrollbarLogicalW = verticalScrollBar()->isVisible() ? 0 : verticalScrollBar()->sizeHint().width();
+    int availLogicalW = viewport()->width() - reservedScrollbarLogicalW;
 
-    if (availWDevice > 50) {
-        setZoom((static_cast<double>(availWDevice) / dpr) / pagePtW);
+    // Layout margin is 16 device pixels each side = 32 device pixels total.
+    // In device pixels, available width is:
+    int64_t availDeviceW = static_cast<int64_t>(std::round(availLogicalW * dpr)) - 32;
+
+    // Leave 2 device pixels of slack to guarantee scale quantization never overflows viewport width
+    availDeviceW -= 2;
+
+    if (availDeviceW > 50) {
+        double desiredScale = (static_cast<double>(availDeviceW) / dpr) / pagePtW;
+        double flooredScale = std::floor(desiredScale * 1000.0) / 1000.0;
+        setZoom(flooredScale);
     }
 }
 
@@ -202,15 +221,27 @@ void PdfViewerWidget::onScrollValueChanged() {
     if (m_navigating || !m_document || !m_document->isOpen() || pageCount() == 0) {
         return;
     }
-    const double dpr = pdf::quantizeDpr(devicePixelRatioF());
+    const double dpr = effectiveDpr();
     const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
     const int64_t scrollDocY = currentDocScrollY();
 
     auto visPages = m_layout.getVisiblePages(scrollDocY, vpH);
     if (visPages.isValid()) {
-        // If m_currentPage is outside visible range, track to topmost visible page
-        if (m_currentPage < visPages.firstVisiblePage || m_currentPage > visPages.lastVisiblePage) {
-            m_currentPage = visPages.firstVisiblePage;
+        // Track the page occupying the largest visible vertical area in the viewport
+        int bestPage = -1;
+        int64_t maxOverlap = 0;
+        for (int p = visPages.firstVisiblePage; p <= visPages.lastVisiblePage; ++p) {
+            const auto& pl = m_layout.getPageLayout(p);
+            int64_t overlapTop = std::max(scrollDocY, pl.topPixel);
+            int64_t overlapBottom = std::min(scrollDocY + vpH, pl.bottomPixel());
+            int64_t overlap = overlapBottom - overlapTop;
+            if (overlap > maxOverlap) {
+                maxOverlap = overlap;
+                bestPage = p;
+            }
+        }
+        if (bestPage >= 0 && bestPage != m_currentPage) {
+            m_currentPage = bestPage;
             Q_EMIT pageChanged(m_currentPage + 1, pageCount());
         }
     }
@@ -243,19 +274,19 @@ void PdfViewerWidget::wheelEvent(QWheelEvent* event) {
 }
 
 int64_t PdfViewerWidget::currentDocScrollX() const {
-    const double dpr = pdf::quantizeDpr(devicePixelRatioF());
+    const double dpr = effectiveDpr();
     const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
     return m_scrollMapper.sliderToDoc(horizontalScrollBar()->value(), m_layout.maxDocumentWidth(), vpW);
 }
 
 int64_t PdfViewerWidget::currentDocScrollY() const {
-    const double dpr = pdf::quantizeDpr(devicePixelRatioF());
+    const double dpr = effectiveDpr();
     const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
     return m_scrollMapper.sliderToDoc(verticalScrollBar()->value(), m_layout.totalDocumentHeight(), vpH);
 }
 
 void PdfViewerWidget::setDocScrollPosition(int64_t docX, int64_t docY) {
-    const double dpr = pdf::quantizeDpr(devicePixelRatioF());
+    const double dpr = effectiveDpr();
     const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
     const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
 
@@ -264,7 +295,7 @@ void PdfViewerWidget::setDocScrollPosition(int64_t docX, int64_t docY) {
 }
 
 void PdfViewerWidget::updateScrollBars() {
-    const double dpr = pdf::quantizeDpr(devicePixelRatioF());
+    const double dpr = effectiveDpr();
     const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
     const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
 
@@ -290,7 +321,7 @@ void PdfViewerWidget::updateLayoutGeometry() {
     if (!m_document || !m_document->isOpen() || pageCount() == 0) {
         return;
     }
-    const double dpr = pdf::quantizeDpr(devicePixelRatioF());
+    const double dpr = effectiveDpr();
     const double qScale = pdf::quantizeScale(m_scale);
     const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
     const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
@@ -325,8 +356,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
         return;
     }
 
-    const double dpr = devicePixelRatioF();
-    const double qDpr = pdf::quantizeDpr(dpr);
+    const double qDpr = effectiveDpr();
     const double qScale = pdf::quantizeScale(m_scale);
 
     const int64_t scrollDocX = currentDocScrollX();

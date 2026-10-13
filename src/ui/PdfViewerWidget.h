@@ -1,29 +1,29 @@
 #pragma once
 
-#include <QWidget>
 #include <QAbstractScrollArea>
-#include <QScrollBar>
 #include <memory>
 #include <unordered_map>
 #include "engine/IDocument.h"
+#include "engine/IPage.h"
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
 #include "cache/TileCache.h"
 
 namespace ui {
 
-/**
- * @brief High-performance Linux PDF viewer widget.
- * Subclasses QAbstractScrollArea to implement synchronous device-pixel tiled rendering,
- * continuous multi-page vertical layout, 64-bit integer mapped scrollbars,
- * 2D anchor zoom, high-DPI scaling, and error fallback rendering for unreadable pages.
- */
+// Desktop 100% zoom standard: 96 DPI / 72 DPI = 1.3333333333333333
+inline constexpr double DESKTOP_100_PERCENT_SCALE = 96.0 / 72.0;
+
 class PdfViewerWidget : public QAbstractScrollArea {
     Q_OBJECT
 
 public:
     explicit PdfViewerWidget(QWidget* parent = nullptr);
-    ~PdfViewerWidget() override = default;
+    ~PdfViewerWidget() override;
+
+    // Disallow copy/move
+    PdfViewerWidget(const PdfViewerWidget&) = delete;
+    PdfViewerWidget& operator=(const PdfViewerWidget&) = delete;
 
     pdf::DocumentError openDocument(const QString& filePath);
     void closeDocument();
@@ -35,6 +35,12 @@ public:
     const layout::DocumentLayout& layout() const { return m_layout; }
     const pdf::TileCache& cache() const { return m_cache; }
     pdf::TileCache& cache() { return m_cache; }
+
+    int64_t currentDocScrollX() const;
+    int64_t currentDocScrollY() const;
+
+    void setDevicePixelRatioOverride(double dpr);
+    double effectiveDpr() const;
 
 public Q_SLOTS:
     void nextPage();
@@ -64,8 +70,6 @@ private:
     void updateLayoutGeometry();
     void updateScrollBars();
 
-    int64_t currentDocScrollX() const;
-    int64_t currentDocScrollY() const;
     void setDocScrollPosition(int64_t docX, int64_t docY);
 
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
@@ -80,9 +84,10 @@ private:
 
     int64_t m_currentDocumentId{1};
     int m_currentPage{0};
-    double m_scale{96.0 / 72.0}; // Standard desktop 100% scale (96 DPI / 72 pt = 1.3333x)
-    int m_wheelDeltaAccumulator{0};
+    double m_scale{DESKTOP_100_PERCENT_SCALE};
+    double m_dprOverride{0.0};
     bool m_navigating{false};
+    int m_wheelDeltaAccumulator{0};
 };
 
 } // namespace ui
