@@ -17,22 +17,23 @@ bool TileCache::isFailed(const TileKey& key) const {
     return it->second.entry.isFailed;
 }
 
-const PixelBuffer* TileCache::get(const TileKey& key) {
+std::optional<PixelBuffer> TileCache::get(const TileKey& key) {
     auto it = m_cacheMap.find(key);
     if (it == m_cacheMap.end()) {
-        return nullptr;
+        return std::nullopt;
     }
 
     // Move to front of LRU list (Most Recently Used)
     m_lruList.splice(m_lruList.begin(), m_lruList, it->second.lruIter);
 
     if (it->second.entry.isFailed) {
-        return nullptr;
+        return std::nullopt;
     }
-    return &it->second.entry.buffer;
+    // Return a copy of PixelBuffer (shallow ref-counted copy via shared_ptr owner)
+    return it->second.entry.buffer;
 }
 
-void TileCache::put(const TileKey& key, PixelBuffer buffer) {
+bool TileCache::put(const TileKey& key, PixelBuffer buffer) {
     const size_t newBytes = buffer.isValid() ? (static_cast<size_t>(buffer.stride()) * buffer.height()) : 0;
 
     auto it = m_cacheMap.find(key);
@@ -56,22 +57,28 @@ void TileCache::put(const TileKey& key, PixelBuffer buffer) {
     }
 
     evictIfNeeded();
+    return contains(key);
 }
 
 void TileCache::markFailed(const TileKey& key) {
     auto it = m_cacheMap.find(key);
     if (it != m_cacheMap.end()) {
         m_currentBytes -= it->second.entry.bytesUsed;
+        m_currentBytes += TOMBSTONE_BYTE_WEIGHT;
+
         it->second.entry.buffer = PixelBuffer{};
-        it->second.entry.bytesUsed = 0;
+        it->second.entry.bytesUsed = TOMBSTONE_BYTE_WEIGHT;
         it->second.entry.isFailed = true;
 
         m_lruList.splice(m_lruList.begin(), m_lruList, it->second.lruIter);
     } else {
         m_lruList.push_front(key);
-        TileCacheEntry entry{PixelBuffer{}, 0, true};
+        TileCacheEntry entry{PixelBuffer{}, TOMBSTONE_BYTE_WEIGHT, true};
         m_cacheMap.emplace(key, MapEntry{std::move(entry), m_lruList.begin()});
+        m_currentBytes += TOMBSTONE_BYTE_WEIGHT;
     }
+
+    evictIfNeeded();
 }
 
 void TileCache::pin(const TileKey& key) {
@@ -98,6 +105,23 @@ void TileCache::clearPinned() {
 
 bool TileCache::isPinned(const TileKey& key) const {
     return m_pinnedSet.find(key) != m_pinnedSet.end();
+}
+
+void TileCache::invalidateDocument(int64_t documentId) {
+    auto it = m_lruList.begin();
+    while (it != m_lruList.end()) {
+        if (it->documentId == documentId) {
+            auto mapIt = m_cacheMap.find(*it);
+            if (mapIt != m_cacheMap.end()) {
+                m_currentBytes -= mapIt->second.entry.bytesUsed;
+                m_cacheMap.erase(mapIt);
+            }
+            m_pinnedSet.erase(*it);
+            it = m_lruList.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void TileCache::setByteBudget(size_t maxBytes) {

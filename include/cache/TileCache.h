@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <cmath>
+#include <algorithm>
+#include <optional>
 #include <vector>
 #include <list>
 #include <unordered_map>
@@ -10,6 +12,41 @@
 #include "engine/PixelBuffer.h"
 
 namespace pdf {
+
+/**
+ * @brief Fixed byte weight accounted for remembered failure tombstones.
+ * Prevents malicious or corrupt PDFs with massive page counts from exhausting memory with tombstones.
+ */
+inline constexpr size_t TOMBSTONE_BYTE_WEIGHT = 256;
+
+/**
+ * @brief Clamps and quantizes device pixel ratio to milli-units (e.g. 1.25 -> 1.25, 1.5001 -> 1.500).
+ * Prevents IEEE 754 precision wobble and ensures layout, rasterizer, and cache share the exact same grid.
+ * Clamped strictly to [0.25, 10.0] to prevent arithmetic overflow on absurd inputs.
+ */
+inline double quantizeDpr(double dpr) {
+    if (std::isnan(dpr) || std::isinf(dpr) || dpr <= 0.0) {
+        return 1.0;
+    }
+    const double clamped = std::clamp(dpr, 0.25, 10.0);
+    const int milli = static_cast<int>(std::round(clamped * 1000.0));
+    return static_cast<double>(milli) / 1000.0;
+}
+
+inline int dprToMilli(double dpr) {
+    const double q = quantizeDpr(dpr);
+    return static_cast<int>(std::round(q * 1000.0));
+}
+
+/**
+ * @brief Canonical mapping from quantized integer zoom step to floating-point display scale.
+ * Uses 1.2x geometric scaling: step 0 = 1.0 (100%), step 1 = 1.2, step -1 = 0.833, etc.
+ * Clamped to [-10, 15] (approx 0.16x to 15.4x).
+ */
+inline double zoomStepToScale(int zoomStep) {
+    const int clampedStep = std::clamp(zoomStep, -10, 15);
+    return std::pow(1.2, clampedStep);
+}
 
 /**
  * @brief Identifies a unique rendered tile across documents, pages, grids, zoom steps, and DPR.
@@ -30,7 +67,7 @@ struct TileKey {
             c,
             r,
             zStep,
-            static_cast<int>(std::round((dpr > 0.0 ? dpr : 1.0) * 1000.0))
+            dprToMilli(dpr)
         };
     }
 
@@ -70,7 +107,12 @@ struct TileCacheEntry {
  * @brief High-performance, Qt-free, PDFium-free in-memory tile cache.
  * Implements Least-Recently-Used (LRU) eviction constrained by an exact byte budget.
  * Supports pinning tiles currently visible in the viewport to guarantee they are immune to eviction.
- * Remembers rendering failures (tombstones) so corrupt or unreadable pages do not cause repeated re-render storms.
+ * Remembers rendering failures (tombstones) with bounded byte overhead so corrupt or unreadable pages
+ * do not cause repeated re-render storms.
+ *
+ * @note Thread Safety: UI Thread ONLY.
+ * This class is not thread-safe and must be accessed exclusively from the main UI thread.
+ * Background render tasks or worker threads must not access TileCache directly.
  */
 class TileCache {
 public:
@@ -95,20 +137,25 @@ public:
     bool isFailed(const TileKey& key) const;
 
     /**
-     * @brief Retrieves a pointer to the cached pixel buffer and promotes the tile to Most Recently Used.
-     * @return Pointer to PixelBuffer if found and not failed; nullptr otherwise.
+     * @brief Retrieves a copy of the cached pixel buffer and promotes the tile to Most Recently Used.
+     * Returning a value copy avoids lifetime hazards when subsequent cache operations evict the tile.
+     * @return Optional containing PixelBuffer if found and not failed; std::nullopt otherwise.
      */
-    const PixelBuffer* get(const TileKey& key);
+    std::optional<PixelBuffer> get(const TileKey& key);
 
     /**
      * @brief Inserts or updates a rendered tile in the cache, promoting it to Most Recently Used.
      * Automatically evicts unpinned tiles if the total memory exceeds the byte budget.
+     * @note To prevent visible tiles from being evicted immediately when memory is tight,
+     * callers should call pin() or setPinnedKeys() BEFORE put().
+     * @return True if the tile is retained in cache; false if evicted immediately (e.g. over budget and unpinned).
      */
-    void put(const TileKey& key, PixelBuffer buffer);
+    bool put(const TileKey& key, PixelBuffer buffer);
 
     /**
-     * @brief Marks a tile as a remembered failure (tombstone) with 0 byte weight.
+     * @brief Marks a tile as a remembered failure (tombstone) with TOMBSTONE_BYTE_WEIGHT overhead.
      * Prevents UI components from repeatedly re-requesting unrenderable tiles.
+     * Automatically evicts older unpinned tiles if over budget.
      */
     void markFailed(const TileKey& key);
 
@@ -118,7 +165,7 @@ public:
     void pin(const TileKey& key);
 
     /**
-     * @brief Unpins a single tile.
+     * @brief Unpins a single tile. Triggers eviction if cache was temporarily over budget.
      */
     void unpin(const TileKey& key);
 
@@ -139,6 +186,11 @@ public:
     bool isPinned(const TileKey& key) const;
 
     /**
+     * @brief Invalidates and evicts all tiles belonging to a specific document (e.g. on close).
+     */
+    void invalidateDocument(int64_t documentId);
+
+    /**
      * @brief Updates the maximum memory budget in bytes, evicting unpinned tiles if necessary.
      */
     void setByteBudget(size_t maxBytes);
@@ -149,7 +201,7 @@ public:
     size_t byteBudget() const noexcept { return m_maxBytesBudget; }
 
     /**
-     * @return Current memory used by cached pixel buffers in bytes.
+     * @return Current memory used by cached pixel buffers and tombstones in bytes.
      */
     size_t bytesUsed() const noexcept { return m_currentBytes; }
 
