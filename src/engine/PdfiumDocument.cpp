@@ -116,6 +116,17 @@ int PdfiumDocument::pageCount() const {
     return FPDF_GetPageCount(m_doc.get());
 }
 
+std::pair<double, double> PdfiumDocument::pageSizePoints(int pageIndex) const {
+    if (!m_doc || pageIndex < 0 || pageIndex >= pageCount()) {
+        return {0.0, 0.0};
+    }
+    FS_SIZEF size{0.0f, 0.0f};
+    if (FPDF_GetPageSizeByIndexF(m_doc.get(), pageIndex, &size)) {
+        return {static_cast<double>(size.width), static_cast<double>(size.height)};
+    }
+    return {0.0, 0.0};
+}
+
 std::unique_ptr<IPage> PdfiumDocument::getPage(int pageIndex) {
     if (!m_doc || pageIndex < 0 || pageIndex >= pageCount()) {
         return nullptr;

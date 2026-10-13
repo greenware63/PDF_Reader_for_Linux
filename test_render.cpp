@@ -8,36 +8,41 @@
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
 #include "engine/PixelBuffer.h"
+#include "layout/DocumentLayout.h"
 
 static void generateComplexPdfFixture(const std::string& path) {
     std::string contentStream;
 
-    // 1. Diagonal crossing lines
-    for (int i = 0; i < 30; ++i) {
+    // 1. Axial smooth shading gradient
+    contentStream += "q /Sh1 sh Q\n";
+
+    // 2. Diagonal crossing lines (kept below y=700 so top-left corner is clean for precision target)
+    for (int i = 0; i < 25; ++i) {
         float r = ((i * 37) % 255) / 255.0f;
         float g = ((i * 73) % 255) / 255.0f;
         float b = ((i * 109) % 255) / 255.0f;
         float lineWidth = 1.0f + (i % 5);
         contentStream += std::to_string(lineWidth) + " w " + std::to_string(r) + " " + std::to_string(g) + " " + std::to_string(b) + " RG\n";
-        contentStream += "0 " + std::to_string(i * 28) + " m 595 " + std::to_string(842 - i * 28) + " l S\n";
-        contentStream += std::to_string(i * 19) + " 0 m " + std::to_string(595 - i * 19) + " 842 l S\n";
+        contentStream += "0 " + std::to_string(i * 25) + " m 595 " + std::to_string(700 - i * 25) + " l S\n";
+        contentStream += std::to_string(i * 19) + " 0 m " + std::to_string(595 - i * 19) + " 700 l S\n";
     }
 
-    // 2. Colored rectangular regions crossing 512px boundaries
-    contentStream += "0.9 0.1 0.1 rg 50 100 500 650 re f\n";
-    contentStream += "0.1 0.8 0.2 rg 100 150 400 550 re f\n";
-    contentStream += "0.1 0.2 0.9 rg 150 200 300 450 re f\n";
-    contentStream += "0.9 0.8 0.1 rg 200 250 200 350 re f\n";
+    // 3. Colored rectangular regions crossing 512px boundaries
+    contentStream += "0.9 0.1 0.1 rg 50 100 500 550 re f\n";
+    contentStream += "0.1 0.8 0.2 rg 100 150 400 450 re f\n";
+    contentStream += "0.1 0.2 0.9 rg 150 200 300 350 re f\n";
+    contentStream += "0.9 0.8 0.1 rg 200 250 200 250 re f\n";
 
-    // 3. Clipped path crossing tile boundaries
-    contentStream += "q 120 180 350 400 re W n 0.7 0.2 0.8 rg 0 0 595 842 re f Q\n";
+    // 4. Clipped path crossing tile boundaries
+    contentStream += "q 120 180 350 350 re W n 0.7 0.2 0.8 rg 0 0 595 700 re f Q\n";
 
-    // 4. Semi-transparent overlay with ExtGState
-    contentStream += "q /GS1 gs 0.2 0.8 0.7 rg 60 220 450 350 re f Q\n";
+    // 5. Semi-transparent overlay with ExtGState
+    contentStream += "q /GS1 gs 0.2 0.8 0.7 rg 60 220 450 300 re f Q\n";
 
-    // 5. Known target shape for extreme zoom precision verification:
-    // Pure blue box at x=100, y=742 (top in PDF is 842 - (742+50) = 50 pt from top), width=50, height=50
-    contentStream += "0.0 0.0 1.0 rg 100 742 50 50 re f\n";
+    // 6. Isolated target shape for extreme zoom sub-pixel precision verification:
+    // Pure blue box at x=20, y=772, w=40, h=40 (MediaBox: 595 x 842 pt).
+    // Distance from top edge of page: 842 - (772 + 40) = 30 pt.
+    contentStream += "q 0.0 0.0 1.0 rg 20 772 40 40 re f Q\n";
 
     std::string pdf;
     pdf += "%PDF-1.4\n";
@@ -51,7 +56,11 @@ static void generateComplexPdfFixture(const std::string& path) {
 
     offsets.push_back(pdf.size());
     pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
-           "/Resources << /ExtGState << /GS1 << /Type /ExtGState /ca 0.5 /CA 0.5 >> >> >> "
+           "/Resources << "
+           "/ExtGState << /GS1 << /Type /ExtGState /ca 0.5 /CA 0.5 >> >> "
+           "/Shading << /Sh1 << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [60 150 400 450] "
+           "/Function << /FunctionType 2 /Domain [0 1] /C0 [0.8 0.1 0.2] /C1 [0.1 0.3 0.9] /N 1 >> >> >> "
+           ">> "
            "/Contents 4 0 R >>\nendobj\n";
 
     offsets.push_back(pdf.size());
@@ -279,8 +288,35 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "  -> Passed: retained page from earlier load remained safely accessible." << std::endl;
 
-    // Test 11: Complex Multi-Feature Fixture Stitching & Boundary vs Interior Seam Analysis
-    std::cout << "[TEST 11] Testing Tile Stitching on Complex Fixture (Vectors, Fills, Clips, Alpha)..." << std::endl;
+    // Test 11: Cross-Checking IDocument::pageSizePoints Against Layout & Engine
+    std::cout << "[TEST 11] Testing IDocument::pageSizePoints cross-check with DocumentLayout and Engine..." << std::endl;
+    auto sizePoints = doc->pageSizePoints(0);
+    if (std::abs(sizePoints.first - w) > 0.01 || std::abs(sizePoints.second - h) > 0.01) {
+        std::cerr << "[FAIL] pageSizePoints (" << sizePoints.first << "x" << sizePoints.second 
+                  << ") does not match loaded page (" << w << "x" << h << ")" << std::endl;
+        return 1;
+    }
+
+    layout::DocumentLayout docLayout;
+    docLayout.setPageSizes({sizePoints});
+    const double layoutScale = 1.333333;
+    const double layoutDpr = 1.75;
+    docLayout.updateLayout(layoutScale, layoutDpr, 1024, 16, 16);
+
+    int enginePixelW = 0, enginePixelH = 0;
+    page->getPixelDimensions(layoutScale, layoutDpr, enginePixelW, enginePixelH);
+
+    const auto& layoutPage0 = docLayout.getPageLayout(0);
+    if (layoutPage0.widthPixel != enginePixelW || layoutPage0.heightPixel != enginePixelH) {
+        std::cerr << "[FAIL] Layout dimensions (" << layoutPage0.widthPixel << "x" << layoutPage0.heightPixel
+                  << ") do not match Engine getPixelDimensions (" << enginePixelW << "x" << enginePixelH << ")" << std::endl;
+        return 1;
+    }
+    std::cout << "  -> Passed: IDocument::pageSizePoints feeds DocumentLayout and agrees with Engine to exact pixel ("
+              << enginePixelW << " x " << enginePixelH << " px)." << std::endl;
+
+    // Test 12: Complex Multi-Feature Fixture Stitching & Grid-Shift Analysis
+    std::cout << "[TEST 12] Testing Tile Stitching on Complex Fixture (Gradients, Clips, Alpha, Crossing Vectors)..." << std::endl;
     std::string complexPdfPath = "complex_seam_test.pdf";
     generateComplexPdfFixture(complexPdfPath);
 
@@ -315,7 +351,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Render 512x512 tile grid cutting across vector strokes, clips, and transparent fills
+    // Render 512x512 tile grid
     constexpr int TILE_SIZE = 512;
     int tileCount = 0;
     for (int y = 0; y < fullH; y += TILE_SIZE) {
@@ -336,9 +372,9 @@ int main(int argc, char* argv[]) {
             ++tileCount;
         }
     }
-    std::cout << "  -> Stitched " << tileCount << " tiles across vectors, clips, and transparency." << std::endl;
+    std::cout << "  -> Stitched " << tileCount << " standard tiles across gradients, clips, vectors." << std::endl;
 
-    // Strict pixel-by-pixel byte comparison categorizing Boundary vs Interior differences
+    // Categorize boundary vs interior differences
     int totalDiffBytes = 0;
     int boundaryDiffBytes = 0;
     int interiorDiffBytes = 0;
@@ -369,72 +405,132 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    std::cout << "  [DIAGNOSTIC] Total differing bytes: " << totalDiffBytes 
-              << " / " << (fullW * fullH * 4) << " (" 
-              << (totalDiffBytes * 100.0 / (fullW * fullH * 4)) << "%)\n"
-              << "               Boundary diffs: " << boundaryDiffBytes << " bytes\n"
-              << "               Interior diffs: " << interiorDiffBytes << " bytes\n"
-              << "               Max byte delta: " << maxDiff << " / 255" << std::endl;
+    std::cout << "  [STANDARD GRID DIAGNOSTIC]\n"
+              << "     Total differing bytes: " << totalDiffBytes << " / " << (fullW * fullH * 4) 
+              << " (" << (totalDiffBytes * 100.0 / (fullW * fullH * 4)) << "%)\n"
+              << "     Boundary diffs: " << boundaryDiffBytes << " bytes\n"
+              << "     Interior diffs: " << interiorDiffBytes << " bytes\n"
+              << "     Max byte delta: " << maxDiff << " / 255" << std::endl;
 
     if (maxDiff > 3) {
-        std::cerr << "[FAIL] Tile seam detected! Differing pixels have visible delta: " << maxDiff << std::endl;
+        std::cerr << "[FAIL] Visible seam detected on standard grid! Delta: " << maxDiff << std::endl;
         return 1;
     }
-    std::cout << "  -> Passed: Seam tolerance verified (max delta " << maxDiff << "/255)." << std::endl;
 
-    // Test 12: Extreme Zoom Sub-Pixel Precision Verification (15x zoom * 2x DPR = 30x scale)
-    std::cout << "[TEST 12] Testing Tile Rendering and Sub-Pixel Precision at Extreme Zoom (17,850 x 25,260 px)..." << std::endl;
+    // Grid-Shift Test: Render again with grid shifted by 37px
+    std::cout << "  -> Running 37px shifted grid test to verify noise does not follow tile seams..." << std::endl;
+    constexpr int SHIFT = 37;
+    pdf::PixelBuffer shiftedStitchedBuf = pdf::PixelBuffer::allocate(fullW, fullH);
+    for (int y = 0; y < fullH; ) {
+        int th = (y == 0) ? SHIFT : std::min(TILE_SIZE, fullH - y);
+        for (int x = 0; x < fullW; ) {
+            int tw = (x == 0) ? SHIFT : std::min(TILE_SIZE, fullW - x);
+            pdf::PixelBuffer tile = complexPage->renderTile({x, y, tw, th}, testScale, testDpr);
+            if (tile.isValid()) {
+                for (int r = 0; r < th; ++r) {
+                    const uint8_t* srcRow = tile.data() + r * tile.stride();
+                    uint8_t* dstRow = shiftedStitchedBuf.data() + (y + r) * shiftedStitchedBuf.stride() + x * 4;
+                    std::memcpy(dstRow, srcRow, tw * 4);
+                }
+            }
+            x += tw;
+        }
+        y += th;
+    }
+
+    int shiftedDiffBytes = 0;
+    int shiftedMaxDiff = 0;
+    for (int y = 0; y < fullH; ++y) {
+        const uint8_t* fullRow = fullPageBuf.data() + y * fullPageBuf.stride();
+        const uint8_t* stitchRow = shiftedStitchedBuf.data() + y * shiftedStitchedBuf.stride();
+        for (int b = 0; b < fullW * 4; ++b) {
+            int d = std::abs(static_cast<int>(fullRow[b]) - static_cast<int>(stitchRow[b]));
+            if (d > 0) {
+                ++shiftedDiffBytes;
+                if (d > shiftedMaxDiff) shiftedMaxDiff = d;
+            }
+        }
+    }
+    std::cout << "  [SHIFTED GRID DIAGNOSTIC]\n"
+              << "     Total differing bytes: " << shiftedDiffBytes << ", Max delta: " << shiftedMaxDiff << " / 255" << std::endl;
+    if (shiftedMaxDiff > 3) {
+        std::cerr << "[FAIL] Visible seam detected on shifted grid! Delta: " << shiftedMaxDiff << std::endl;
+        return 1;
+    }
+    std::cout << "  -> Passed: Seam tolerance verified across standard and shifted grids (max delta " 
+              << std::max(maxDiff, shiftedMaxDiff) << " / 255)." << std::endl;
+
+    // Test 13: Extreme Zoom Sub-Pixel Straddle Precision Test (15x zoom * 2x DPR = 30x scale)
+    std::cout << "[TEST 13] Testing Sub-Pixel Edge Straddling at Extreme Zoom (17,850 x 25,260 px)..." << std::endl;
     constexpr double EXTREME_ZOOM = 15.0;
     constexpr double EXTREME_DPR = 2.0; // Total 30.0x scale
     int extremeW = 0, extremeH = 0;
     complexPage->getPixelDimensions(EXTREME_ZOOM, EXTREME_DPR, extremeW, extremeH);
     std::cout << "  -> Unconstrained page raster dimensions: " << extremeW << " x " << extremeH << " px (~450 MP)" << std::endl;
 
-    // In the fixture, pure blue rectangle is placed at:
-    // x = 100 pt, y = 742 pt, w = 50 pt, h = 50 pt (MediaBox: 595 x 842 pt)
-    // Distance from top of page = 842 - (742 + 50) = 50 pt
+    // Target rectangle in fixture: x=20 pt, y=772 pt, w=40 pt, h=40 pt (MediaBox: 595 x 842 pt).
+    // Distance from top edge: 842 - (772 + 40) = 30 pt.
     // At 30x scale:
-    // Left edge = round(100 * 30) = 3000 px
-    // Top edge = round(50 * 30) = 1500 px
-    // Right edge = round(150 * 30) = 4500 px
-    // Bottom edge = round(100 * 30) = 3000 px
-    int targetLeft = static_cast<int>(std::round(100.0 * EXTREME_ZOOM * EXTREME_DPR));
-    int targetTop = static_cast<int>(std::round(50.0 * EXTREME_ZOOM * EXTREME_DPR));
+    // targetLeft = round(20 * 30) = 600 px
+    // targetTop  = round(30 * 30) = 900 px
+    int targetLeft = static_cast<int>(std::round(20.0 * EXTREME_ZOOM * EXTREME_DPR));
+    int targetTop  = static_cast<int>(std::round(30.0 * EXTREME_ZOOM * EXTREME_DPR));
 
-    // Request a 512x512 tile whose origin starts 10px inside the rectangle: (targetLeft + 10, targetTop + 10)
-    pdf::PixelBuffer interiorTile = complexPage->renderTile({targetLeft + 10, targetTop + 10, 512, 512}, EXTREME_ZOOM, EXTREME_DPR);
-    if (!interiorTile.isValid() || interiorTile.width() != 512 || interiorTile.height() != 512) {
-        std::cerr << "[FAIL] Failed to render tile at extreme zoom inside known shape" << std::endl;
-        return 1;
-    }
-
-    // Interior pixels of the blue rectangle should have high blue component and 0 red component
-    const uint32_t* insidePixel = reinterpret_cast<const uint32_t*>(interiorTile.data());
-    uint8_t blueComp = static_cast<uint8_t>(insidePixel[0] & 0xFF);
-    uint8_t redComp = static_cast<uint8_t>((insidePixel[0] >> 16) & 0xFF);
-    if (blueComp < 200 || redComp > 20) {
-        std::cerr << "[FAIL] Extreme zoom coordinate precision failed! Expected blue pixel at ("
-                  << (targetLeft + 10) << ", " << (targetTop + 10) << "), got B=" 
-                  << static_cast<int>(blueComp) << " R=" << static_cast<int>(redComp) << std::endl;
+    // 13a. Left Edge Straddle Tile: [targetLeft - 50, targetTop + 10, width=100, height=20]
+    // The left edge of the rectangle must sit at local tile column x = 50!
+    pdf::PixelBuffer leftTile = complexPage->renderTile({targetLeft - 50, targetTop + 10, 100, 20}, EXTREME_ZOOM, EXTREME_DPR);
+    if (!leftTile.isValid() || leftTile.width() != 100 || leftTile.height() != 20) {
+        std::cerr << "[FAIL] Failed to render left straddle tile at extreme zoom" << std::endl;
         return 1;
     }
 
-    // Now request a tile 100px outside the rectangle: (targetLeft - 100, targetTop - 100, 50, 50)
-    pdf::PixelBuffer outsideTile = complexPage->renderTile({targetLeft - 100, targetTop - 100, 50, 50}, EXTREME_ZOOM, EXTREME_DPR);
-    if (!outsideTile.isValid()) {
-        std::cerr << "[FAIL] Failed to render outside tile at extreme zoom" << std::endl;
+    // Find first blue pixel in row 10 of left straddle tile
+    const uint32_t* leftRow10 = reinterpret_cast<const uint32_t*>(leftTile.data() + 10 * leftTile.stride());
+    int firstBlueCol = -1;
+    for (int col = 0; col < 100; ++col) {
+        uint8_t blue = static_cast<uint8_t>(leftRow10[col] & 0xFF);
+        uint8_t red = static_cast<uint8_t>((leftRow10[col] >> 16) & 0xFF);
+        if (blue > 200 && red < 30) {
+            firstBlueCol = col;
+            break;
+        }
+    }
+    if (firstBlueCol < 0 || std::abs(firstBlueCol - 50) > 1) {
+        std::cerr << "[FAIL] Left edge placement drifted at extreme zoom! Expected col 50 (±1), found: " 
+                  << firstBlueCol << std::endl;
         return 1;
     }
-    const uint32_t* outsidePixel = reinterpret_cast<const uint32_t*>(outsideTile.data());
-    // Should be white (0x00FFFFFF)
-    if ((outsidePixel[0] & 0x00FFFFFF) != 0x00FFFFFF) {
-        std::cerr << "[FAIL] Expected white background outside known shape at extreme zoom" << std::endl;
+    std::cout << "  -> Left edge boundary verified at local col " << firstBlueCol << " (target: 50, error: " 
+              << std::abs(firstBlueCol - 50) << " px)." << std::endl;
+
+    // 13b. Top Edge Straddle Tile: [targetLeft + 10, targetTop - 50, width=20, height=100]
+    // The top edge of the rectangle must sit at local tile row y = 50!
+    pdf::PixelBuffer topTile = complexPage->renderTile({targetLeft + 10, targetTop - 50, 20, 100}, EXTREME_ZOOM, EXTREME_DPR);
+    if (!topTile.isValid() || topTile.width() != 20 || topTile.height() != 100) {
+        std::cerr << "[FAIL] Failed to render top straddle tile at extreme zoom" << std::endl;
         return 1;
     }
-    std::cout << "  -> Passed: PDFium rendered tiles at 17,850 x 25,260 px with precise sub-pixel alignment." << std::endl;
+
+    int firstBlueRow = -1;
+    for (int row = 0; row < 100; ++row) {
+        const uint32_t* topRow = reinterpret_cast<const uint32_t*>(topTile.data() + row * topTile.stride());
+        uint8_t blue = static_cast<uint8_t>(topRow[10] & 0xFF);
+        uint8_t red = static_cast<uint8_t>((topRow[10] >> 16) & 0xFF);
+        if (blue > 200 && red < 30) {
+            firstBlueRow = row;
+            break;
+        }
+    }
+    if (firstBlueRow < 0 || std::abs(firstBlueRow - 50) > 1) {
+        std::cerr << "[FAIL] Top edge placement drifted at extreme zoom! Expected row 50 (±1), found: " 
+                  << firstBlueRow << std::endl;
+        return 1;
+    }
+    std::cout << "  -> Top edge boundary verified at local row " << firstBlueRow << " (target: 50, error: " 
+              << std::abs(firstBlueRow - 50) << " px)." << std::endl;
 
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 12 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 13 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

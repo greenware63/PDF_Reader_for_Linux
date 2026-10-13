@@ -11,19 +11,43 @@ namespace layout {
 /**
  * @brief Canonical page pixel dimension calculation shared between layout and engine.
  * Ensures the layout grid and tile renderer agree on pixel sizes to the exact pixel.
+ * Hardened against non-positive dimensions, NaNs, infinities, and massive MediaBoxes.
  */
 inline void computePagePixelDimensions(double widthPoints, double heightPoints,
                                        double scale, double dpr,
                                        int& outPixelW, int& outPixelH) {
-    if (widthPoints <= 0.0 || heightPoints <= 0.0) {
+    // Sane upper limit per dimension (~13 meters wide at 96 DPI) to prevent integer overflow
+    constexpr int MAX_SAFE_PIXEL_DIM = 500000;
+
+    if (!(widthPoints > 0.0) || !(heightPoints > 0.0) ||
+        std::isnan(widthPoints) || std::isnan(heightPoints) ||
+        std::isinf(widthPoints) || std::isinf(heightPoints)) {
         outPixelW = 0;
         outPixelH = 0;
         return;
     }
-    const double effDpr = (dpr > 0.0) ? dpr : 1.0;
-    const double s = (scale > 0.0) ? scale : 1.0;
-    outPixelW = std::max(1, static_cast<int>(std::round(widthPoints * s * effDpr)));
-    outPixelH = std::max(1, static_cast<int>(std::round(heightPoints * s * effDpr)));
+
+    const double effDpr = (dpr > 0.0 && !std::isnan(dpr) && !std::isinf(dpr)) ? dpr : 1.0;
+    const double s = (scale > 0.0 && !std::isnan(scale) && !std::isinf(scale)) ? scale : 1.0;
+
+    double rawW = std::round(widthPoints * s * effDpr);
+    double rawH = std::round(heightPoints * s * effDpr);
+
+    if (std::isnan(rawW) || !(rawW > 0.0)) {
+        outPixelW = 1;
+    } else if (rawW > MAX_SAFE_PIXEL_DIM) {
+        outPixelW = MAX_SAFE_PIXEL_DIM;
+    } else {
+        outPixelW = static_cast<int>(rawW);
+    }
+
+    if (std::isnan(rawH) || !(rawH > 0.0)) {
+        outPixelH = 1;
+    } else if (rawH > MAX_SAFE_PIXEL_DIM) {
+        outPixelH = MAX_SAFE_PIXEL_DIM;
+    } else {
+        outPixelH = static_cast<int>(rawH);
+    }
 }
 
 struct Rect64 {
@@ -57,6 +81,11 @@ struct ViewportRange {
     bool isValid() const { return firstVisiblePage >= 0 && lastVisiblePage >= firstVisiblePage; }
 };
 
+/**
+ * @brief Scroll anchor representing normalized coordinates inside a page.
+ * Note: Normalized coordinates clamp to [0.0, 1.0], meaning cursors hovering in
+ * horizontal or vertical page margins snap to the nearest page border.
+ */
 struct ScrollAnchor {
     int pageIndex{-1};
     double normalizedX{0.0}; // Fraction [0.0, 1.0] across page width

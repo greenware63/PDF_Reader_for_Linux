@@ -41,7 +41,7 @@ A high-performance, native PDF workstation for Linux designed with an Adobe Pro-
 ├── LICENSE                      # MIT License
 ├── main.cpp                     # Application entry point
 ├── sample.pdf                   # Reference PDF for validation
-├── test_render.cpp              # Automated 12-part engine & tile CTest test suite
+├── test_render.cpp              # Automated 13-part engine & tile CTest test suite
 └── test_layout.cpp              # Automated 8-part layout & property CTest test suite
 ```
 
@@ -65,7 +65,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-#### Engine Test Suite (`EngineRenderTestSuite` - 12 Tests):
+#### Engine Test Suite (`EngineRenderTestSuite` - 13 Tests):
 1. Missing file handling (`DocumentError::FileNotFound`)
 2. Null/empty memory buffer rejection
 3. Garbage memory buffer rejection (`DocumentError::InvalidFormat`)
@@ -76,17 +76,18 @@ ctest --test-dir build --output-on-failure
 8. In-memory document buffer lifetime preservation across `doc->close()`
 9. Size cap enforcement (8192 px / 16 MP whole-page clamp, 4096 px / 16 MP tile rejection)
 10. Document reload while retaining prior page handle references
-11. Complex multi-feature fixture tile stitching & seam diagnostic analysis (vectors, clips, alpha transparency; verifies 0 visible seams and separates boundary vs. interior anti-aliasing delta)
-12. Extreme zoom sub-pixel coordinate precision (15× zoom × 2× DPR = 17,850 × 25,260 px, ~450 MP virtual space)
+11. `IDocument::pageSizePoints` cross-check against layout and engine dimensions to exact pixel
+12. Complex multi-feature fixture tile stitching & 37px grid-shift analysis (axial gradients, clips, alpha transparency; verifies 0 visible seams across standard and shifted grids)
+13. Extreme zoom sub-pixel edge straddling (15× zoom × 2× DPR = 17,850 × 25,260 px, ~450 MP virtual space; edge transition verified at exact local pixel)
 
 #### Document Layout Test Suite (`DocumentLayoutTestSuite` - 8 Tests):
 1. Empty document zero-state validation
-2. Canonical `computePagePixelDimensions()` agreement between layout and engine
-3. Mixed portrait & landscape page monotonicity, margins, and horizontal centering
+2. Untrusted dimension hardening (rejects NaN, Inf, negatives; clamps 1e9 pt MediaBox without overflow)
+3. Horizontal centering relative to scrollable content width in both narrow and wide viewports
 4. Boundary edge cases (above document, below document, inside page gaps, exact page edges)
 5. Property test: 1,000 random viewport queries cross-checked against linear brute-force scan
-6. Qt-free visible tile enumeration (`getVisibleTiles()`)
-7. 2D cursor zoom anchor pinning across zoom updates
+6. Visible tile partition & coverage invariant across random viewports
+7. Physical page coordinate pinning (PDF points under cursor preserved across zoom)
 8. 64-bit coordinate verification exceeding $2^{31}$ (4.21 billion pixels without integer overflow)
 
 ## Continuous Integration

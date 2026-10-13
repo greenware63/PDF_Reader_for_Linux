@@ -32,28 +32,27 @@ void DocumentLayout::updateLayout(double scale, double dpr, int64_t viewportWidt
         return;
     }
 
-    int64_t currentTop = m_pageGap;
-
+    // First pass: compute device pixel dimensions for each page and find the widest page
+    int64_t widestPage = 0;
     for (auto& page : m_pages) {
         int w = 0, h = 0;
-        // Single canonical calculation shared across layout and engine
         computePagePixelDimensions(page.widthPoints, page.heightPoints, m_scale, m_dpr, w, h);
         page.widthPixel = w;
         page.heightPixel = h;
+        if (page.widthPixel > widestPage) {
+            widestPage = page.widthPixel;
+        }
+    }
+
+    // Scrollable content width is at least the viewport, or wide enough to fit the widest page with margins
+    int64_t contentWidth = std::max(m_viewportWidth, widestPage + (2 * m_horizontalMargin));
+    m_maxWidth = contentWidth;
+
+    // Second pass: position all pages centered within contentWidth
+    int64_t currentTop = m_pageGap;
+    for (auto& page : m_pages) {
         page.topPixel = currentTop;
-
-        // Horizontally center pages narrower than the viewport
-        if (m_viewportWidth > page.widthPixel + (2 * m_horizontalMargin)) {
-            page.leftPixel = (m_viewportWidth - page.widthPixel) / 2;
-        } else {
-            page.leftPixel = m_horizontalMargin;
-        }
-
-        int64_t pageRightExtent = page.leftPixel + page.widthPixel + m_horizontalMargin;
-        if (pageRightExtent > m_maxWidth) {
-            m_maxWidth = pageRightExtent;
-        }
-
+        page.leftPixel = (contentWidth - page.widthPixel) / 2;
         currentTop += page.heightPixel + m_pageGap;
     }
 

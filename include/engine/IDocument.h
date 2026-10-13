@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <cstdint>
+#include <utility>
 
 namespace pdf {
 
@@ -49,6 +50,13 @@ public:
      * @return Total number of pages in the document.
      */
     virtual int pageCount() const = 0;
+
+    /**
+     * @brief Queries page dimensions in PDF points without fully loading/rasterizing the page.
+     * @param pageIndex 0-based page index.
+     * @return std::pair of {widthPoints, heightPoints}, or {0.0, 0.0} on failure.
+     */
+    virtual std::pair<double, double> pageSizePoints(int pageIndex) const = 0;
 
     /**
      * @brief Loads and returns a page object. Keeps document alive via shared ownership.

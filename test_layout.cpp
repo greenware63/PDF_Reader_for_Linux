@@ -2,6 +2,7 @@
 #include <vector>
 #include <cmath>
 #include <random>
+#include <limits>
 #include "layout/DocumentLayout.h"
 
 // Reference linear scan to verify binary search correctness across 1,000 random queries
@@ -48,73 +49,98 @@ int main() {
     }
     std::cout << "  -> Passed: Empty document returns valid zero-state." << std::endl;
 
-    // Test 2: Shared Pixel-Dimension Canonical Formula Agreement
-    std::cout << "[TEST 2] Testing canonical pixel dimension agreement..." << std::endl;
-    const double testWPoints = 595.0;
-    const double testHPoints = 842.0;
-    const double testScale = 1.333333;
-    const double testDpr = 1.75;
-    int canonicalW = 0, canonicalH = 0;
-    layout::computePagePixelDimensions(testWPoints, testHPoints, testScale, testDpr, canonicalW, canonicalH);
-
-    layout::DocumentLayout singleLayout;
-    singleLayout.setPageSizes({{testWPoints, testHPoints}});
-    singleLayout.updateLayout(testScale, testDpr, 1000, 10, 10);
-    const auto& singlePage = singleLayout.getPageLayout(0);
-    if (singlePage.widthPixel != canonicalW || singlePage.heightPixel != canonicalH) {
-        std::cerr << "[FAIL] Layout dimensions do not match computePagePixelDimensions: "
-                  << singlePage.widthPixel << "x" << singlePage.heightPixel 
-                  << " vs " << canonicalW << "x" << canonicalH << std::endl;
+    // Test 2: Untrusted Dimension Hardening (NaN, Inf, Negatives, Massive MediaBox)
+    std::cout << "[TEST 2] Testing dimension hardening against untrusted PDF MediaBox values..." << std::endl;
+    int w = -1, h = -1;
+    // 2a. NaN
+    layout::computePagePixelDimensions(std::numeric_limits<double>::quiet_NaN(), 842.0, 1.0, 1.0, w, h);
+    if (w != 0 || h != 0) {
+        std::cerr << "[FAIL] computePagePixelDimensions failed to reject NaN width: got " << w << "x" << h << std::endl;
         return 1;
     }
-    std::cout << "  -> Passed: Canonical computePagePixelDimensions agrees with DocumentLayout." << std::endl;
+    // 2b. Infinity
+    layout::computePagePixelDimensions(595.0, std::numeric_limits<double>::infinity(), 1.0, 1.0, w, h);
+    if (w != 0 || h != 0) {
+        std::cerr << "[FAIL] computePagePixelDimensions failed to reject Infinity height: got " << w << "x" << h << std::endl;
+        return 1;
+    }
+    // 2c. Negative and Zero
+    layout::computePagePixelDimensions(-100.0, 500.0, 1.0, 1.0, w, h);
+    if (w != 0 || h != 0) {
+        std::cerr << "[FAIL] computePagePixelDimensions failed to reject negative width" << std::endl;
+        return 1;
+    }
+    // 2d. Astronomical MediaBox (1e9 pt -> must clamp to MAX_SAFE_PIXEL_DIM without overflow)
+    layout::computePagePixelDimensions(1e9, 1e9, 2.0, 2.0, w, h);
+    if (w != 500000 || h != 500000) {
+        std::cerr << "[FAIL] computePagePixelDimensions failed to safely clamp 1e9 pt: got " << w << "x" << h << std::endl;
+        return 1;
+    }
+    std::cout << "  -> Passed: Robust against NaN, Inf, negative, and astronomical MediaBoxes." << std::endl;
 
-    // Test 3: Mixed Portrait & Landscape Monotonicity and Centering
-    std::cout << "[TEST 3] Testing mixed portrait & landscape pages with horizontal centering..." << std::endl;
+    // Test 3: Horizontal Centering against Scrollable Content Width
+    std::cout << "[TEST 3] Testing horizontal centering in wide and narrow viewports..." << std::endl;
     layout::DocumentLayout layout;
-    std::vector<std::pair<double, double>> pages = {
+    std::vector<std::pair<double, double>> mixedPages = {
         {595.0, 842.0},  // Portrait A4
-        {842.0, 595.0},  // Landscape A4
+        {842.0, 595.0},  // Landscape A4 (wider!)
         {612.0, 792.0},  // US Letter
         {792.0, 612.0},  // US Letter Landscape
-        {595.0, 842.0},
-        {595.0, 842.0},
-        {842.0, 595.0},
-        {595.0, 842.0},
-        {595.0, 842.0},
         {595.0, 842.0}
     };
-    layout.setPageSizes(pages);
-    layout.updateLayout(1.25, 1.5, 1920, 30, 20); // 30px gap, 20px margin, centered in 1920px viewport
+    layout.setPageSizes(mixedPages);
 
-    if (layout.pageCount() != 10) {
-        std::cerr << "[FAIL] Expected 10 pages, got: " << layout.pageCount() << std::endl;
+    // Case 3a: Narrow viewport (viewport narrower than the landscape page)
+    const int64_t narrowVpW = 800;
+    const int64_t margin = 20;
+    layout.updateLayout(1.0, 1.0, narrowVpW, 30, margin);
+
+    // Widest page is page 1 (842 px). Content width must be 842 + 2 * 20 = 882 px
+    int64_t expectedContentW = 842 + 2 * margin;
+    if (layout.maxDocumentWidth() != expectedContentW) {
+        std::cerr << "[FAIL] maxDocumentWidth was " << layout.maxDocumentWidth() 
+                  << ", expected " << expectedContentW << std::endl;
         return 1;
     }
 
-    for (int i = 0; i < 9; ++i) {
-        const auto& p0 = layout.getPageLayout(i);
-        const auto& p1 = layout.getPageLayout(i + 1);
-        if (p0.bottomPixel() >= p1.topPixel) {
-            std::cerr << "[FAIL] Pages overlap or non-monotonic at index " << i << std::endl;
+    // Every page must be centered relative to expectedContentW:
+    // Its center X must be expectedContentW / 2!
+    for (int i = 0; i < layout.pageCount(); ++i) {
+        const auto& p = layout.getPageLayout(i);
+        int64_t centerX = p.leftPixel + (p.widthPixel / 2);
+        int64_t expectedCenter = expectedContentW / 2;
+        if (std::abs(centerX - expectedCenter) > 1) {
+            std::cerr << "[FAIL] Page " << i << " center X drifted: " << centerX 
+                      << " vs expected " << expectedCenter << std::endl;
             return 1;
         }
-        if (p0.leftPixel < 20) {
-            std::cerr << "[FAIL] Page " << i << " violated minimum margin" << std::endl;
-            return 1;
-        }
-        // Verify horizontal centering in 1920px viewport
-        int64_t expectedLeft = (1920 - p0.widthPixel) / 2;
-        if (p0.leftPixel != expectedLeft) {
-            std::cerr << "[FAIL] Page " << i << " not horizontally centered: got "
-                      << p0.leftPixel << ", expected " << expectedLeft << std::endl;
+        if (p.leftPixel < margin) {
+            std::cerr << "[FAIL] Page " << i << " leftPixel violated margin in narrow viewport: " 
+                      << p.leftPixel << std::endl;
             return 1;
         }
     }
-    std::cout << "  -> Passed: Monotonic offsets, margins, and centering verified." << std::endl;
+
+    // Case 3b: Wide viewport (viewport wider than all pages)
+    const int64_t wideVpW = 2000;
+    layout.updateLayout(1.0, 1.0, wideVpW, 30, margin);
+    if (layout.maxDocumentWidth() != wideVpW) {
+        std::cerr << "[FAIL] maxDocumentWidth in wide viewport was " << layout.maxDocumentWidth()
+                  << ", expected " << wideVpW << std::endl;
+        return 1;
+    }
+    for (int i = 0; i < layout.pageCount(); ++i) {
+        const auto& p = layout.getPageLayout(i);
+        int64_t centerX = p.leftPixel + (p.widthPixel / 2);
+        if (std::abs(centerX - (wideVpW / 2)) > 1) {
+            std::cerr << "[FAIL] Page " << i << " not centered in wide viewport" << std::endl;
+            return 1;
+        }
+    }
+    std::cout << "  -> Passed: All pages vertically aligned and centered in both narrow and wide viewports." << std::endl;
 
     // Test 4: Boundary Edge Cases (Above, Below, Gap, and Exact Edges)
-    std::cout << "[TEST 4] Testing boundary edge cases (gaps, above, below, exact edges)...\"" << std::endl;
+    std::cout << "[TEST 4] Testing boundary edge cases (gaps, above, below, exact edges)..." << std::endl;
     // 4a. Viewport entirely above first page
     auto rangeAbove = layout.getVisiblePages(-500, 400);
     if (rangeAbove.isValid()) {
@@ -133,7 +159,7 @@ int main() {
     }
 
     // 4c. Viewport entirely below last page
-    int64_t belowTop = layout.getPageLayout(9).bottomPixel() + 100;
+    int64_t belowTop = layout.getPageLayout(4).bottomPixel() + 100;
     auto rangeBelow = layout.getVisiblePages(belowTop, 500);
     if (rangeBelow.isValid()) {
         std::cerr << "[FAIL] Expected invalid range below last page" << std::endl;
@@ -179,49 +205,114 @@ int main() {
     }
     std::cout << "  -> Passed: 1,000 / 1,000 random queries matched brute force exactly." << std::endl;
 
-    // Test 6: Visible Tile Enumeration (Qt-free)
-    std::cout << "[TEST 6] Testing Qt-free visible tile enumeration..." << std::endl;
-    layout::Rect64 viewportRect{300, 200, 800, 1000};
-    auto tiles = layout.getVisibleTiles(viewportRect, 512);
-    if (tiles.empty()) {
-        std::cerr << "[FAIL] Expected visible tiles, got 0" << std::endl;
-        return 1;
-    }
-    std::cout << "  -> Generated " << tiles.size() << " visible tiles." << std::endl;
-    for (const auto& t : tiles) {
-        if (t.tileWidth <= 0 || t.tileWidth > 512 || t.tileHeight <= 0 || t.tileHeight > 512) {
-            std::cerr << "[FAIL] Invalid tile dimension: " << t.tileWidth << " x " << t.tileHeight << std::endl;
-            return 1;
-        }
-        if (t.docX < 0 || t.docY < 0) {
-            std::cerr << "[FAIL] Invalid document coordinates on tile" << std::endl;
-            return 1;
-        }
-    }
-    std::cout << "  -> Passed: Tile grid enumeration verified." << std::endl;
+    // Test 6: Visible Tile Partition and Coverage Invariant
+    std::cout << "[TEST 6] Testing visible tile partition & coverage invariant across random viewports..." << std::endl;
+    std::uniform_int_distribution<int64_t> distVpX(-50, layout.maxDocumentWidth() + 50);
+    std::uniform_int_distribution<int64_t> distVpY(-50, layout.totalDocumentHeight() + 50);
+    std::uniform_int_distribution<int64_t> distVpW(200, 1500);
+    std::uniform_int_distribution<int64_t> distVpH(200, 1500);
 
-    // Test 7: 2D Scroll Anchoring across Zoom
-    std::cout << "[TEST 7] Testing 2D scroll anchor pinning across zoom..." << std::endl;
-    int64_t cursorDocX = layout.getPageLayout(3).leftPixel + 200;
-    int64_t cursorDocY = layout.getPageLayout(3).topPixel + 300;
-    auto anchor2D = layout.createAnchor(cursorDocX, cursorDocY);
-    if (anchor2D.pageIndex != 3) {
-        std::cerr << "[FAIL] Anchor missed page 3" << std::endl;
+    for (int trial = 0; trial < 50; ++trial) {
+        layout::Rect64 vp{distVpX(rng), distVpY(rng), distVpW(rng), distVpH(rng)};
+        auto tiles = layout.getVisibleTiles(vp, 512);
+
+        // Invariant A: Every tile must be clipped at page boundary
+        for (const auto& t : tiles) {
+            const auto& page = layout.getPageLayout(t.pageIndex);
+            if (t.tileXOnPage + t.tileWidth > page.widthPixel ||
+                t.tileYOnPage + t.tileHeight > page.heightPixel) {
+                std::cerr << "[FAIL] Tile exceeded page pixel bounds at page " << t.pageIndex << std::endl;
+                return 1;
+            }
+        }
+
+        // Invariant B: Partition property - each point in viewport ∩ page must fall in EXACTLY 1 tile
+        auto range = layout.getVisiblePages(vp.y, vp.height);
+        if (range.isValid()) {
+            for (int pIdx = range.firstVisiblePage; pIdx <= range.lastVisiblePage; ++pIdx) {
+                const auto& page = layout.getPageLayout(pIdx);
+                int64_t interX0 = std::max(vp.x, page.leftPixel);
+                int64_t interY0 = std::max(vp.y, page.topPixel);
+                int64_t interX1 = std::min(vp.right(), page.rightPixel());
+                int64_t interY1 = std::min(vp.bottom(), page.bottomPixel());
+
+                if (interX1 > interX0 && interY1 > interY0) {
+                    // Sample 5 test points in this intersection
+                    for (int s = 0; s < 5; ++s) {
+                        int64_t sampleX = interX0 + ((interX1 - interX0) * (s + 1)) / 7;
+                        int64_t sampleY = interY0 + ((interY1 - interY0) * (s + 1)) / 7;
+
+                        int matchCount = 0;
+                        for (const auto& t : tiles) {
+                            if (t.pageIndex == pIdx &&
+                                sampleX >= t.docX && sampleX < (t.docX + t.tileWidth) &&
+                                sampleY >= t.docY && sampleY < (t.docY + t.tileHeight)) {
+                                ++matchCount;
+                            }
+                        }
+                        if (matchCount != 1) {
+                            std::cerr << "[FAIL] Partition invariant violated! Point (" 
+                                      << sampleX << ", " << sampleY << ") covered by " 
+                                      << matchCount << " tiles (expected 1)." << std::endl;
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "  -> Passed: Every sampled point in viewport ∩ page covered by exactly one tile." << std::endl;
+
+    // Test 7: Physical Anchor Invariant (PDF Points Under Cursor across Zoom)
+    std::cout << "[TEST 7] Testing physical page coordinate pinning (PDF points under cursor across zoom)..." << std::endl;
+    // Start with scale 1.0, DPR 1.0
+    layout.updateLayout(1.0, 1.0, 1024, 20, 20);
+    const int testPageIdx = 2;
+    const double testPtX = 150.0;
+    const double testPtY = 300.0;
+
+    const auto& pBefore = layout.getPageLayout(testPageIdx);
+    int64_t docX1 = pBefore.leftPixel + static_cast<int64_t>(std::round(testPtX * 1.0 * 1.0));
+    int64_t docY1 = pBefore.topPixel + static_cast<int64_t>(std::round(testPtY * 1.0 * 1.0));
+
+    // Place cursor at viewport offset (250, 350)
+    const int64_t cursorVpX = 250;
+    const int64_t cursorVpY = 350;
+    auto anchor = layout.createAnchor(docX1, docY1);
+
+    // Zoom in to scale 2.75, DPR 1.5
+    const double newScale = 2.75;
+    const double newDpr = 1.5;
+    layout.updateLayout(newScale, newDpr, 1024, 20, 20);
+
+    int64_t scrollX2 = 0, scrollY2 = 0;
+    layout.resolveAnchor(anchor, cursorVpX, cursorVpY, 1024, 768, scrollX2, scrollY2);
+
+    // Compute the new document point sitting directly under cursorVpX, cursorVpY
+    int64_t docX2 = scrollX2 + cursorVpX;
+    int64_t docY2 = scrollY2 + cursorVpY;
+
+    // Convert back to physical PDF points
+    const auto& pAfter = layout.getPageLayout(testPageIdx);
+    double reconstructedPtX = (docX2 - pAfter.leftPixel) / (newScale * newDpr);
+    double reconstructedPtY = (docY2 - pAfter.topPixel) / (newScale * newDpr);
+
+    if (std::abs(reconstructedPtX - testPtX) > 1.0 || std::abs(reconstructedPtY - testPtY) > 1.0) {
+        std::cerr << "[FAIL] Physical point drifted across zoom! Expected: (" 
+                  << testPtX << ", " << testPtY << ") pt, Reconstructed: ("
+                  << reconstructedPtX << ", " << reconstructedPtY << ") pt" << std::endl;
         return 1;
     }
 
-    // Zoom in from 1.25x to 2.5x
-    layout.updateLayout(2.5, 1.5, 1920, 30, 20);
-    int64_t scrollX = 0, scrollY = 0;
-    layout.resolveAnchor(anchor2D, 200, 300, 1920, 1080, scrollX, scrollY);
-    const auto& p3Zoomed = layout.getPageLayout(3);
-    int64_t expectedTargetX = p3Zoomed.leftPixel + static_cast<int64_t>(std::round(anchor2D.normalizedX * p3Zoomed.widthPixel));
-    int64_t expectedTargetY = p3Zoomed.topPixel + static_cast<int64_t>(std::round(anchor2D.normalizedY * p3Zoomed.heightPixel));
-    if (std::abs((scrollX + 200) - expectedTargetX) > 2 || std::abs((scrollY + 300) - expectedTargetY) > 2) {
-        std::cerr << "[FAIL] 2D anchor drifted under zoom!" << std::endl;
+    // Boundary edge clamping: anchor at document origin
+    auto edgeAnchor = layout.createAnchor(0, 0);
+    int64_t edgeScrollX = 0, edgeScrollY = 0;
+    layout.resolveAnchor(edgeAnchor, 100, 100, 1024, 768, edgeScrollX, edgeScrollY);
+    if (edgeScrollX < 0 || edgeScrollY < 0) {
+        std::cerr << "[FAIL] Scroll clamping allowed negative scroll offsets" << std::endl;
         return 1;
     }
-    std::cout << "  -> Passed: 2D cursor anchor pinned accurately." << std::endl;
+    std::cout << "  -> Passed: Physical PDF coordinates pinned under cursor within sub-point precision." << std::endl;
 
     // Test 8: 64-bit coordinates exceeding 2^31 (> 4.2 billion pixels)
     std::cout << "[TEST 8] Testing 64-bit coordinates exceeding 2^31..." << std::endl;
