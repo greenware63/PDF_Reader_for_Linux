@@ -162,6 +162,22 @@ target_link_libraries(test_tile_cache PRIVATE
     pdf_cache
 )
 
+# Viewport Widget headless test (subclasses QAbstractScrollArea)
+add_executable(test_widget
+    test_widget.cpp
+    src/ui/PdfViewerWidget.cpp
+)
+
+target_include_directories(test_widget PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(test_widget PRIVATE
+    Qt6::Widgets
+    pdf_engine
+)
+
 # CTest registration
 enable_testing()
 add_test(
@@ -179,9 +195,15 @@ add_test(
     COMMAND test_tile_cache
 )
 
+add_test(
+    NAME ViewportWidgetTestSuite
+    COMMAND test_widget "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
+)
+
 if(WIN32)
     get_filename_component(COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     get_filename_component(QT_BIN_DIR "${Qt6Core_DIR}/../../../bin" ABSOLUTE)
+    get_filename_component(QT_PLUGIN_DIR "${Qt6Core_DIR}/../../../plugins" ABSOLUTE)
     set_tests_properties(EngineRenderTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR}"
     )
@@ -192,12 +214,16 @@ if(WIN32)
     set_tests_properties(TileCacheTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${COMPILER_BIN_DIR}"
     )
+    set_tests_properties(ViewportWidgetTestSuite PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
+    )
 endif()
 
 # Scoped workaround specifically for Windows MinGW GCC >= 15 toolchain (CWG 2387 bug in Qt 6.7.2 qcomparehelpers.h)
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15.0")
     target_link_options(pdf-reader PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_render PRIVATE -Wl,--allow-multiple-definition)
+    target_link_options(test_widget PRIVATE -Wl,--allow-multiple-definition)
 endif()
 
 # Deployment & RPATH handling
@@ -214,12 +240,22 @@ if(WIN32)
             "$<TARGET_FILE_DIR:test_render>"
         COMMENT "Deploying pdfium.dll next to test_render"
     )
+    add_custom_command(TARGET test_widget POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${pdfium_binaries_SOURCE_DIR}/bin/pdfium.dll"
+            "$<TARGET_FILE_DIR:test_widget>"
+        COMMENT "Deploying pdfium.dll next to test_widget"
+    )
 elseif(UNIX AND NOT APPLE)
     set_target_properties(pdf-reader PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../lib"
     )
     set_target_properties(test_render PROPERTIES
+        BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../lib"
+    )
+    set_target_properties(test_widget PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../lib"
     )
