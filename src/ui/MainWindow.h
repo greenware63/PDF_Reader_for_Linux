@@ -21,7 +21,8 @@ public Q_SLOTS:
 private Q_SLOTS:
     void onDocumentLoaded(const QString& title, int totalPages);
     void onPageChanged(int currentPage, int totalPages);
-    void onZoomChanged(double zoom);
+    void onZoomChanged(double zoomRatio);
+    void onLoadError(const QString& errorMessage);
 
 private:
     void setupUi();

@@ -1,5 +1,4 @@
 #include "PdfiumDocument.h"
-#include "PdfiumPage.h"
 #include <mutex>
 #include <cstring>
 
@@ -18,6 +17,21 @@ void PdfiumDocument::ensureLibraryInitialized() {
     });
 }
 
+DocumentError PdfiumDocument::mapPdfiumError(unsigned long fpdfError) {
+    switch (fpdfError) {
+        case FPDF_ERR_SUCCESS:
+            return DocumentError::None;
+        case FPDF_ERR_FILE:
+            return DocumentError::FileNotFound;
+        case FPDF_ERR_FORMAT:
+            return DocumentError::InvalidFormat;
+        case FPDF_ERR_PASSWORD:
+            return DocumentError::PasswordRequired;
+        default:
+            return DocumentError::Unknown;
+    }
+}
+
 PdfiumDocument::PdfiumDocument() {
     ensureLibraryInitialized();
 }
@@ -26,47 +40,92 @@ PdfiumDocument::~PdfiumDocument() {
     close();
 }
 
-bool PdfiumDocument::loadFromFile(const std::string& filePath, const std::string& password) {
-    close();
+DocumentError PdfiumDocument::loadFromFile(const std::string& filePath, const std::string& password) {
     const char* pwd = password.empty() ? nullptr : password.c_str();
-    m_doc = FPDF_LoadDocument(filePath.c_str(), pwd);
-    return m_doc != nullptr;
+
+    // Load into temporary handle first so existing document is preserved on failure
+    FPDF_DOCUMENT newDoc = FPDF_LoadDocument(filePath.c_str(), pwd);
+    if (!newDoc) {
+        unsigned long err = FPDF_GetLastError();
+        if (err == FPDF_ERR_PASSWORD && !password.empty()) {
+            m_lastError = DocumentError::BadPassword;
+        } else {
+            m_lastError = mapPdfiumError(err);
+        }
+        return m_lastError;
+    }
+
+    int count = FPDF_GetPageCount(newDoc);
+    if (count <= 0) {
+        FPDF_CloseDocument(newDoc);
+        m_lastError = DocumentError::EmptyDocument;
+        return m_lastError;
+    }
+
+    // Success: atomically swap active document handle
+    m_doc = DocumentHandle(newDoc, FPDF_CloseDocument);
+    m_memoryBuffer.reset();
+    m_lastError = DocumentError::None;
+    return DocumentError::None;
 }
 
-bool PdfiumDocument::loadFromMemory(const void* data, size_t size, const std::string& password) {
-    close();
+DocumentError PdfiumDocument::loadFromMemory(const void* data, size_t size, const std::string& password) {
     if (!data || size == 0) {
-        return false;
+        m_lastError = DocumentError::InvalidFormat;
+        return m_lastError;
     }
 
-    m_memoryBuffer.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
+    auto newBuffer = std::make_shared<std::vector<uint8_t>>(
+        static_cast<const uint8_t*>(data),
+        static_cast<const uint8_t*>(data) + size
+    );
+
     const char* pwd = password.empty() ? nullptr : password.c_str();
-    m_doc = FPDF_LoadMemDocument64(m_memoryBuffer.data(), m_memoryBuffer.size(), pwd);
-    if (!m_doc) {
-        m_memoryBuffer.clear();
-        return false;
+    FPDF_DOCUMENT newDoc = FPDF_LoadMemDocument64(newBuffer->data(), newBuffer->size(), pwd);
+    if (!newDoc) {
+        unsigned long err = FPDF_GetLastError();
+        if (err == FPDF_ERR_PASSWORD && !password.empty()) {
+            m_lastError = DocumentError::BadPassword;
+        } else {
+            m_lastError = mapPdfiumError(err);
+        }
+        return m_lastError;
     }
-    return true;
+
+    int count = FPDF_GetPageCount(newDoc);
+    if (count <= 0) {
+        FPDF_CloseDocument(newDoc);
+        m_lastError = DocumentError::EmptyDocument;
+        return m_lastError;
+    }
+
+    m_doc = DocumentHandle(newDoc, FPDF_CloseDocument);
+    m_memoryBuffer = std::move(newBuffer);
+    m_lastError = DocumentError::None;
+    return DocumentError::None;
 }
 
 int PdfiumDocument::pageCount() const {
     if (!m_doc) return 0;
-    return FPDF_GetPageCount(m_doc);
+    return FPDF_GetPageCount(m_doc.get());
 }
 
 std::unique_ptr<IPage> PdfiumDocument::getPage(int pageIndex) {
     if (!m_doc || pageIndex < 0 || pageIndex >= pageCount()) {
         return nullptr;
     }
-    return std::make_unique<PdfiumPage>(m_doc, pageIndex);
+
+    auto page = std::make_unique<PdfiumPage>(m_doc, pageIndex);
+    if (!page->isValid()) {
+        return nullptr;
+    }
+    return page;
 }
 
 void PdfiumDocument::close() {
-    if (m_doc) {
-        FPDF_CloseDocument(m_doc);
-        m_doc = nullptr;
-    }
-    m_memoryBuffer.clear();
+    m_doc.reset();
+    m_memoryBuffer.reset();
+    m_lastError = DocumentError::None;
 }
 
 std::unique_ptr<IDocument> createDocument() {

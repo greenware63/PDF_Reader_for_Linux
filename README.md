@@ -4,29 +4,31 @@ A fast, native PDF workstation for Linux designed with an Adobe Pro-grade featur
 
 ## Architecture & Principles
 
-- **Proven Engine**: Uses Google's [PDFium](https://pdfium.googlesource.com/pdfium/) via prebuilt release binaries (`bblanchon/pdfium-binaries`), managed automatically by CMake `FetchContent`.
-- **Engine Abstraction Layer**: Viewport and UI interact strictly through an abstract `IDocument` and `IPage` interface.
-- **Process Isolation**: Ready for sandboxed worker processes per open document.
-- **HiDPI-Ready Zero-Copy Rendering**: Renders directly into `QImage` buffers at native screen DPR (`devicePixelRatio`).
+- **Proven Engine**: Uses Google's [PDFium](https://pdfium.googlesource.com/pdfium/) via prebuilt release binaries (`bblanchon/pdfium-binaries`), verified cryptographically with SHA256 checksums and fetched via CMake `FetchContent`.
+- **Strict Engine Abstraction**: The UI layer communicates exclusively through `IDocument` and `IPage` interfaces without exposing PDFium types.
+- **Safe Object Lifetimes**: Pages hold shared ownership of the underlying document handle, preventing use-after-free even if the document is closed while pages are retained.
+- **Non-destructive Loading**: Loading a corrupt or password-protected document does not destroy the currently open document.
+- **Prepared for Multi-Process Sandboxing**: The interface is designed to support IPC separation with a sandboxed document worker process (`memfd_create` + `SCM_RIGHTS`).
 
 ## Project Structure
 
 ```
 ├── include/
 │   └── engine/
-│       ├── IDocument.h       # Abstract document interface
+│       ├── IDocument.h       # Abstract document interface & DocumentError
 │       └── IPage.h           # Abstract page interface
 ├── src/
 │   ├── engine/
-│   │   ├── PdfiumDocument.h/cpp # PDFium engine implementation
-│   │   └── PdfiumPage.h/cpp     # PDFium page rendering logic
+│   │   ├── PdfiumDocument.h/cpp # PDFium engine implementation & safe handle management
+│   │   └── PdfiumPage.h/cpp     # PDFium page rendering logic with resolution clamping
 │   └── ui/
-│       ├── MainWindow.h/cpp     # Main application window & actions
+│       ├── MainWindow.h/cpp     # Desktop main window & actions
 │       └── PdfViewerWidget.h/cpp# Viewport widget with zoom and navigation
-├── CMakeLists.txt            # CMake configuration with Qt 6 & PDFium FetchContent
+├── CMakeLists.txt            # CMake configuration with CTest & FetchContent
+├── LICENSE                   # MIT License
 ├── main.cpp                  # Application entry point
-├── sample.pdf                # Sample PDF for testing
-└── test_render.cpp           # Headless rendering verification test
+├── sample.pdf                # Reference PDF for validation
+└── test_render.cpp           # Automated CTest test suite
 ```
 
 ## Building
@@ -43,9 +45,8 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-### Running Tests
+### Running Tests via CTest
 
 ```bash
-cmake --build build --target test_render
-./build/test_render sample.pdf
+ctest --test-dir build --output-on-failure
 ```

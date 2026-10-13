@@ -12,7 +12,7 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
     setupUi();
     setupActions();
-    setWindowTitle(tr("PDF Reader - Linux Prototype Spike"));
+    setWindowTitle(tr("PDF Reader - Linux Prototype"));
     resize(1024, 768);
 }
 
@@ -23,8 +23,8 @@ void MainWindow::setupUi() {
     connect(m_viewer, &PdfViewerWidget::documentLoaded, this, &MainWindow::onDocumentLoaded);
     connect(m_viewer, &PdfViewerWidget::pageChanged, this, &MainWindow::onPageChanged);
     connect(m_viewer, &PdfViewerWidget::zoomChanged, this, &MainWindow::onZoomChanged);
+    connect(m_viewer, &PdfViewerWidget::loadError, this, &MainWindow::onLoadError);
 
-    // Status bar setup
     statusBar()->showMessage(tr("Ready - Open a PDF to begin"));
 }
 
@@ -33,6 +33,9 @@ void MainWindow::setupActions() {
     QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
     QAction* openAction = fileMenu->addAction(tr("&Open PDF..."), this, &MainWindow::openFileDialog);
     openAction->setShortcut(QKeySequence::Open);
+
+    QAction* closeAction = fileMenu->addAction(tr("&Close PDF"), m_viewer, &PdfViewerWidget::closeDocument);
+    closeAction->setShortcut(QKeySequence::Close);
 
     fileMenu->addSeparator();
     QAction* exitAction = fileMenu->addAction(tr("E&xit"), this, &QWidget::close);
@@ -72,11 +75,8 @@ void MainWindow::setupActions() {
 }
 
 bool MainWindow::openFile(const QString& filePath) {
-    if (!m_viewer->openDocument(filePath)) {
-        statusBar()->showMessage(tr("Failed to load PDF document: %1").arg(filePath), 5000);
-        return false;
-    }
-    return true;
+    pdf::DocumentError err = m_viewer->openDocument(filePath);
+    return err == pdf::DocumentError::None;
 }
 
 void MainWindow::openFileDialog() {
@@ -102,12 +102,17 @@ void MainWindow::onPageChanged(int currentPage, int totalPages) {
         m_pageStatusLabel->setText(tr(" Page %1 / %2 ").arg(currentPage).arg(totalPages));
     } else {
         m_pageStatusLabel->setText(tr(" Page 0 / 0 "));
+        setWindowTitle(tr("PDF Reader - Linux Prototype"));
     }
 }
 
-void MainWindow::onZoomChanged(double zoom) {
-    int percentage = static_cast<int>(std::round(zoom * 100.0));
+void MainWindow::onZoomChanged(double zoomRatio) {
+    int percentage = static_cast<int>(std::round(zoomRatio * 100.0));
     m_zoomStatusLabel->setText(tr(" %1% ").arg(percentage));
+}
+
+void MainWindow::onLoadError(const QString& errorMessage) {
+    statusBar()->showMessage(errorMessage, 6000);
 }
 
 } // namespace ui

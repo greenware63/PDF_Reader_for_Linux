@@ -5,6 +5,7 @@
 #include <QLabel>
 #include <memory>
 #include "engine/IDocument.h"
+#include "engine/IPage.h"
 
 namespace ui {
 
@@ -15,7 +16,7 @@ public:
     explicit PdfViewerWidget(QWidget* parent = nullptr);
     ~PdfViewerWidget() override = default;
 
-    bool openDocument(const QString& filePath);
+    pdf::DocumentError openDocument(const QString& filePath);
     void closeDocument();
 
     int currentPage() const { return m_currentPage; }
@@ -36,6 +37,7 @@ Q_SIGNALS:
     void pageChanged(int currentPage, int totalPages);
     void zoomChanged(double zoom);
     void documentLoaded(const QString& title, int totalPages);
+    void loadError(const QString& errorMessage);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
@@ -49,7 +51,8 @@ private:
 
     QLabel* m_pageLabel{nullptr};
     int m_currentPage{0};
-    double m_zoom{1.0}; // 1.0 = 100%
+    double m_zoom{1.333333}; // 96 DPI / 72 DPI = 1.333x standard desktop 100% zoom
+    int m_wheelDeltaAccumulator{0};
 };
 
 } // namespace ui

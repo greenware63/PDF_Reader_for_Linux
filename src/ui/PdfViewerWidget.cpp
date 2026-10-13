@@ -6,8 +6,11 @@
 
 namespace ui {
 
+// Baseline desktop 100% scale (96 DPI screen / 72 DPI PDF points)
+static constexpr double DESKTOP_100_PERCENT_SCALE = 96.0 / 72.0;
+
 PdfViewerWidget::PdfViewerWidget(QWidget* parent)
-    : QScrollArea(parent) {
+    : QScrollArea(parent), m_zoom(DESKTOP_100_PERCENT_SCALE) {
     m_document = pdf::createDocument();
 
     m_pageLabel = new QLabel(this);
@@ -23,32 +26,56 @@ int PdfViewerWidget::pageCount() const {
     return m_document ? m_document->pageCount() : 0;
 }
 
-bool PdfViewerWidget::openDocument(const QString& filePath) {
+pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
     if (!m_document) {
         m_document = pdf::createDocument();
     }
 
-    if (!m_document->loadFromFile(filePath.toStdString())) {
-        return false;
+    pdf::DocumentError err = m_document->loadFromFile(filePath.toStdString());
+    if (err != pdf::DocumentError::None) {
+        QString msg;
+        switch (err) {
+            case pdf::DocumentError::FileNotFound:
+                msg = tr("File not found: %1").arg(filePath);
+                break;
+            case pdf::DocumentError::PasswordRequired:
+                msg = tr("Document is password protected.");
+                break;
+            case pdf::DocumentError::BadPassword:
+                msg = tr("Incorrect password entered.");
+                break;
+            case pdf::DocumentError::EmptyDocument:
+                msg = tr("Document contains no pages.");
+                break;
+            case pdf::DocumentError::InvalidFormat:
+            default:
+                msg = tr("Corrupted or unsupported PDF format.");
+                break;
+        }
+        Q_EMIT loadError(msg);
+        return err;
     }
 
+    // Document loaded successfully - safely release previous page before attaching new
+    m_activePage.reset();
     m_currentPage = 0;
-    m_zoom = 1.0;
+    m_zoom = DESKTOP_100_PERCENT_SCALE;
     m_activePage = m_document->getPage(m_currentPage);
 
     Q_EMIT documentLoaded(QFileInfo(filePath).fileName(), pageCount());
     Q_EMIT pageChanged(m_currentPage + 1, pageCount());
-    Q_EMIT zoomChanged(m_zoom);
+    Q_EMIT zoomChanged(m_zoom / DESKTOP_100_PERCENT_SCALE);
 
     updateRender();
-    return true;
+    return pdf::DocumentError::None;
 }
 
 void PdfViewerWidget::closeDocument() {
+    // Release page handle first before closing document
+    m_activePage.reset();
     if (m_document) {
         m_document->close();
     }
-    m_activePage.reset();
     m_pageLabel->clear();
     m_currentPage = 0;
     Q_EMIT pageChanged(0, 0);
@@ -70,6 +97,7 @@ void PdfViewerWidget::goToPage(int pageIndex) {
     if (!m_document || pageIndex < 0 || pageIndex >= pageCount()) {
         return;
     }
+    m_activePage.reset(); // safely release previous
     m_currentPage = pageIndex;
     m_activePage = m_document->getPage(m_currentPage);
     updateRender();
@@ -77,31 +105,30 @@ void PdfViewerWidget::goToPage(int pageIndex) {
 }
 
 void PdfViewerWidget::setZoom(double zoom) {
-    double clamped = std::clamp(zoom, 0.25, 5.0);
+    double clamped = std::clamp(zoom, 0.2, 8.0);
     if (std::abs(clamped - m_zoom) > 0.001) {
         m_zoom = clamped;
         updateRender();
-        Q_EMIT zoomChanged(m_zoom);
+        Q_EMIT zoomChanged(m_zoom / DESKTOP_100_PERCENT_SCALE);
     }
 }
 
 void PdfViewerWidget::zoomIn() {
-    setZoom(m_zoom * 1.25);
+    setZoom(m_zoom * 1.2);
 }
 
 void PdfViewerWidget::zoomOut() {
-    setZoom(m_zoom / 1.25);
+    setZoom(m_zoom / 1.2);
 }
 
 void PdfViewerWidget::zoomReset() {
-    setZoom(1.0);
+    setZoom(DESKTOP_100_PERCENT_SCALE);
 }
 
 void PdfViewerWidget::zoomFitWidth() {
     if (!m_activePage || m_activePage->widthPoints() <= 0.0) {
         return;
     }
-    // Margin of 40px for scrollbars and padding
     int viewportW = viewport()->width() - 40;
     if (viewportW > 50) {
         setZoom(static_cast<double>(viewportW) / m_activePage->widthPoints());
@@ -130,10 +157,17 @@ void PdfViewerWidget::resizeEvent(QResizeEvent* event) {
 
 void PdfViewerWidget::wheelEvent(QWheelEvent* event) {
     if (event->modifiers() & Qt::ControlModifier) {
-        if (event->angleDelta().y() > 0) {
+        // Accumulate wheel angle deltas to handle high-precision touchpad scroll smoothly
+        m_wheelDeltaAccumulator += event->angleDelta().y();
+        constexpr int DELTA_THRESHOLD = 120; // 1 mouse wheel click standard
+
+        while (m_wheelDeltaAccumulator >= DELTA_THRESHOLD) {
             zoomIn();
-        } else if (event->angleDelta().y() < 0) {
+            m_wheelDeltaAccumulator -= DELTA_THRESHOLD;
+        }
+        while (m_wheelDeltaAccumulator <= -DELTA_THRESHOLD) {
             zoomOut();
+            m_wheelDeltaAccumulator += DELTA_THRESHOLD;
         }
         event->accept();
     } else {
