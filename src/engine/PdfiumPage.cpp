@@ -6,9 +6,13 @@
 
 namespace pdf {
 
-// Safety bounds against excessive single-buffer memory consumption
-static constexpr int MAX_DIMENSION = 8192;
-static constexpr int64_t MAX_TOTAL_PIXELS = 16 * 1024 * 1024; // 16 MP max per single render (~64 MB)
+// Safety bounds applied ONLY to whole-page renders to prevent bad_alloc / OOM
+static constexpr int MAX_WHOLE_PAGE_DIM = 8192;
+static constexpr int64_t MAX_WHOLE_PAGE_PIXELS = 16 * 1024 * 1024; // 16 MP max per single buffer (~64 MB)
+
+// Safety bounds on individual tile requests
+static constexpr int MAX_TILE_DIM = 4096;
+static constexpr int64_t MAX_TILE_PIXELS = 16 * 1024 * 1024;
 
 PdfiumPage::PdfiumPage(DocumentHandle doc, int pageIndex)
     : m_doc(std::move(doc)), m_pageIndex(pageIndex) {
@@ -35,40 +39,10 @@ void PdfiumPage::getPixelDimensions(double scale, double devicePixelRatio, int& 
         return;
     }
 
-    const double targetLogicalW = m_width * scale;
-    const double targetLogicalH = m_height * scale;
     const double desiredDpr = (devicePixelRatio > 0.0) ? devicePixelRatio : 1.0;
-
-    int pixelW = static_cast<int>(std::round(targetLogicalW * desiredDpr));
-    int pixelH = static_cast<int>(std::round(targetLogicalH * desiredDpr));
-
-    pixelW = std::max(1, pixelW);
-    pixelH = std::max(1, pixelH);
-
-    // Apply safety caps
-    int64_t totalPixels = static_cast<int64_t>(pixelW) * pixelH;
-    if (pixelW > MAX_DIMENSION || pixelH > MAX_DIMENSION || totalPixels > MAX_TOTAL_PIXELS) {
-        double factorW = (pixelW > MAX_DIMENSION) ? static_cast<double>(MAX_DIMENSION) / pixelW : 1.0;
-        double factorH = (pixelH > MAX_DIMENSION) ? static_cast<double>(MAX_DIMENSION) / pixelH : 1.0;
-        double factorTotal = (totalPixels > MAX_TOTAL_PIXELS) ? std::sqrt(static_cast<double>(MAX_TOTAL_PIXELS) / totalPixels) : 1.0;
-        double factor = std::min({factorW, factorH, factorTotal});
-
-        pixelW = std::max(1, static_cast<int>(std::floor(pixelW * factor)));
-        pixelH = std::max(1, static_cast<int>(std::floor(pixelH * factor)));
-
-        if (pixelW > MAX_DIMENSION) pixelW = MAX_DIMENSION;
-        if (pixelH > MAX_DIMENSION) pixelH = MAX_DIMENSION;
-        while (static_cast<int64_t>(pixelW) * pixelH > MAX_TOTAL_PIXELS && pixelW > 1 && pixelH > 1) {
-            if (pixelW >= pixelH) {
-                --pixelW;
-            } else {
-                --pixelH;
-            }
-        }
-    }
-
-    outWidth = pixelW;
-    outHeight = pixelH;
+    // Compute unconstrained virtual pixel coordinates for tiling
+    outWidth = std::max(1, static_cast<int>(std::round(m_width * scale * desiredDpr)));
+    outHeight = std::max(1, static_cast<int>(std::round(m_height * scale * desiredDpr)));
 }
 
 PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double devicePixelRatio) {
@@ -93,6 +67,11 @@ PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double d
         return {};
     }
 
+    // Guard individual tile dimensions against absurd requests
+    if (tileW > MAX_TILE_DIM || tileH > MAX_TILE_DIM || (static_cast<int64_t>(tileW) * tileH > MAX_TILE_PIXELS)) {
+        return {};
+    }
+
     PixelBuffer buffer = PixelBuffer::allocate(tileW, tileH, PixelFormat::BGRX8888);
     if (!buffer.isValid()) {
         return {};
@@ -101,7 +80,6 @@ PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double d
     // Pre-fill with opaque white (0xFFFFFFFF in 32-bit little-endian)
     std::memset(buffer.data(), 0xFF, buffer.sizeBytes());
 
-    // FPDFBitmap_BGRx wraps BGRX 32-bit pixels (maps to QImage::Format_RGB32)
     FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(
         tileW,
         tileH,
@@ -132,7 +110,7 @@ PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double d
     return buffer;
 }
 
-QImage PdfiumPage::render(double scale, double devicePixelRatio) {
+PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio) {
     if (!m_page || m_width <= 0.0 || m_height <= 0.0) {
         return {};
     }
@@ -141,31 +119,47 @@ QImage PdfiumPage::render(double scale, double devicePixelRatio) {
     int pixelH = 0;
     getPixelDimensions(scale, devicePixelRatio, pixelW, pixelH);
 
-    PixelBuffer buffer = renderTile({0, 0, pixelW, pixelH}, scale, devicePixelRatio);
+    // Apply safety caps ONLY to single-buffer whole-page renders
+    int64_t totalPixels = static_cast<int64_t>(pixelW) * pixelH;
+    if (pixelW > MAX_WHOLE_PAGE_DIM || pixelH > MAX_WHOLE_PAGE_DIM || totalPixels > MAX_WHOLE_PAGE_PIXELS) {
+        double factorW = (pixelW > MAX_WHOLE_PAGE_DIM) ? static_cast<double>(MAX_WHOLE_PAGE_DIM) / pixelW : 1.0;
+        double factorH = (pixelH > MAX_WHOLE_PAGE_DIM) ? static_cast<double>(MAX_WHOLE_PAGE_DIM) / pixelH : 1.0;
+        double factorTotal = (totalPixels > MAX_WHOLE_PAGE_PIXELS) ? std::sqrt(static_cast<double>(MAX_WHOLE_PAGE_PIXELS) / totalPixels) : 1.0;
+        double factor = std::min({factorW, factorH, factorTotal});
+
+        pixelW = std::max(1, static_cast<int>(std::floor(pixelW * factor)));
+        pixelH = std::max(1, static_cast<int>(std::floor(pixelH * factor)));
+        if (pixelW > MAX_WHOLE_PAGE_DIM) pixelW = MAX_WHOLE_PAGE_DIM;
+        if (pixelH > MAX_WHOLE_PAGE_DIM) pixelH = MAX_WHOLE_PAGE_DIM;
+        while (static_cast<int64_t>(pixelW) * pixelH > MAX_WHOLE_PAGE_PIXELS && pixelW > 1 && pixelH > 1) {
+            if (pixelW >= pixelH) --pixelW;
+            else --pixelH;
+        }
+    }
+
+    PixelBuffer buffer = PixelBuffer::allocate(pixelW, pixelH, PixelFormat::BGRX8888);
     if (!buffer.isValid()) {
         return {};
     }
 
-    // Wrap PixelBuffer into QImage with owner lifetime retention
-    auto owner = buffer.owner();
-    QImage image(
+    std::memset(buffer.data(), 0xFF, buffer.sizeBytes());
+
+    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(
+        pixelW,
+        pixelH,
+        FPDFBitmap_BGRx,
         buffer.data(),
-        buffer.width(),
-        buffer.height(),
-        buffer.stride(),
-        QImage::Format_RGB32,
-        [](void* p) {
-            auto* keepAlive = static_cast<std::shared_ptr<const void>*>(p);
-            delete keepAlive;
-        },
-        new std::shared_ptr<const void>(owner)
+        buffer.stride()
     );
 
-    // Calculate effective DPR so logical size remains invariant to clamping
-    const double targetLogicalW = m_width * scale;
-    const double effectiveDpr = static_cast<double>(pixelW) / targetLogicalW;
-    image.setDevicePixelRatio(effectiveDpr);
-    return image.copy(); // Return an independent copy for the legacy caller
+    if (!bitmap) {
+        return {};
+    }
+
+    const int flags = FPDF_ANNOT;
+    FPDF_RenderPageBitmap(bitmap, m_page, 0, 0, pixelW, pixelH, 0, flags);
+    FPDFBitmap_Destroy(bitmap);
+    return buffer;
 }
 
 } // namespace pdf

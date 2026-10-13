@@ -1,4 +1,5 @@
 #include "PdfViewerWidget.h"
+#include "ImageUtils.h"
 #include <QWheelEvent>
 #include <QFileInfo>
 #include <QScrollBar>
@@ -141,10 +142,12 @@ void PdfViewerWidget::updateRender() {
     }
 
     const double dpr = devicePixelRatioF();
-    QImage rendered = m_activePage->render(m_zoom, dpr);
-    if (!rendered.isNull()) {
+    pdf::PixelBuffer buffer = m_activePage->renderWholePage(m_zoom, dpr);
+    if (buffer.isValid()) {
+        const double targetLogicalW = m_activePage->widthPoints() * m_zoom;
+        const double effectiveDpr = static_cast<double>(buffer.width()) / targetLogicalW;
+        QImage rendered = toQImage(buffer, effectiveDpr);
         QPixmap pixmap = QPixmap::fromImage(rendered);
-        // Use rendered.devicePixelRatio() which correctly reflects effective DPR
         pixmap.setDevicePixelRatio(rendered.devicePixelRatio());
         m_pageLabel->setPixmap(pixmap);
         m_pageLabel->adjustSize();

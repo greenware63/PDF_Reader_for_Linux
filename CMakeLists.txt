@@ -68,14 +68,17 @@ else()
     )
 endif()
 
-# Core engine library
+# Core engine and layout library
 add_library(pdf_engine STATIC
     include/engine/IDocument.h
     include/engine/IPage.h
+    include/engine/PixelBuffer.h
+    include/layout/DocumentLayout.h
     src/engine/PdfiumDocument.h
     src/engine/PdfiumDocument.cpp
     src/engine/PdfiumPage.h
     src/engine/PdfiumPage.cpp
+    src/layout/DocumentLayout.cpp
 )
 
 target_include_directories(pdf_engine PUBLIC
@@ -92,6 +95,7 @@ target_link_libraries(pdf_engine PUBLIC
 # Main desktop application executable
 add_executable(pdf-reader
     main.cpp
+    src/ui/ImageUtils.h
     src/ui/PdfViewerWidget.h
     src/ui/PdfViewerWidget.cpp
     src/ui/MainWindow.h
@@ -111,12 +115,20 @@ target_link_libraries(pdf-reader PRIVATE
 # Backward-compatibility alias for CLion workspace
 add_executable(PDf_Reader_for_Linux ALIAS pdf-reader)
 
-# Test executable for headless automated verification
+# Test executables for headless automated verification
 add_executable(test_render
     test_render.cpp
 )
 
 target_link_libraries(test_render PRIVATE
+    pdf_engine
+)
+
+add_executable(test_layout
+    test_layout.cpp
+)
+
+target_link_libraries(test_layout PRIVATE
     pdf_engine
 )
 
@@ -127,12 +139,15 @@ add_test(
     COMMAND test_render "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
 )
 
+add_test(
+    NAME DocumentLayoutTestSuite
+    COMMAND test_layout
+)
+
 if(WIN32)
     get_filename_component(COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     get_filename_component(QT_BIN_DIR "${Qt6Core_DIR}/../../../bin" ABSOLUTE)
-    # Note: in ENVIRONMENT_MODIFICATION, subsequent prepends place the path earlier.
-    # Prepend Qt first, then compiler runtime so matching GCC runtime is found first.
-    set_tests_properties(EngineRenderTestSuite PROPERTIES
+    set_tests_properties(EngineRenderTestSuite DocumentLayoutTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR}"
     )
 endif()
@@ -141,6 +156,7 @@ endif()
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15.0")
     target_link_options(pdf-reader PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_render PRIVATE -Wl,--allow-multiple-definition)
+    target_link_options(test_layout PRIVATE -Wl,--allow-multiple-definition)
 endif()
 
 # Deployment & RPATH handling
@@ -157,12 +173,22 @@ if(WIN32)
             "$<TARGET_FILE_DIR:test_render>"
         COMMENT "Deploying pdfium.dll next to test_render"
     )
+    add_custom_command(TARGET test_layout POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${pdfium_binaries_SOURCE_DIR}/bin/pdfium.dll"
+            "$<TARGET_FILE_DIR:test_layout>"
+        COMMENT "Deploying pdfium.dll next to test_layout"
+    )
 elseif(UNIX AND NOT APPLE)
     set_target_properties(pdf-reader PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../lib"
     )
     set_target_properties(test_render PROPERTIES
+        BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../lib"
+    )
+    set_target_properties(test_layout PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../lib"
     )

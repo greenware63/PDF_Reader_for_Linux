@@ -8,8 +8,17 @@
 namespace pdf {
 
 enum class PixelFormat {
-    BGRX8888, // 32-bit little-endian: B, G, R, unused (maps to QImage::Format_RGB32)
-    BGRA8888  // 32-bit little-endian: B, G, R, A
+    /**
+     * @brief 32-bit little-endian: [B, G, R, X] (X is unused/padding).
+     * Opaque format. Maps zero-copy to QImage::Format_RGB32 on x86/ARM little-endian.
+     */
+    BGRX8888,
+
+    /**
+     * @brief 32-bit little-endian: [B, G, R, A] (straight/unassociated alpha as produced by PDFium).
+     * Note: PDFium does NOT premultiply alpha.
+     */
+    BGRA8888
 };
 
 struct PixelRect {
@@ -42,7 +51,6 @@ public:
         const int stride = width * bytesPerPixel;
         const size_t totalBytes = static_cast<size_t>(stride) * height;
 
-        // Custom shared_ptr deleter using free()
         void* rawMem = std::malloc(totalBytes);
         if (!rawMem) {
             return {};

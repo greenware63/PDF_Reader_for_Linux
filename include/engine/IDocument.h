@@ -4,7 +4,6 @@
 #include <memory>
 #include <string>
 #include <cstdint>
-#include <QImage>
 
 namespace pdf {
 
@@ -22,7 +21,7 @@ enum class DocumentError {
 };
 
 /**
- * @brief Abstract interface representing a PDF document.
+ * @brief Pure C++ abstract interface representing a PDF document.
  * Decouples the UI / Viewport layer from PDFium or any future worker process.
  */
 class IDocument {

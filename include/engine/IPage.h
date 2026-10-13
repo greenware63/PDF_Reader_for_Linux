@@ -1,13 +1,12 @@
 #pragma once
 
 #include "PixelBuffer.h"
-#include <QImage>
 
 namespace pdf {
 
 /**
- * @brief Abstract interface representing a single PDF page.
- * Keeps the UI / Viewport layer independent from the underlying engine.
+ * @brief Pure C++ abstract interface representing a single PDF page.
+ * Completely decoupled from Qt or any UI framework.
  */
 class IPage {
 public:
@@ -29,23 +28,24 @@ public:
     virtual double heightPoints() const = 0;
 
     /**
-     * @brief Computes the target physical raster pixel dimensions of the page at the specified scale and DPR.
+     * @brief Computes unconstrained true raster pixel dimensions of the page at the given scale and DPR.
      */
     virtual void getPixelDimensions(double scale, double devicePixelRatio, int& outWidth, int& outHeight) const = 0;
 
     /**
      * @brief Renders a specific pixel rectangle (tile) of the page into an engine-agnostic PixelBuffer.
-     * @param rect The sub-region rectangle in the page's pixel grid.
+     * Tile dimensions are capped at safe memory bounds (e.g. 4096 x 4096 max tile size).
+     * @param rect The sub-region rectangle in the page's virtual pixel grid.
      * @param scale Zoom factor (1.0 = 72 DPI, 1.333 = 96 DPI standard desktop).
-     * @param devicePixelRatio Device pixel ratio.
-     * @return PixelBuffer containing the rendered tile, or invalid PixelBuffer on error.
+     * @param devicePixelRatio Screen device pixel ratio.
+     * @return PixelBuffer containing the rendered tile.
      */
     virtual PixelBuffer renderTile(const PixelRect& rect, double scale, double devicePixelRatio) = 0;
 
     /**
-     * @brief Renders the entire page into a QImage (convenience wrapper).
+     * @brief Renders the entire page into a PixelBuffer, with memory caps for legacy whole-page viewing.
      */
-    virtual QImage render(double scale, double devicePixelRatio) = 0;
+    virtual PixelBuffer renderWholePage(double scale, double devicePixelRatio) = 0;
 };
 
 } // namespace pdf

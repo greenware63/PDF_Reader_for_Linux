@@ -21,10 +21,10 @@ public:
 
     void getPixelDimensions(double scale, double devicePixelRatio, int& outWidth, int& outHeight) const override;
     PixelBuffer renderTile(const PixelRect& rect, double scale, double devicePixelRatio) override;
-    QImage render(double scale, double devicePixelRatio) override;
+    PixelBuffer renderWholePage(double scale, double devicePixelRatio) override;
 
 private:
-    DocumentHandle m_doc; // Keeps document alive even if closed by caller
+    DocumentHandle m_doc;
     FPDF_PAGE m_page{nullptr};
     int m_pageIndex{0};
     double m_width{0.0};

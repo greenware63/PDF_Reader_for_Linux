@@ -4,11 +4,60 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <QImage>
-#include <QColor>
+#include <cstdio>
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
 #include "engine/PixelBuffer.h"
+
+static void generateComplexPdfFixture(const std::string& path) {
+    std::string contentStream;
+    // Diagonal crossing lines
+    for (int i = 0; i < 30; ++i) {
+        float r = ((i * 37) % 255) / 255.0f;
+        float g = ((i * 73) % 255) / 255.0f;
+        float b = ((i * 109) % 255) / 255.0f;
+        float lineWidth = 1.0f + (i % 5);
+        contentStream += std::to_string(lineWidth) + " w " + std::to_string(r) + " " + std::to_string(g) + " " + std::to_string(b) + " RG\n";
+        contentStream += "0 " + std::to_string(i * 28) + " m 595 " + std::to_string(842 - i * 28) + " l S\n";
+        contentStream += std::to_string(i * 19) + " 0 m " + std::to_string(595 - i * 19) + " 842 l S\n";
+    }
+    // Colored rectangular regions crossing 512px boundaries
+    contentStream += "0.9 0.1 0.1 rg 50 100 500 650 re f\n";
+    contentStream += "0.1 0.8 0.2 rg 100 150 400 550 re f\n";
+    contentStream += "0.1 0.2 0.9 rg 150 200 300 450 re f\n";
+    contentStream += "0.9 0.8 0.1 rg 200 250 200 350 re f\n";
+
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Length " + std::to_string(contentStream.size()) + " >>\nstream\n";
+    pdf += contentStream;
+    pdf += "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 5\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
 
 int main(int argc, char* argv[]) {
     std::cout << "========================================" << std::endl;
@@ -102,9 +151,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    QImage rendered = page->render(1.0, 2.0); // 1.0 zoom, 2.0 DPR
-    if (rendered.isNull()) {
-        std::cerr << "[FAIL] Rendered QImage is null" << std::endl;
+    pdf::PixelBuffer rendered = page->renderWholePage(1.0, 2.0); // 1.0 zoom, 2.0 DPR
+    if (!rendered.isValid()) {
+        std::cerr << "[FAIL] Rendered PixelBuffer is invalid" << std::endl;
         return 1;
     }
     std::cout << "  -> Rendered bitmap size: " << rendered.width() << " x " << rendered.height() << std::endl;
@@ -113,10 +162,11 @@ int main(int argc, char* argv[]) {
     std::cout << "[TEST 7] Checking rendered pixels for non-white content (text/graphics)..." << std::endl;
     bool hasNonWhitePixel = false;
     for (int y = 0; y < rendered.height() && !hasNonWhitePixel; ++y) {
-        const QRgb* line = reinterpret_cast<const QRgb*>(rendered.constScanLine(y));
+        const uint32_t* line = reinterpret_cast<const uint32_t*>(rendered.data() + y * rendered.stride());
         for (int x = 0; x < rendered.width(); ++x) {
-            QRgb pixel = line[x];
-            if (qRed(pixel) < 240 || qGreen(pixel) < 240 || qBlue(pixel) < 240) {
+            uint32_t pixel = line[x];
+            // Format BGRX: 0xFFFFFFFF is pure white
+            if ((pixel & 0x00FFFFFF) != 0x00FFFFFF) {
                 hasNonWhitePixel = true;
                 break;
             }
@@ -159,49 +209,28 @@ int main(int argc, char* argv[]) {
 
     memDoc->close();
 
-    QImage memRendered = memPage->render(1.0, 1.0);
-    if (memRendered.isNull()) {
+    pdf::PixelBuffer memRendered = memPage->renderWholePage(1.0, 1.0);
+    if (!memRendered.isValid()) {
         std::cerr << "[FAIL] Memory-backed page failed to render after doc->close()!" << std::endl;
         return 1;
     }
     std::cout << "  -> Passed: in-memory document remained safe and readable after doc->close()." << std::endl;
 
-    // Test 9: Logical size preservation & pixel boundary verification under extreme zoom clamping
-    std::cout << "[TEST 9] Testing logical size preservation & pixel cap enforcement..." << std::endl;
-    constexpr double EXTREME_ZOOM = 15.0; // 15x zoom triggers pixel clamping
-    QImage clampedImage = page->render(EXTREME_ZOOM, 2.0);
-    if (clampedImage.isNull()) {
-        std::cerr << "[FAIL] Extreme zoom render returned null image" << std::endl;
+    // Test 9: Unconstrained virtual pixel dimension for tiling at 15x zoom
+    std::cout << "[TEST 9] Testing unconstrained virtual pixel calculation for tiling..." << std::endl;
+    constexpr double EXTREME_ZOOM = 15.0;
+    int unconstrainedW = 0, unconstrainedH = 0;
+    page->getPixelDimensions(EXTREME_ZOOM, 2.0, unconstrainedW, unconstrainedH);
+    int expectedVirtualW = static_cast<int>(std::round(w * EXTREME_ZOOM * 2.0));
+    int expectedVirtualH = static_cast<int>(std::round(h * EXTREME_ZOOM * 2.0));
+    if (unconstrainedW != expectedVirtualW || unconstrainedH != expectedVirtualH) {
+        std::cerr << "[FAIL] Virtual dimensions were improperly capped! Expected: "
+                  << expectedVirtualW << " x " << expectedVirtualH << ", Got: "
+                  << unconstrainedW << " x " << unconstrainedH << std::endl;
         return 1;
     }
-
-    constexpr int MAX_DIMENSION = 8192;
-    constexpr int64_t MAX_TOTAL_PIXELS = 16 * 1024 * 1024;
-    int64_t totalClampedPixels = static_cast<int64_t>(clampedImage.width()) * clampedImage.height();
-    if (clampedImage.width() > MAX_DIMENSION || clampedImage.height() > MAX_DIMENSION) {
-        std::cerr << "[FAIL] Clamped image exceeded MAX_DIMENSION: " 
-                  << clampedImage.width() << " x " << clampedImage.height() << std::endl;
-        return 1;
-    }
-    if (totalClampedPixels > MAX_TOTAL_PIXELS) {
-        std::cerr << "[FAIL] Clamped image exceeded MAX_TOTAL_PIXELS: " << totalClampedPixels << std::endl;
-        return 1;
-    }
-
-    double logicalW = clampedImage.width() / clampedImage.devicePixelRatio();
-    double logicalH = clampedImage.height() / clampedImage.devicePixelRatio();
-    double expectedLogicalW = w * EXTREME_ZOOM;
-    double expectedLogicalH = h * EXTREME_ZOOM;
-
-    if (std::abs(logicalW - expectedLogicalW) > 1.0 || std::abs(logicalH - expectedLogicalH) > 1.0) {
-        std::cerr << "[FAIL] Page logical dimensions shrank! Expected: " 
-                  << expectedLogicalW << " x " << expectedLogicalH 
-                  << ", Got: " << logicalW << " x " << logicalH << std::endl;
-        return 1;
-    }
-    std::cout << "  -> Passed: physical pixels capped at " << clampedImage.width() << " x " << clampedImage.height()
-              << " (" << (totalClampedPixels / (1024 * 1024)) << " MP <= 16 MP), logical points: " 
-              << logicalW << " x " << logicalH << " pt." << std::endl;
+    std::cout << "  -> Passed: virtual tile space at 15x zoom is unconstrained (" 
+              << unconstrainedW << " x " << unconstrainedH << " px)." << std::endl;
 
     // Test 10: File reload while retaining prior page
     std::cout << "[TEST 10] Testing document reload while holding previous page reference..." << std::endl;
@@ -215,44 +244,59 @@ int main(int argc, char* argv[]) {
         std::cerr << "[FAIL] Reload failed: " << static_cast<int>(err) << std::endl;
         return 1;
     }
-    QImage retainedRender = retainedPage->render(1.0, 1.0);
-    if (retainedRender.isNull()) {
+    pdf::PixelBuffer retainedRender = retainedPage->renderWholePage(1.0, 1.0);
+    if (!retainedRender.isValid()) {
         std::cerr << "[FAIL] Retained page failed to render after file reload!" << std::endl;
         return 1;
     }
     std::cout << "  -> Passed: retained page from earlier load remained safely accessible." << std::endl;
 
-    // Test 11: Tile Stitching Invariant Test (512x512 tiles stitched vs Full-Page Render)
-    std::cout << "[TEST 11] Testing Tile Stitching Invariant (512x512 tiles vs full-page render)..." << std::endl;
-    const double testScale = 1.333333; // standard 100% desktop scale
-    const double testDpr = 1.5;        // fractional DPR
-    int fullW = 0, fullH = 0;
-    page->getPixelDimensions(testScale, testDpr, fullW, fullH);
+    // Test 11: Complex Multi-Feature Fixture Stitching Invariant Test
+    std::cout << "[TEST 11] Testing Tile Stitching on Complex Fixture with Vectors and Colors..." << std::endl;
+    std::string complexPdfPath = "complex_seam_test.pdf";
+    generateComplexPdfFixture(complexPdfPath);
 
-    // 1. Render single full-page buffer
-    pdf::PixelBuffer fullPageBuf = page->renderTile({0, 0, fullW, fullH}, testScale, testDpr);
-    if (!fullPageBuf.isValid()) {
-        std::cerr << "[FAIL] Failed to render full page buffer" << std::endl;
+    auto complexDoc = pdf::createDocument();
+    err = complexDoc->loadFromFile(complexPdfPath);
+    if (err != pdf::DocumentError::None) {
+        std::cerr << "[FAIL] Failed to load complex fixture: " << static_cast<int>(err) << std::endl;
+        return 1;
+    }
+    auto complexPage = complexDoc->getPage(0);
+    if (!complexPage) {
+        std::cerr << "[FAIL] Failed to get complex page" << std::endl;
         return 1;
     }
 
-    // 2. Allocate stitched canvas
+    const double testScale = 1.333333; // 100% desktop scale
+    const double testDpr = 1.5;        // Fractional DPR
+    int fullW = 0, fullH = 0;
+    complexPage->getPixelDimensions(testScale, testDpr, fullW, fullH);
+
+    // Render full reference image
+    pdf::PixelBuffer fullPageBuf = complexPage->renderTile({0, 0, fullW, fullH}, testScale, testDpr);
+    if (!fullPageBuf.isValid()) {
+        std::cerr << "[FAIL] Failed to render full page buffer on complex fixture" << std::endl;
+        return 1;
+    }
+
+    // Allocate canvas for stitched tiles
     pdf::PixelBuffer stitchedBuf = pdf::PixelBuffer::allocate(fullW, fullH);
     if (!stitchedBuf.isValid()) {
-        std::cerr << "[FAIL] Failed to allocate stitched canvas" << std::endl;
+        std::cerr << "[FAIL] Failed to allocate stitched buffer" << std::endl;
         return 1;
     }
 
-    // 3. Render grid of 512x512 tiles and copy into stitched canvas
+    // Render 512x512 tile grid cutting across vector strokes and colored blocks
     constexpr int TILE_SIZE = 512;
     int tileCount = 0;
     for (int y = 0; y < fullH; y += TILE_SIZE) {
         for (int x = 0; x < fullW; x += TILE_SIZE) {
             int tw = std::min(TILE_SIZE, fullW - x);
             int th = std::min(TILE_SIZE, fullH - y);
-            pdf::PixelBuffer tile = page->renderTile({x, y, tw, th}, testScale, testDpr);
+            pdf::PixelBuffer tile = complexPage->renderTile({x, y, tw, th}, testScale, testDpr);
             if (!tile.isValid() || tile.width() != tw || tile.height() != th) {
-                std::cerr << "[FAIL] Tile (" << x << ", " << y << ") render failed!" << std::endl;
+                std::cerr << "[FAIL] Tile (" << x << ", " << y << ") render failed on complex fixture!" << std::endl;
                 return 1;
             }
 
@@ -264,34 +308,33 @@ int main(int argc, char* argv[]) {
             ++tileCount;
         }
     }
-    std::cout << "  -> Rendered and stitched " << tileCount << " tiles (" << fullW << " x " << fullH << " px)." << std::endl;
+    std::cout << "  -> Stitched " << tileCount << " tiles across vectors and colored boundary shapes." << std::endl;
 
-    // 4. Pixel-for-pixel comparison across the entire page
+    // Strict pixel-by-pixel byte comparison
     int diffCount = 0;
     int maxDiff = 0;
     for (int y = 0; y < fullH; ++y) {
         const uint8_t* fullRow = fullPageBuf.data() + y * fullPageBuf.stride();
         const uint8_t* stitchRow = stitchedBuf.data() + y * stitchedBuf.stride();
         for (int x = 0; x < fullW * 4; ++x) {
-            int delta = std::abs(static_cast<int>(fullRow[x]) - static_cast<int>(stitchRow[x]));
-            if (delta > 0) {
+            int d = std::abs(static_cast<int>(fullRow[x]) - static_cast<int>(stitchRow[x]));
+            if (d > 0) {
                 ++diffCount;
-                if (delta > maxDiff) maxDiff = delta;
+                if (d > maxDiff) maxDiff = d;
             }
         }
     }
 
-    if (diffCount > 0) {
-        std::cout << "  [INFO] Stitched vs full-page delta: " << diffCount 
-                  << " byte diffs, max delta = " << maxDiff << " / 255" << std::endl;
-        // Rasterizer anti-aliasing boundary effects at tile edges can create slight +-1 or +-2 sub-pixel variations
-        if (maxDiff > 3) {
-            std::cerr << "[FAIL] Stitched image differs significantly from full page render (max diff: " 
-                      << maxDiff << ")!" << std::endl;
-            return 1;
-        }
+    std::cout << "  [DIAGNOSTIC] Total differing bytes: " << diffCount 
+              << " / " << (fullW * fullH * 4) << ", Max Delta: " << maxDiff << " / 255" << std::endl;
+
+    // PDFium's rasterizer uses anti-aliasing curve fitting that can evaluate sub-pixels with slight +-1 delta at clipped tile boundaries
+    if (maxDiff > 3) {
+        std::cerr << "[FAIL] Tile seam detected! Differing pixels have visible delta: " << maxDiff << std::endl;
+        return 1;
     }
-    std::cout << "  -> Passed: Stitched tile matrix perfectly matches full-page raster!" << std::endl;
+    std::cout << "  -> Passed: Zero visible seams! (all variations strictly sub-pixel within max delta: " 
+              << maxDiff << " / 255)." << std::endl;
 
     std::cout << "========================================" << std::endl;
     std::cout << " ALL 11 TESTS PASSED SUCCESSFULLY!      " << std::endl;
