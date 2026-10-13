@@ -9,6 +9,7 @@
 #include <list>
 #include <unordered_map>
 #include <unordered_set>
+#include <chrono>
 #include "engine/PixelBuffer.h"
 
 namespace pdf {
@@ -111,6 +112,8 @@ struct TileCacheEntry {
     PixelBuffer buffer;
     size_t bytesUsed{0};
     bool isFailed{false};
+    int failCount{0};
+    std::chrono::steady_clock::time_point lastFailedTime{};
 };
 
 /**
@@ -119,6 +122,7 @@ struct TileCacheEntry {
  * Supports pinning tiles currently visible in the viewport to guarantee they are immune to eviction.
  * Remembers rendering failures (tombstones) with bounded byte overhead so corrupt or unreadable pages
  * do not cause repeated re-render storms.
+ * Provides deliberate retry and invalidation paths with exponential backoff for transient failure recovery.
  *
  * @note Thread Safety: UI Thread ONLY.
  * This class is not thread-safe and must be accessed exclusively from the main UI thread.
@@ -149,9 +153,28 @@ public:
     bool isFailed(const TileKey& key) const;
 
     /**
+     * @brief Checks if a failed tile is eligible for retry based on exponential backoff.
+     * @param key The tile key.
+     * @param baseBackoff Base delay (default 1000ms).
+     * @return true if the tile has failed and the backoff interval has elapsed; false otherwise.
+     */
+    bool canRetry(const TileKey& key, std::chrono::milliseconds baseBackoff = std::chrono::milliseconds(1000)) const;
+
+    /**
+     * @brief Clears failure status on a specific tile to allow immediate retry.
+     * @return true if the tile was marked failed and was cleared; false otherwise.
+     */
+    bool clearFailed(const TileKey& key);
+
+    /**
+     * @brief Clears failure status on all failed tiles.
+     */
+    void clearAllFailed();
+
+    /**
      * @brief Retrieves a copy of the cached pixel buffer and promotes the tile to Most Recently Used.
      * Returning a value copy avoids lifetime hazards when subsequent cache operations evict the tile.
-     * @return Optional containing PixelBuffer if found and not failed; std::nullopt otherwise.\n
+     * @return Optional containing PixelBuffer if found and not failed; std::nullopt otherwise.
      */
     std::optional<PixelBuffer> get(const TileKey& key);
 
@@ -167,6 +190,7 @@ public:
 
     /**
      * @brief Marks a tile as a remembered failure (tombstone) with TOMBSTONE_BYTE_WEIGHT overhead.
+     * Records failure count and timestamp for exponential backoff.
      * Prevents UI components from repeatedly re-requesting unrenderable tiles.
      * Automatically evicts older unpinned tiles if over budget.
      */
@@ -183,7 +207,7 @@ public:
     void unpin(const TileKey& key);
 
     /**
-     * @brief Atomically updates the set of pinned tiles to exactly the provided keys.\n
+     * @brief Atomically updates the set of pinned tiles to exactly the provided keys.
      * Any previous pins not in the new set are released.
      */
     void setPinnedKeys(const std::vector<TileKey>& keys);
@@ -210,7 +234,7 @@ public:
     void setByteBudget(size_t maxBytes);
 
     /**
-     * @return Maximum byte budget.
+     * @return Maximum byte budget.\n
      */
     size_t byteBudget() const noexcept { return m_maxBytesBudget; }
 

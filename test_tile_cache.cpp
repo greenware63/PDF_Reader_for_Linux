@@ -7,10 +7,11 @@
 #include <algorithm>
 #include <unordered_set>
 #include <list>
+#include <thread>
 
 int main() {
     std::cout << "========================================" << std::endl;
-    std::cout << " RUNNING TILE CACHE UNIT TESTS (10 TESTS) " << std::endl;
+    std::cout << " RUNNING TILE CACHE UNIT TESTS (11 TESTS) " << std::endl;
     std::cout << "========================================" << std::endl;
 
     // Test 1: Empty cache initialization & basic properties
@@ -544,8 +545,87 @@ int main() {
         std::cout << "  -> Passed: 600 operations fully matched ReferenceLRU model and strict all-pinned invariant." << std::endl;
     }
 
+    // Test 11: Tile failure recovery, exponential backoff, and explicit clearing
+    std::cout << "[TEST 11] Testing tile failure recovery, exponential backoff, and explicit clearing..." << std::endl;
+    {
+        pdf::TileCache cache(1024 * 1024);
+        auto key = pdf::TileKey::create(1, 0, 0, 0, 1.0, 1.0);
+
+        // 1. Initial failure tombstone
+        cache.markFailed(key);
+        if (!cache.isFailed(key)) {
+            std::cerr << "[FAIL] Key should be marked failed" << std::endl;
+            return 1;
+        }
+        if (cache.get(key).has_value()) {
+            std::cerr << "[FAIL] Failed tile must return nullopt on get()" << std::endl;
+            return 1;
+        }
+
+        // 2. Exponential backoff check: immediately false, then true after sleep
+        if (cache.canRetry(key, std::chrono::milliseconds(50))) {
+            std::cerr << "[FAIL] canRetry should be false immediately after failure" << std::endl;
+            return 1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        if (!cache.canRetry(key, std::chrono::milliseconds(50))) {
+            std::cerr << "[FAIL] canRetry should be true after backoff interval elapses" << std::endl;
+            return 1;
+        }
+
+        // 3. Overwriting failed tombstone with valid buffer clears failure and restores tile
+        auto validBuf = pdf::PixelBuffer::allocate(50, 50);
+        validBuf.data()[0] = 42;
+        bool kept = cache.put(key, validBuf);
+        if (!kept) {
+            std::cerr << "[FAIL] put() of valid buffer should succeed on prior failure" << std::endl;
+            return 1;
+        }
+        if (cache.isFailed(key)) {
+            std::cerr << "[FAIL] Key should no longer be marked failed after valid put()" << std::endl;
+            return 1;
+        }
+        auto retrieved = cache.get(key);
+        if (!retrieved.has_value() || retrieved->data()[0] != 42) {
+            std::cerr << "[FAIL] Retrieved buffer after recovery should match valid buffer" << std::endl;
+            return 1;
+        }
+
+        // 4. Test explicit clearFailed
+        auto key2 = pdf::TileKey::create(1, 1, 0, 0, 1.0, 1.0);
+        cache.markFailed(key2);
+        if (!cache.isFailed(key2)) {
+            std::cerr << "[FAIL] key2 should be marked failed" << std::endl;
+            return 1;
+        }
+        bool cleared = cache.clearFailed(key2);
+        if (!cleared || cache.isFailed(key2) || cache.contains(key2)) {
+            std::cerr << "[FAIL] clearFailed should completely clear failure tombstone" << std::endl;
+            return 1;
+        }
+
+        // 5. Test clearAllFailed
+        auto key3 = pdf::TileKey::create(2, 0, 0, 0, 1.0, 1.0);
+        cache.markFailed(key3);
+        if (!cache.isFailed(key3)) {
+            std::cerr << "[FAIL] key3 should be marked failed" << std::endl;
+            return 1;
+        }
+        cache.clearAllFailed();
+        if (cache.isFailed(key3) || cache.contains(key3)) {
+            std::cerr << "[FAIL] clearAllFailed should remove all failure tombstones" << std::endl;
+            return 1;
+        }
+        // Valid tile key must still be present!
+        if (!cache.contains(key) || !cache.get(key).has_value()) {
+            std::cerr << "[FAIL] clearAllFailed must not remove valid tiles" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Transient failure recovery, exponential backoff, and explicit clearing verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 10 TILE CACHE TESTS PASSED!        " << std::endl;
+    std::cout << " ALL 11 TILE CACHE TESTS PASSED!        " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

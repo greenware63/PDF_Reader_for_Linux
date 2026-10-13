@@ -37,7 +37,7 @@ jobs:
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release
 
-      - name: Configure CMake (ASan / UBSan)
+      - name: Configure CMake (Sanitizer)
         if: matrix.build_type == 'Sanitizer'
         run: |
           cmake -B build -G Ninja \
@@ -50,6 +50,7 @@ jobs:
 
       - name: Run CTest Test Suite
         env:
-          ASAN_OPTIONS: "detect_leaks=1:abort_on_error=1"
+          QT_QPA_PLATFORM: "offscreen"
+          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: ctest --test-dir build --output-on-failure

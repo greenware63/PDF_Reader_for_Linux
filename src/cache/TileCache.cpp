@@ -17,6 +17,40 @@ bool TileCache::isFailed(const TileKey& key) const {
     return it->second.entry.isFailed;
 }
 
+bool TileCache::canRetry(const TileKey& key, std::chrono::milliseconds baseBackoff) const {
+    auto it = m_cacheMap.find(key);
+    if (it == m_cacheMap.end() || !it->second.entry.isFailed) {
+        return false;
+    }
+    int shift = std::min(std::max(0, it->second.entry.failCount - 1), 5);
+    auto backoff = baseBackoff * (1 << shift);
+    auto elapsed = std::chrono::steady_clock::now() - it->second.entry.lastFailedTime;
+    return elapsed >= backoff;
+}
+
+bool TileCache::clearFailed(const TileKey& key) {
+    auto it = m_cacheMap.find(key);
+    if (it == m_cacheMap.end() || !it->second.entry.isFailed) {
+        return false;
+    }
+    m_currentBytes -= it->second.entry.bytesUsed;
+    m_lruList.erase(it->second.lruIter);
+    m_cacheMap.erase(it);
+    return true;
+}
+
+void TileCache::clearAllFailed() {
+    for (auto it = m_cacheMap.begin(); it != m_cacheMap.end(); ) {
+        if (it->second.entry.isFailed) {
+            m_currentBytes -= it->second.entry.bytesUsed;
+            m_lruList.erase(it->second.lruIter);
+            it = m_cacheMap.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 std::optional<PixelBuffer> TileCache::get(const TileKey& key) {
     auto it = m_cacheMap.find(key);
     if (it == m_cacheMap.end()) {
@@ -50,13 +84,14 @@ bool TileCache::put(const TileKey& key, PixelBuffer buffer) {
         it->second.entry.buffer = std::move(buffer);
         it->second.entry.bytesUsed = newBytes;
         it->second.entry.isFailed = false;
+        it->second.entry.failCount = 0;
 
         // Move to front (MRU)
         m_lruList.splice(m_lruList.begin(), m_lruList, it->second.lruIter);
     } else {
         // Insert new entry at front of LRU
         m_lruList.push_front(key);
-        TileCacheEntry entry{std::move(buffer), newBytes, false};
+        TileCacheEntry entry{std::move(buffer), newBytes, false, 0, {}};
         m_cacheMap.emplace(key, MapEntry{std::move(entry), m_lruList.begin()});
         m_currentBytes += newBytes;
     }
@@ -66,6 +101,7 @@ bool TileCache::put(const TileKey& key, PixelBuffer buffer) {
 }
 
 void TileCache::markFailed(const TileKey& key) {
+    auto now = std::chrono::steady_clock::now();
     auto it = m_cacheMap.find(key);
     if (it != m_cacheMap.end()) {
         m_currentBytes -= it->second.entry.bytesUsed;
@@ -74,11 +110,13 @@ void TileCache::markFailed(const TileKey& key) {
         it->second.entry.buffer = PixelBuffer{};
         it->second.entry.bytesUsed = TOMBSTONE_BYTE_WEIGHT;
         it->second.entry.isFailed = true;
+        it->second.entry.failCount++;
+        it->second.entry.lastFailedTime = now;
 
         m_lruList.splice(m_lruList.begin(), m_lruList, it->second.lruIter);
     } else {
         m_lruList.push_front(key);
-        TileCacheEntry entry{PixelBuffer{}, TOMBSTONE_BYTE_WEIGHT, true};
+        TileCacheEntry entry{PixelBuffer{}, TOMBSTONE_BYTE_WEIGHT, true, 1, now};
         m_cacheMap.emplace(key, MapEntry{std::move(entry), m_lruList.begin()});
         m_currentBytes += TOMBSTONE_BYTE_WEIGHT;
     }

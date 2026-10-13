@@ -93,10 +93,12 @@ add_library(pdf_engine STATIC
     include/engine/IDocument.h
     include/engine/IPage.h
     include/engine/PixelBuffer.h
+    include/engine/RenderWorker.h
     src/engine/PdfiumDocument.h
     src/engine/PdfiumDocument.cpp
     src/engine/PdfiumPage.h
     src/engine/PdfiumPage.cpp
+    src/engine/RenderWorker.cpp
 )
 
 target_include_directories(pdf_engine PUBLIC

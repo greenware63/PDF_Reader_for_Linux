@@ -83,6 +83,16 @@ public:
         return static_cast<int32_t>(std::round(fraction * static_cast<double>(m_maxSliderRange)));
     }
 
+    /**
+     * @brief Remaps a scrollbar slider value across a viewport resize for a document.
+     * Accurately converts old slider to document coordinates using old viewport, then maps to new slider.
+     * Prevents combining stale slider values with new viewport dimensions in compressed mode (> 10^9).
+     */
+    int32_t remapSliderOnResize(int32_t oldSlider, int64_t totalDocPixels, int64_t oldVpPixels, int64_t newVpPixels) const noexcept {
+        int64_t doc = sliderToDoc(oldSlider, totalDocPixels, oldVpPixels);
+        return docToSlider(doc, totalDocPixels, newVpPixels);
+    }
+
     int32_t maxSliderRange() const noexcept { return m_maxSliderRange; }
 
 private:

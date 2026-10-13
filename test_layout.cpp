@@ -478,8 +478,56 @@ int main() {
         std::cout << "  -> Passed: ScrollMapper verified across 1:1, 10^9, 2^31, trillion-pixel spans, and 1,000 property-based iterations." << std::endl;
     }
 
+    // Test 10: Compressed-scroll resize remapping edge case (> 10^9 slider range)
+    std::cout << "[TEST 10] Testing compressed-scroll resize remapping edge case (> 10^9)..." << std::endl;
+    {
+        layout::ScrollMapper mapper(1000000000); // 10^9 slider range
+        const int64_t totalDoc = 2500000000LL; // 2.5 billion pixels
+        const int64_t oldVp = 800;
+        const int64_t newVp = 1200;
+
+        // Arbitrary document position
+        const int64_t originalDocY = 1250000000LL;
+        int32_t oldSlider = mapper.docToSlider(originalDocY, totalDoc, oldVp);
+
+        // Naive broken approach: combining oldSlider with newVp directly drifts
+        int64_t naiveDocY = mapper.sliderToDoc(oldSlider, totalDoc, newVp);
+        // Demonstrating that oldSlider combined with newVp creates drift
+        int64_t drift = std::abs(naiveDocY - originalDocY);
+        if (drift < 50) {
+            std::cerr << "[FAIL] Expected naive approach to exhibit noticeable drift" << std::endl;
+            return 1;
+        }
+        // Correct remapped approach:
+        int32_t newSlider = mapper.remapSliderOnResize(oldSlider, totalDoc, oldVp, newVp);
+        int64_t correctedDocY = mapper.sliderToDoc(newSlider, totalDoc, newVp);
+
+        int64_t correctedDrift = std::abs(correctedDocY - originalDocY);
+        if (correctedDrift > 3) {
+            std::cerr << "[FAIL] remapSliderOnResize drift exceeded bound! drift=" << correctedDrift << std::endl;
+            return 1;
+        }
+
+        // Endpoint invariants on resize
+        int32_t oldMaxSlider, oldPageStep, oldSingleStep;
+        mapper.computeRange(totalDoc, oldVp, oldMaxSlider, oldPageStep, oldSingleStep);
+        int32_t newMaxSlider, newPageStep, newSingleStep;
+        mapper.computeRange(totalDoc, newVp, newMaxSlider, newPageStep, newSingleStep);
+
+        if (mapper.remapSliderOnResize(0, totalDoc, oldVp, newVp) != 0) {
+            std::cerr << "[FAIL] Resize remapping top endpoint != 0" << std::endl;
+            return 1;
+        }
+        if (mapper.remapSliderOnResize(oldMaxSlider, totalDoc, oldVp, newVp) != newMaxSlider) {
+            std::cerr << "[FAIL] Resize remapping bottom endpoint != newMaxSlider" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Compressed-scroll resize remapping edge case accurately verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 9 DOCUMENT LAYOUT TESTS PASSED!    " << std::endl;
+    std::cout << " ALL 10 DOCUMENT LAYOUT TESTS PASSED!   " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

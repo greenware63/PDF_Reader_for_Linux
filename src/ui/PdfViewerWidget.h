@@ -2,9 +2,9 @@
 
 #include <QAbstractScrollArea>
 #include <memory>
-#include <unordered_map>
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
+#include "engine/RenderWorker.h"
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
 #include "cache/TileCache.h"
@@ -36,11 +36,24 @@ public:
     const pdf::TileCache& cache() const { return m_cache; }
     pdf::TileCache& cache() { return m_cache; }
 
-    int64_t currentDocScrollX() const;
-    int64_t currentDocScrollY() const;
+    int64_t currentDocScrollX() const { return m_docScrollX; }
+    int64_t currentDocScrollY() const { return m_docScrollY; }
 
     void setDevicePixelRatioOverride(double dpr);
     double effectiveDpr() const;
+
+    /**
+     * @brief Retries any previously failed tiles by clearing failure tombstones.
+     */
+    void retryFailedTiles();
+
+    /**
+     * @brief Waits until background rendering is idle and flushes Qt event queue.
+     * Useful for deterministic testing.
+     */
+    void waitForRendering();
+
+    pdf::RenderWorker& renderWorker() { return m_renderWorker; }
 
 public Q_SLOTS:
     void nextPage();
@@ -65,6 +78,8 @@ protected:
 
 private Q_SLOTS:
     void onScrollValueChanged();
+    void onTileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key, const pdf::PixelBuffer& buffer);
+    void onTileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key);
 
 private:
     void updateLayoutGeometry();
@@ -73,21 +88,25 @@ private:
     void setDocScrollPosition(int64_t docX, int64_t docY);
 
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
+    void drawPendingPlaceholder(QPainter& painter, const QRectF& rect);
 
-    std::unique_ptr<pdf::IDocument> m_document;
+    std::shared_ptr<pdf::IDocument> m_document;
     layout::DocumentLayout m_layout;
     layout::ScrollMapper m_scrollMapper;
     pdf::TileCache m_cache;
-
-    // Cache of open page handles for UI-thread rendering pass
-    std::unordered_map<int, std::unique_ptr<pdf::IPage>> m_pageCache;
+    pdf::RenderWorker m_renderWorker;
 
     int64_t m_currentDocumentId{1};
+    uint64_t m_currentGeneration{1};
     int m_currentPage{0};
     double m_scale{DESKTOP_100_PERCENT_SCALE};
     double m_dprOverride{0.0};
     bool m_navigating{false};
     int m_wheelDeltaAccumulator{0};
+
+    // Primary 64-bit document coordinates, immune to 32-bit slider resize quantization
+    int64_t m_docScrollX{0};
+    int64_t m_docScrollY{0};
 };
 
 } // namespace ui
