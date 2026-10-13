@@ -3,7 +3,6 @@
 #include "engine/IDocument.h"
 #include "PdfiumPage.h"
 #include <fpdfview.h>
-#include <vector>
 
 namespace pdf {
 
@@ -25,7 +24,6 @@ private:
     static DocumentError mapPdfiumError(unsigned long fpdfError);
 
     DocumentHandle m_doc{nullptr};
-    std::shared_ptr<std::vector<uint8_t>> m_memoryBuffer; // Keeps memory alive while doc is open
     DocumentError m_lastError{DocumentError::None};
 };
 

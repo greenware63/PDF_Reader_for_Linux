@@ -1,6 +1,7 @@
 #include "PdfiumDocument.h"
 #include <mutex>
 #include <cstring>
+#include <vector>
 
 namespace pdf {
 
@@ -63,8 +64,9 @@ DocumentError PdfiumDocument::loadFromFile(const std::string& filePath, const st
     }
 
     // Success: atomically swap active document handle
-    m_doc = DocumentHandle(newDoc, FPDF_CloseDocument);
-    m_memoryBuffer.reset();
+    m_doc = DocumentHandle(newDoc, [](FPDF_DOCUMENT d) {
+        if (d) FPDF_CloseDocument(d);
+    });
     m_lastError = DocumentError::None;
     return DocumentError::None;
 }
@@ -75,13 +77,13 @@ DocumentError PdfiumDocument::loadFromMemory(const void* data, size_t size, cons
         return m_lastError;
     }
 
-    auto newBuffer = std::make_shared<std::vector<uint8_t>>(
+    auto bufferCopy = std::make_shared<std::vector<uint8_t>>(
         static_cast<const uint8_t*>(data),
         static_cast<const uint8_t*>(data) + size
     );
 
     const char* pwd = password.empty() ? nullptr : password.c_str();
-    FPDF_DOCUMENT newDoc = FPDF_LoadMemDocument64(newBuffer->data(), newBuffer->size(), pwd);
+    FPDF_DOCUMENT newDoc = FPDF_LoadMemDocument64(bufferCopy->data(), bufferCopy->size(), pwd);
     if (!newDoc) {
         unsigned long err = FPDF_GetLastError();
         if (err == FPDF_ERR_PASSWORD && !password.empty()) {
@@ -99,8 +101,12 @@ DocumentError PdfiumDocument::loadFromMemory(const void* data, size_t size, cons
         return m_lastError;
     }
 
-    m_doc = DocumentHandle(newDoc, FPDF_CloseDocument);
-    m_memoryBuffer = std::move(newBuffer);
+    // Tie memory buffer lifetime directly to DocumentHandle deleter.
+    // Keeps memory valid as long as either PdfiumDocument or any PdfiumPage exists!
+    m_doc = DocumentHandle(newDoc, [buf = std::move(bufferCopy)](FPDF_DOCUMENT d) {
+        if (d) FPDF_CloseDocument(d);
+        // buf is destroyed safely AFTER FPDF_CloseDocument completes
+    });
     m_lastError = DocumentError::None;
     return DocumentError::None;
 }
@@ -124,7 +130,6 @@ std::unique_ptr<IPage> PdfiumDocument::getPage(int pageIndex) {
 
 void PdfiumDocument::close() {
     m_doc.reset();
-    m_memoryBuffer.reset();
     m_lastError = DocumentError::None;
 }
 

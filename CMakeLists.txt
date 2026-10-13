@@ -32,8 +32,7 @@ if(WIN32)
     set(PDFIUM_ARCHIVE "pdfium-win-x64.tgz")
     set(PDFIUM_HASH "51621bcc1d9be9ea448f4b84b0516862b928e3968d3fca899af1a6d6e2848d6d")
 elseif(APPLE)
-    set(PDFIUM_ARCHIVE "pdfium-mac-x64.tgz")
-    set(PDFIUM_HASH "")
+    message(FATAL_ERROR "macOS is not currently supported in this Linux-focused workstation build.")
 else()
     set(PDFIUM_ARCHIVE "pdfium-linux-x64.tgz")
     set(PDFIUM_HASH "1c1894a12d4d96ee01400c3874444126254180c5c7d2ab628576b67f8120320a")
@@ -43,20 +42,12 @@ set(PDFIUM_DOWNLOAD_URL "https://github.com/bblanchon/pdfium-binaries/releases/d
 
 message(STATUS "Configuring PDFium from ${PDFIUM_DOWNLOAD_URL}")
 
-if(PDFIUM_HASH)
-    FetchContent_Declare(
-        pdfium_binaries
-        URL ${PDFIUM_DOWNLOAD_URL}
-        URL_HASH SHA256=${PDFIUM_HASH}
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-else()
-    FetchContent_Declare(
-        pdfium_binaries
-        URL ${PDFIUM_DOWNLOAD_URL}
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-endif()
+FetchContent_Declare(
+    pdfium_binaries
+    URL ${PDFIUM_DOWNLOAD_URL}
+    URL_HASH SHA256=${PDFIUM_HASH}
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
 
 FetchContent_MakeAvailable(pdfium_binaries)
 
@@ -137,13 +128,17 @@ add_test(
 )
 
 if(WIN32)
+    get_filename_component(COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(QT_BIN_DIR "${Qt6Core_DIR}/../../../bin" ABSOLUTE)
+    # Note: in ENVIRONMENT_MODIFICATION, subsequent prepends place the path earlier.
+    # Prepend Qt first, then compiler runtime so matching GCC runtime is found first.
     set_tests_properties(EngineRenderTestSuite PROPERTIES
-        ENVIRONMENT "PATH=C:/Program Files/JetBrains/CLion 2026.2.3.1/bin/mingw/bin;C:/Qt/6.7.2/mingw_64/bin;$ENV{PATH}"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR}"
     )
 endif()
 
-# GCC 15+ workaround for Qt 6.7.2 qcomparehelpers.h missing inline on IsFloatType_v
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15.0")
+# Scoped workaround specifically for Windows MinGW GCC >= 15 toolchain (CWG 2387 bug in Qt 6.7.2 qcomparehelpers.h)
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15.0")
     target_link_options(pdf-reader PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_render PRIVATE -Wl,--allow-multiple-definition)
 endif()

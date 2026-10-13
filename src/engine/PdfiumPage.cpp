@@ -32,9 +32,12 @@ QImage PdfiumPage::render(double scale, double devicePixelRatio) {
         return {};
     }
 
-    const double effectiveScale = scale * devicePixelRatio;
-    int pixelW = static_cast<int>(std::round(m_width * effectiveScale));
-    int pixelH = static_cast<int>(std::round(m_height * effectiveScale));
+    const double targetLogicalW = m_width * scale;
+    const double targetLogicalH = m_height * scale;
+    const double desiredDpr = (devicePixelRatio > 0.0) ? devicePixelRatio : 1.0;
+
+    int pixelW = static_cast<int>(std::round(targetLogicalW * desiredDpr));
+    int pixelH = static_cast<int>(std::round(targetLogicalH * desiredDpr));
 
     if (pixelW <= 0 || pixelH <= 0) {
         return {};
@@ -77,7 +80,11 @@ QImage PdfiumPage::render(double scale, double devicePixelRatio) {
     FPDF_RenderPageBitmap(bitmap, m_page, 0, 0, pixelW, pixelH, 0, flags);
     FPDFBitmap_Destroy(bitmap);
 
-    image.setDevicePixelRatio(devicePixelRatio);
+    // Scale effective DPR proportionally so the logical widget display size
+    // (pixelW / effectiveDpr) remains exactly equal to targetLogicalW (m_width * scale).
+    // The page becomes blurrier under extreme zoom rather than visually shrinking.
+    const double effectiveDpr = static_cast<double>(pixelW) / targetLogicalW;
+    image.setDevicePixelRatio(effectiveDpr);
     return image;
 }
 

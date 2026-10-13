@@ -71,7 +71,6 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
 }
 
 void PdfViewerWidget::closeDocument() {
-    // Release page handle first before closing document
     m_activePage.reset();
     if (m_document) {
         m_document->close();
@@ -97,7 +96,7 @@ void PdfViewerWidget::goToPage(int pageIndex) {
     if (!m_document || pageIndex < 0 || pageIndex >= pageCount()) {
         return;
     }
-    m_activePage.reset(); // safely release previous
+    m_activePage.reset();
     m_currentPage = pageIndex;
     m_activePage = m_document->getPage(m_currentPage);
     updateRender();
@@ -145,7 +144,8 @@ void PdfViewerWidget::updateRender() {
     QImage rendered = m_activePage->render(m_zoom, dpr);
     if (!rendered.isNull()) {
         QPixmap pixmap = QPixmap::fromImage(rendered);
-        pixmap.setDevicePixelRatio(dpr);
+        // Use rendered.devicePixelRatio() which correctly reflects effective DPR
+        pixmap.setDevicePixelRatio(rendered.devicePixelRatio());
         m_pageLabel->setPixmap(pixmap);
         m_pageLabel->adjustSize();
     }
@@ -157,7 +157,6 @@ void PdfViewerWidget::resizeEvent(QResizeEvent* event) {
 
 void PdfViewerWidget::wheelEvent(QWheelEvent* event) {
     if (event->modifiers() & Qt::ControlModifier) {
-        // Accumulate wheel angle deltas to handle high-precision touchpad scroll smoothly
         m_wheelDeltaAccumulator += event->angleDelta().y();
         constexpr int DELTA_THRESHOLD = 120; // 1 mouse wheel click standard
 
