@@ -4,8 +4,10 @@
 #include <QAbstractScrollArea>
 #include <QScrollBar>
 #include <memory>
+#include <unordered_map>
 #include "engine/IDocument.h"
 #include "layout/DocumentLayout.h"
+#include "layout/ScrollMapper.h"
 #include "cache/TileCache.h"
 
 namespace ui {
@@ -62,13 +64,6 @@ private:
     void updateLayoutGeometry();
     void updateScrollBars();
 
-    int64_t maxScrollDocY() const;
-    int64_t maxScrollDocX() const;
-    int64_t scrollBarToDocY(int val) const;
-    int docYToScrollBar(int64_t docY) const;
-    int64_t scrollBarToDocX(int val) const;
-    int docXToScrollBar(int64_t docX) const;
-
     int64_t currentDocScrollX() const;
     int64_t currentDocScrollY() const;
     void setDocScrollPosition(int64_t docX, int64_t docY);
@@ -77,12 +72,17 @@ private:
 
     std::unique_ptr<pdf::IDocument> m_document;
     layout::DocumentLayout m_layout;
+    layout::ScrollMapper m_scrollMapper;
     pdf::TileCache m_cache;
+
+    // Cache of open page handles for UI-thread rendering pass
+    std::unordered_map<int, std::unique_ptr<pdf::IPage>> m_pageCache;
 
     int64_t m_currentDocumentId{1};
     int m_currentPage{0};
     double m_scale{96.0 / 72.0}; // Standard desktop 100% scale (96 DPI / 72 pt = 1.3333x)
     int m_wheelDeltaAccumulator{0};
+    bool m_navigating{false};
 };
 
 } // namespace ui

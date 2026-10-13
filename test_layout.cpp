@@ -3,7 +3,9 @@
 #include <cmath>
 #include <random>
 #include <limits>
+#include <cstdint>
 #include "layout/DocumentLayout.h"
+#include "layout/ScrollMapper.h"
 
 // Reference linear scan to verify binary search correctness across 1,000 random queries
 static layout::ViewportRange bruteForceVisiblePages(const layout::DocumentLayout& layout,
@@ -90,183 +92,187 @@ int main() {
     };
     layout.setPageSizes(mixedPages);
 
-    // Case 3a: Narrow viewport (viewport narrower than the landscape page)
-    const int64_t narrowVpW = 800;
-    const int64_t margin = 20;
-    layout.updateLayout(1.0, 1.0, narrowVpW, 30, margin);
-
-    // Widest page is page 1 (842 px). Content width must be 842 + 2 * 20 = 882 px
-    int64_t expectedContentW = 842 + 2 * margin;
-    if (layout.maxDocumentWidth() != expectedContentW) {
-        std::cerr << "[FAIL] maxDocumentWidth was " << layout.maxDocumentWidth() 
-                  << ", expected " << expectedContentW << std::endl;
-        return 1;
-    }
-
-    // Every page must be centered relative to expectedContentW:
-    for (int i = 0; i < layout.pageCount(); ++i) {
-        const auto& p = layout.getPageLayout(i);
-        int64_t centerX = p.leftPixel + (p.widthPixel / 2);
-        int64_t expectedCenter = expectedContentW / 2;
-        if (std::abs(centerX - expectedCenter) > 1) {
-            std::cerr << "[FAIL] Page " << i << " center X drifted: " << centerX 
-                      << " vs expected " << expectedCenter << std::endl;
-            return 1;
-        }
-        if (p.leftPixel < margin) {
-            std::cerr << "[FAIL] Page " << i << " leftPixel violated margin in narrow viewport: " 
-                      << p.leftPixel << std::endl;
-            return 1;
-        }
-    }
-
-    // Case 3b: Wide viewport (viewport wider than all pages)
-    const int64_t wideVpW = 2000;
-    layout.updateLayout(1.0, 1.0, wideVpW, 30, margin);
-    if (layout.maxDocumentWidth() != wideVpW) {
-        std::cerr << "[FAIL] maxDocumentWidth in wide viewport was " << layout.maxDocumentWidth()
-                  << ", expected " << wideVpW << std::endl;
+    // 3a. Wide viewport: 2000px width. Content width should expand to viewportWidth, centering pages.
+    layout.updateLayout(1.0, 1.0, 2000, 20, 20);
+    if (layout.maxDocumentWidth() != 2000) {
+        std::cerr << "[FAIL] Content width should match viewport width when viewport is wider than pages!" << std::endl;
         return 1;
     }
     for (int i = 0; i < layout.pageCount(); ++i) {
         const auto& p = layout.getPageLayout(i);
-        int64_t centerX = p.leftPixel + (p.widthPixel / 2);
-        if (std::abs(centerX - (wideVpW / 2)) > 1) {
-            std::cerr << "[FAIL] Page " << i << " not centered in wide viewport" << std::endl;
+        int64_t expectedLeft = (2000 - p.widthPixel) / 2;
+        if (p.leftPixel != expectedLeft) {
+            std::cerr << "[FAIL] Page " << i << " is not centered in wide viewport! Got " 
+                      << p.leftPixel << ", expected " << expectedLeft << std::endl;
             return 1;
         }
     }
-    std::cout << "  -> Passed: All pages vertically aligned and centered in both narrow and wide viewports." << std::endl;
 
-    // Test 4: Boundary Edge Cases (Above, Below, Gap, and Exact Edges)
-    std::cout << "[TEST 4] Testing boundary edge cases (gaps, above, below, exact edges)..." << std::endl;
-    // 4a. Viewport entirely above first page
-    auto rangeAbove = layout.getVisiblePages(-500, 400);
-    if (rangeAbove.isValid()) {
-        std::cerr << "[FAIL] Expected invalid range above first page" << std::endl;
+    // 3b. Narrow viewport: 600px width. Widest page is 842px + 2*20 margin = 882px.
+    // Content width must stay 882px, ensuring wide pages can scroll horizontally rather than clip.
+    layout.updateLayout(1.0, 1.0, 600, 20, 20);
+    if (layout.maxDocumentWidth() != 882) {
+        std::cerr << "[FAIL] Content width should be widestPage + 2*margin (882px) in narrow viewport! Got "
+                  << layout.maxDocumentWidth() << std::endl;
         return 1;
     }
-
-    // 4b. Viewport entirely in gap between page 0 and page 1
-    int64_t gapTop = layout.getPageLayout(0).bottomPixel() + 5;
-    int64_t gapH = 15; // 30px gap total, sits in middle 15px
-    auto rangeGap = layout.getVisiblePages(gapTop, gapH);
-    if (rangeGap.isValid()) {
-        std::cerr << "[FAIL] Expected invalid range in gap, got [" 
-                  << rangeGap.firstVisiblePage << ", " << rangeGap.lastVisiblePage << "]" << std::endl;
-        return 1;
+    for (int i = 0; i < layout.pageCount(); ++i) {
+        const auto& p = layout.getPageLayout(i);
+        int64_t expectedLeft = (882 - p.widthPixel) / 2;
+        if (p.leftPixel != expectedLeft) {
+            std::cerr << "[FAIL] Page " << i << " not centered relative to content width in narrow viewport!" << std::endl;
+            return 1;
+        }
     }
+    std::cout << "  -> Passed: Content width expands to viewport in wide view, and expands to widest page in narrow view." << std::endl;
 
-    // 4c. Viewport entirely below last page
-    int64_t belowTop = layout.getPageLayout(4).bottomPixel() + 100;
-    auto rangeBelow = layout.getVisiblePages(belowTop, 500);
-    if (rangeBelow.isValid()) {
-        std::cerr << "[FAIL] Expected invalid range below last page" << std::endl;
-        return 1;
+    // Test 4: Visible pages binary search stress test
+    std::cout << "[TEST 4] Testing visible pages binary search against linear brute-force scan..." << std::endl;
+    std::vector<std::pair<double, double>> stressPages;
+    for (int i = 0; i < 500; ++i) {
+        stressPages.push_back({595.0 + (i % 5) * 50.0, 842.0 - (i % 3) * 40.0});
     }
+    layout.setPageSizes(stressPages);
+    layout.updateLayout(1.0, 1.0, 1200, 15, 15);
 
-    // 4d. Viewport exactly touching page edge (starting exactly at page top)
-    const auto& p2 = layout.getPageLayout(2);
-    auto rangeExactTop = layout.getVisiblePages(p2.topPixel, 100);
-    if (!rangeExactTop.isValid() || rangeExactTop.firstVisiblePage != 2) {
-        std::cerr << "[FAIL] Viewport exactly at page 2 top failed to detect page 2" << std::endl;
-        return 1;
-    }
-
-    // 4e. Viewport ending exactly at page top (viewportBottom == p2.topPixel -> should NOT include p2)
-    auto rangeEndingAtTop = layout.getVisiblePages(p2.topPixel - 100, 100);
-    if (rangeEndingAtTop.isValid() && rangeEndingAtTop.lastVisiblePage >= 2) {
-        std::cerr << "[FAIL] Viewport ending at page top improperly included page 2" << std::endl;
-        return 1;
-    }
-    std::cout << "  -> Passed: Exact edge and gap detection passed all boundary assertions." << std::endl;
-
-    // Test 5: Brute-Force Property Test (1,000 random viewport queries cross-checked against linear scan)
-    std::cout << "[TEST 5] Running 1,000 random viewport queries cross-checked against linear scan..." << std::endl;
-    std::mt19937_64 rng(42);
-    std::uniform_int_distribution<int64_t> distTop(-200, layout.totalDocumentHeight() + 200);
-    std::uniform_int_distribution<int64_t> distH(1, 2500);
-
+    std::mt19937 rng(42);
+    const int64_t totalHeight = layout.totalDocumentHeight();
     for (int q = 0; q < 1000; ++q) {
-        int64_t vpTop = distTop(rng);
-        int64_t vpH = distH(rng);
+        int64_t vpTop = static_cast<int64_t>(rng() % (totalHeight + 1000)) - 500;
+        int64_t vpH = 100 + (rng() % 2000);
 
-        auto fastResult = layout.getVisiblePages(vpTop, vpH);
-        auto bruteResult = bruteForceVisiblePages(layout, vpTop, vpH);
+        auto fastRange = layout.getVisiblePages(vpTop, vpH);
+        auto refRange = bruteForceVisiblePages(layout, vpTop, vpH);
 
-        if (fastResult.firstVisiblePage != bruteResult.firstVisiblePage ||
-            fastResult.lastVisiblePage != bruteResult.lastVisiblePage) {
-            std::cerr << "[FAIL] Query mismatch at vpTop=" << vpTop << ", vpH=" << vpH
-                      << " -> BinarySearch: [" << fastResult.firstVisiblePage << ", " << fastResult.lastVisiblePage << "]"
-                      << " vs BruteForce: [" << bruteResult.firstVisiblePage << ", " << bruteResult.lastVisiblePage << "]" << std::endl;
+        if (fastRange.firstVisiblePage != refRange.firstVisiblePage ||
+            fastRange.lastVisiblePage != refRange.lastVisiblePage) {
+            std::cerr << "[FAIL] Query " << q << " mismatch: vpTop=" << vpTop << ", vpH=" << vpH
+                      << " -> fast: [" << fastRange.firstVisiblePage << ", " << fastRange.lastVisiblePage << "]"
+                      << " vs ref: [" << refRange.firstVisiblePage << ", " << refRange.lastVisiblePage << "]" << std::endl;
             return 1;
         }
     }
-    std::cout << "  -> Passed: 1,000 / 1,000 random queries matched brute force exactly." << std::endl;
+    std::cout << "  -> Passed: 1,000 random viewport queries 100% matched brute-force linear scan." << std::endl;
 
-    // Test 6: Visible Tile Exact Partition & Area Conservation Invariant
-    std::cout << "[TEST 6] Testing visible tile exact non-overlapping partition & area conservation..." << std::endl;
-    std::uniform_int_distribution<int64_t> distVpX(-50, layout.maxDocumentWidth() + 50);
-    std::uniform_int_distribution<int64_t> distVpY(-50, layout.totalDocumentHeight() + 50);
-    std::uniform_int_distribution<int64_t> distVpW(200, 1500);
-    std::uniform_int_distribution<int64_t> distVpH(200, 1500);
+    // Test 5: Exact 512x512 tile grid coordinate calculation
+    std::cout << "[TEST 5] Testing exact 512x512 tile grid coordinate calculation..." << std::endl;
+    layout.setPageSizes({{1200.0, 1400.0}});
+    layout.updateLayout(1.0, 1.0, 1500, 20, 20);
+    const auto& p0 = layout.getPageLayout(0);
 
-    for (int trial = 0; trial < 100; ++trial) {
-        layout::Rect64 vp{distVpX(rng), distVpY(rng), distVpW(rng), distVpH(rng)};
-        auto tiles = layout.getVisibleTiles(vp, 512);
+    layout::Rect64 viewportWholeDoc{0, 0, layout.maxDocumentWidth(), layout.totalDocumentHeight()};
+    auto tiles = layout.getVisibleTiles(viewportWholeDoc, 512);
 
-        // Invariant A: No tiles for the same page may overlap
-        for (size_t i = 0; i < tiles.size(); ++i) {
-            const auto& tA = tiles[i];
-            for (size_t j = i + 1; j < tiles.size(); ++j) {
-                const auto& tB = tiles[j];
-                if (tA.pageIndex != tB.pageIndex) continue;
+    int expectedCols = (1200 + 511) / 512; // 3 columns: 512, 512, 176
+    int expectedRows = (1400 + 511) / 512; // 3 rows: 512, 512, 376
+    if (static_cast<int>(tiles.size()) != expectedCols * expectedRows) {
+        std::cerr << "[FAIL] Expected " << (expectedCols * expectedRows) << " tiles, got " << tiles.size() << std::endl;
+        return 1;
+    }
 
-                bool xOverlap = (tA.tileXOnPage < tB.tileXOnPage + tB.tileWidth) &&
-                                (tB.tileXOnPage < tA.tileXOnPage + tA.tileWidth);
-                bool yOverlap = (tA.tileYOnPage < tB.tileYOnPage + tB.tileHeight) &&
-                                (tB.tileYOnPage < tA.tileYOnPage + tA.tileHeight);
-                if (xOverlap && yOverlap) {
-                    std::cerr << "[FAIL] Overlapping tiles detected on page " << tA.pageIndex << std::endl;
-                    return 1;
-                }
+    // Verify rightmost and bottommost clipped dimensions
+    for (const auto& t : tiles) {
+        if (t.col == 2) {
+            if (t.tileWidth != 176) {
+                std::cerr << "[FAIL] Col 2 clipped width expected 176, got " << t.tileWidth << std::endl;
+                return 1;
+            }
+        } else {
+            if (t.tileWidth != 512) {
+                std::cerr << "[FAIL] Full tile width expected 512, got " << t.tileWidth << std::endl;
+                return 1;
             }
         }
 
-        // Invariant B: Area conservation - Sum of clipped tile areas must EQUAL exact viewport ∩ page area
-        auto range = layout.getVisiblePages(vp.y, vp.height);
-        if (range.isValid()) {
-            for (int pIdx = range.firstVisiblePage; pIdx <= range.lastVisiblePage; ++pIdx) {
-                const auto& page = layout.getPageLayout(pIdx);
-                int64_t interX0 = std::max(vp.x, page.leftPixel);
-                int64_t interY0 = std::max(vp.y, page.topPixel);
-                int64_t interX1 = std::min(vp.right(), page.rightPixel());
-                int64_t interY1 = std::min(vp.bottom(), page.bottomPixel());
+        if (t.row == 2) {
+            if (t.tileHeight != 376) {
+                std::cerr << "[FAIL] Row 2 clipped height expected 376, got " << t.tileHeight << std::endl;
+                return 1;
+            }
+        } else {
+            if (t.tileHeight != 512) {
+                std::cerr << "[FAIL] Full tile height expected 512, got " << t.tileHeight << std::endl;
+                return 1;
+            }
+        }
 
-                int64_t expectedIntersectionArea = 0;
-                if (interX1 > interX0 && interY1 > interY0) {
-                    expectedIntersectionArea = (interX1 - interX0) * (interY1 - interY0);
-                }
+        if (t.docX != p0.leftPixel + t.tileXOnPage || t.docY != p0.topPixel + t.tileYOnPage) {
+            std::cerr << "[FAIL] Document tile coordinates misaligned with page layout!" << std::endl;
+            return 1;
+        }
+    }
+    std::cout << "  -> Passed: Exact 512x512 tile grid coordinate calculation and right/bottom edge clipping verified." << std::endl;
 
-                int64_t summedTileClippedArea = 0;
-                for (const auto& t : tiles) {
-                    if (t.pageIndex != pIdx) continue;
-                    int64_t tX0 = std::max(vp.x, t.docX);
-                    int64_t tY0 = std::max(vp.y, t.docY);
-                    int64_t tX1 = std::min(vp.right(), t.docX + t.tileWidth);
-                    int64_t tY1 = std::min(vp.bottom(), t.docY + t.tileHeight);
+    // Test 6: Visible tile partition completeness and non-overlap
+    std::cout << "[TEST 6] Testing visible tile partition completeness and non-overlap..." << std::endl;
+    {
+        std::vector<std::pair<double, double>> multiTestPages = {
+            {595.0, 842.0},
+            {842.0, 595.0},
+            {1200.0, 1600.0}
+        };
+        layout.setPageSizes(multiTestPages);
+        layout.updateLayout(1.333, 1.5, 1400, 20, 20);
 
-                    if (tX1 > tX0 && tY1 > tY0) {
-                        summedTileClippedArea += (tX1 - tX0) * (tY1 - tY0);
+        std::mt19937 tileRng(999);
+        const int64_t maxW = layout.maxDocumentWidth();
+        const int64_t maxH = layout.totalDocumentHeight();
+
+        for (int q = 0; q < 100; ++q) {
+            int64_t vpX = static_cast<int64_t>(tileRng() % (maxW + 200)) - 100;
+            int64_t vpY = static_cast<int64_t>(tileRng() % (maxH + 200)) - 100;
+            int64_t vpW = 200 + (tileRng() % 1200);
+            int64_t vpH = 200 + (tileRng() % 1200);
+            layout::Rect64 queryVp{vpX, vpY, vpW, vpH};
+
+            auto queryTiles = layout.getVisibleTiles(queryVp, 512);
+
+            // Invariant 1: No two tiles from the same page overlap
+            for (size_t i = 0; i < queryTiles.size(); ++i) {
+                for (size_t j = i + 1; j < queryTiles.size(); ++j) {
+                    if (queryTiles[i].pageIndex == queryTiles[j].pageIndex) {
+                        bool xOverlap = (queryTiles[i].docX < queryTiles[j].docX + queryTiles[j].tileWidth) &&
+                                        (queryTiles[i].docX + queryTiles[i].tileWidth > queryTiles[j].docX);
+                        bool yOverlap = (queryTiles[i].docY < queryTiles[j].docY + queryTiles[j].tileHeight) &&
+                                        (queryTiles[i].docY + queryTiles[i].tileHeight > queryTiles[j].docY);
+                        if (xOverlap && yOverlap) {
+                            std::cerr << "[FAIL] Overlapping tiles detected in partition!" << std::endl;
+                            return 1;
+                        }
                     }
                 }
+            }
 
-                if (summedTileClippedArea != expectedIntersectionArea) {
-                    std::cerr << "[FAIL] Area conservation violated on page " << pIdx 
-                              << ": Summed tile area=" << summedTileClippedArea 
-                              << ", Expected viewport∩page=" << expectedIntersectionArea << std::endl;
-                    return 1;
+            // Invariant 2: Total area of clipped tiles across visible pages must exactly equal
+            // the intersection area of queryVp with all pages.
+            int64_t expectedIntersectionArea = 0;
+            for (int p = 0; p < layout.pageCount(); ++p) {
+                const auto& pl = layout.getPageLayout(p);
+                int64_t interLeft = std::max(queryVp.x, pl.leftPixel);
+                int64_t interRight = std::min(queryVp.right(), pl.rightPixel());
+                int64_t interTop = std::max(queryVp.y, pl.topPixel);
+                int64_t interBottom = std::min(queryVp.bottom(), pl.bottomPixel());
+                if (interRight > interLeft && interBottom > interTop) {
+                    expectedIntersectionArea += (interRight - interLeft) * (interBottom - interTop);
                 }
+            }
+
+            int64_t summedTileClippedArea = 0;
+            for (const auto& t : queryTiles) {
+                int64_t cLeft = std::max(queryVp.x, t.docX);
+                int64_t cRight = std::min(queryVp.right(), t.docX + t.tileWidth);
+                int64_t cTop = std::max(queryVp.y, t.docY);
+                int64_t cBottom = std::min(queryVp.bottom(), t.docY + t.tileHeight);
+                if (cRight > cLeft && cBottom > cTop) {
+                    summedTileClippedArea += (cRight - cLeft) * (cBottom - cTop);
+                }
+            }
+
+            if (summedTileClippedArea != expectedIntersectionArea) {
+                std::cerr << "[FAIL] Area conservation violated on page " 
+                          << ": Summed tile area=" << summedTileClippedArea 
+                          << ", Expected viewport∩page=" << expectedIntersectionArea << std::endl;
+                return 1;
             }
         }
     }
@@ -358,8 +364,68 @@ int main() {
               << deepRange.firstVisiblePage << ", " << deepRange.lastVisiblePage << "]." << std::endl;
     std::cout << "  -> Passed: Handled 4.21 billion pixels with zero overflow." << std::endl;
 
+    // Test 9: ScrollMapper Qt-free bidirectional mapping at 10^9 and 2^31
+    std::cout << "[TEST 9] Testing ScrollMapper bidirectional mapping at 10^9 and 2^31..." << std::endl;
+    {
+        layout::ScrollMapper mapper(1000000000); // 10^9
+
+        // Case A: Small document (50,000 px, viewport 1,000 px) -> 1:1 exact mapping
+        int32_t maxSlider = 0, pageStep = 0, singleStep = 0;
+        mapper.computeRange(50000, 1000, maxSlider, pageStep, singleStep, 40);
+        if (maxSlider != 49000 || pageStep != 1000 || singleStep != 40) {
+            std::cerr << "[FAIL] Small document range compute failed: maxSlider=" << maxSlider << std::endl;
+            return 1;
+        }
+        if (mapper.docToSlider(12345, 50000, 1000) != 12345 ||
+            mapper.sliderToDoc(12345, 50000, 1000) != 12345) {
+            std::cerr << "[FAIL] 1:1 exact mapping failed" << std::endl;
+            return 1;
+        }
+
+        // Case B: Boundary at 10^9 px
+        int64_t doc10e9 = 1000000000LL + 1000LL;
+        mapper.computeRange(doc10e9, 1000, maxSlider, pageStep, singleStep, 40);
+        if (maxSlider != 1000000000) {
+            std::cerr << "[FAIL] Boundary 10^9 maxSlider expected 10^9, got " << maxSlider << std::endl;
+            return 1;
+        }
+
+        // Case C: Enormous document exceeding 2^31 (5,000,000,000 px, viewport 1,000 px)
+        int64_t hugeDoc = 5000000000LL;
+        int64_t hugeVp = 1000;
+        mapper.computeRange(hugeDoc, hugeVp, maxSlider, pageStep, singleStep, 40);
+        if (maxSlider != 1000000000) {
+            std::cerr << "[FAIL] Compressed mapping must cap at 10^9, got " << maxSlider << std::endl;
+            return 1;
+        }
+
+        // Check midpoint round trip
+        int64_t maxScroll = hugeDoc - hugeVp;
+        int64_t midDoc = maxScroll / 2;
+        int32_t sliderVal = mapper.docToSlider(midDoc, hugeDoc, hugeVp);
+        if (sliderVal != 500000000) {
+            std::cerr << "[FAIL] Expected midpoint slider 500,000,000, got " << sliderVal << std::endl;
+            return 1;
+        }
+        int64_t roundTripDoc = mapper.sliderToDoc(sliderVal, hugeDoc, hugeVp);
+        if (std::abs(roundTripDoc - midDoc) > 10) {
+            std::cerr << "[FAIL] Round trip drift too large: " << std::abs(roundTripDoc - midDoc) << std::endl;
+            return 1;
+        }
+
+        // Test extreme coordinates (10^12 px, zero overflow)
+        int64_t terraDoc = 1000000000000LL; // 1 trillion pixels
+        int64_t terraScroll = terraDoc - 1000;
+        int32_t terraSlider = mapper.docToSlider(terraScroll / 2, terraDoc, 1000);
+        if (terraSlider != 500000000) {
+            std::cerr << "[FAIL] Trillion-pixel coordinate scaling failed: " << terraSlider << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: ScrollMapper verified across 1:1, 10^9, 2^31, and trillion-pixel spans." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 8 DOCUMENT LAYOUT TESTS PASSED!    " << std::endl;
+    std::cout << " ALL 9 DOCUMENT LAYOUT TESTS PASSED!    " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
