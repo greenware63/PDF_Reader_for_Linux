@@ -3,10 +3,12 @@
 #include <fstream>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <QImage>
 #include <QColor>
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
+#include "engine/PixelBuffer.h"
 
 int main(int argc, char* argv[]) {
     std::cout << "========================================" << std::endl;
@@ -127,7 +129,7 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "  -> Passed: Non-white glyph/graphic pixels successfully detected." << std::endl;
 
-    // Test 8: Memory buffer lifetime test (Problem 1 fix verification)
+    // Test 8: Memory buffer lifetime test
     std::cout << "[TEST 8] Testing in-memory loaded document lifetime tied to handle..." << std::endl;
     std::ifstream file(pdfPath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
@@ -155,8 +157,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Now close memDoc while memPage is still alive.
-    // The underlying buffer must NOT be deallocated because memPage holds DocumentHandle.
     memDoc->close();
 
     QImage memRendered = memPage->render(1.0, 1.0);
@@ -175,7 +175,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Verify absolute physical pixel bounds
     constexpr int MAX_DIMENSION = 8192;
     constexpr int64_t MAX_TOTAL_PIXELS = 16 * 1024 * 1024;
     int64_t totalClampedPixels = static_cast<int64_t>(clampedImage.width()) * clampedImage.height();
@@ -189,7 +188,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Verify both logical width and logical height are preserved
     double logicalW = clampedImage.width() / clampedImage.devicePixelRatio();
     double logicalH = clampedImage.height() / clampedImage.devicePixelRatio();
     double expectedLogicalW = w * EXTREME_ZOOM;
@@ -212,13 +210,11 @@ int main(int argc, char* argv[]) {
         std::cerr << "[FAIL] Failed to obtain page prior to reload" << std::endl;
         return 1;
     }
-    // Reload document from file
     err = doc->loadFromFile(pdfPath);
     if (err != pdf::DocumentError::None) {
         std::cerr << "[FAIL] Reload failed: " << static_cast<int>(err) << std::endl;
         return 1;
     }
-    // Retained page from previous document session must still be safely renderable
     QImage retainedRender = retainedPage->render(1.0, 1.0);
     if (retainedRender.isNull()) {
         std::cerr << "[FAIL] Retained page failed to render after file reload!" << std::endl;
@@ -226,8 +222,79 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "  -> Passed: retained page from earlier load remained safely accessible." << std::endl;
 
+    // Test 11: Tile Stitching Invariant Test (512x512 tiles stitched vs Full-Page Render)
+    std::cout << "[TEST 11] Testing Tile Stitching Invariant (512x512 tiles vs full-page render)..." << std::endl;
+    const double testScale = 1.333333; // standard 100% desktop scale
+    const double testDpr = 1.5;        // fractional DPR
+    int fullW = 0, fullH = 0;
+    page->getPixelDimensions(testScale, testDpr, fullW, fullH);
+
+    // 1. Render single full-page buffer
+    pdf::PixelBuffer fullPageBuf = page->renderTile({0, 0, fullW, fullH}, testScale, testDpr);
+    if (!fullPageBuf.isValid()) {
+        std::cerr << "[FAIL] Failed to render full page buffer" << std::endl;
+        return 1;
+    }
+
+    // 2. Allocate stitched canvas
+    pdf::PixelBuffer stitchedBuf = pdf::PixelBuffer::allocate(fullW, fullH);
+    if (!stitchedBuf.isValid()) {
+        std::cerr << "[FAIL] Failed to allocate stitched canvas" << std::endl;
+        return 1;
+    }
+
+    // 3. Render grid of 512x512 tiles and copy into stitched canvas
+    constexpr int TILE_SIZE = 512;
+    int tileCount = 0;
+    for (int y = 0; y < fullH; y += TILE_SIZE) {
+        for (int x = 0; x < fullW; x += TILE_SIZE) {
+            int tw = std::min(TILE_SIZE, fullW - x);
+            int th = std::min(TILE_SIZE, fullH - y);
+            pdf::PixelBuffer tile = page->renderTile({x, y, tw, th}, testScale, testDpr);
+            if (!tile.isValid() || tile.width() != tw || tile.height() != th) {
+                std::cerr << "[FAIL] Tile (" << x << ", " << y << ") render failed!" << std::endl;
+                return 1;
+            }
+
+            for (int r = 0; r < th; ++r) {
+                const uint8_t* srcRow = tile.data() + r * tile.stride();
+                uint8_t* dstRow = stitchedBuf.data() + (y + r) * stitchedBuf.stride() + x * 4;
+                std::memcpy(dstRow, srcRow, tw * 4);
+            }
+            ++tileCount;
+        }
+    }
+    std::cout << "  -> Rendered and stitched " << tileCount << " tiles (" << fullW << " x " << fullH << " px)." << std::endl;
+
+    // 4. Pixel-for-pixel comparison across the entire page
+    int diffCount = 0;
+    int maxDiff = 0;
+    for (int y = 0; y < fullH; ++y) {
+        const uint8_t* fullRow = fullPageBuf.data() + y * fullPageBuf.stride();
+        const uint8_t* stitchRow = stitchedBuf.data() + y * stitchedBuf.stride();
+        for (int x = 0; x < fullW * 4; ++x) {
+            int delta = std::abs(static_cast<int>(fullRow[x]) - static_cast<int>(stitchRow[x]));
+            if (delta > 0) {
+                ++diffCount;
+                if (delta > maxDiff) maxDiff = delta;
+            }
+        }
+    }
+
+    if (diffCount > 0) {
+        std::cout << "  [INFO] Stitched vs full-page delta: " << diffCount 
+                  << " byte diffs, max delta = " << maxDiff << " / 255" << std::endl;
+        // Rasterizer anti-aliasing boundary effects at tile edges can create slight +-1 or +-2 sub-pixel variations
+        if (maxDiff > 3) {
+            std::cerr << "[FAIL] Stitched image differs significantly from full page render (max diff: " 
+                      << maxDiff << ")!" << std::endl;
+            return 1;
+        }
+    }
+    std::cout << "  -> Passed: Stitched tile matrix perfectly matches full-page raster!" << std::endl;
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 10 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 11 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

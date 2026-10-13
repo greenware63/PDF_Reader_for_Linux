@@ -1,5 +1,6 @@
 #pragma once
 
+#include "PixelBuffer.h"
 #include <QImage>
 
 namespace pdf {
@@ -28,10 +29,21 @@ public:
     virtual double heightPoints() const = 0;
 
     /**
-     * @brief Renders the page into a QImage with memory safety caps.
-     * @param scale Zoom factor (1.0 = standard 72 DPI, 1.333 = 96 DPI 100% desktop scale).
-     * @param devicePixelRatio Screen device pixel ratio for crisp HiDPI rendering.
-     * @return QImage containing rendered pixels with devicePixelRatio configured, or null QImage on failure.
+     * @brief Computes the target physical raster pixel dimensions of the page at the specified scale and DPR.
+     */
+    virtual void getPixelDimensions(double scale, double devicePixelRatio, int& outWidth, int& outHeight) const = 0;
+
+    /**
+     * @brief Renders a specific pixel rectangle (tile) of the page into an engine-agnostic PixelBuffer.
+     * @param rect The sub-region rectangle in the page's pixel grid.
+     * @param scale Zoom factor (1.0 = 72 DPI, 1.333 = 96 DPI standard desktop).
+     * @param devicePixelRatio Device pixel ratio.
+     * @return PixelBuffer containing the rendered tile, or invalid PixelBuffer on error.
+     */
+    virtual PixelBuffer renderTile(const PixelRect& rect, double scale, double devicePixelRatio) = 0;
+
+    /**
+     * @brief Renders the entire page into a QImage (convenience wrapper).
      */
     virtual QImage render(double scale, double devicePixelRatio) = 0;
 };

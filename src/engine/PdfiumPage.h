@@ -19,6 +19,8 @@ public:
     double widthPoints() const override { return m_width; }
     double heightPoints() const override { return m_height; }
 
+    void getPixelDimensions(double scale, double devicePixelRatio, int& outWidth, int& outHeight) const override;
+    PixelBuffer renderTile(const PixelRect& rect, double scale, double devicePixelRatio) override;
     QImage render(double scale, double devicePixelRatio) override;
 
 private:
