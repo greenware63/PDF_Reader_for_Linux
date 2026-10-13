@@ -18,8 +18,6 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
       m_renderWorker(this),
       m_scale(DESKTOP_100_PERCENT_SCALE)
 {
-    m_document = pdf::createDocument();
-
     viewport()->setAttribute(Qt::WA_OpaquePaintEvent);
     viewport()->setAttribute(Qt::WA_NoSystemBackground);
 
@@ -35,10 +33,6 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
 PdfViewerWidget::~PdfViewerWidget() {
     m_renderWorker.stop();
     closeDocument();
-}
-
-int PdfViewerWidget::pageCount() const {
-    return (m_document && m_document->isOpen()) ? m_document->pageCount() : 0;
 }
 
 void PdfViewerWidget::setDevicePixelRatioOverride(double dpr) {
@@ -65,11 +59,12 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
         return pdf::DocumentError::FileNotFound;
     }
 
-    auto newDoc = pdf::createDocument();
-    auto err = newDoc->loadFromFile(filePath.toStdString());
-    if (err != pdf::DocumentError::None) {
+    int64_t nextDocId = m_currentDocumentId + 1;
+    // Open serially on the engine worker thread - 0 PDFium calls on UI thread!
+    auto openResult = m_renderWorker.openDocumentSync(nextDocId, filePath.toStdString());
+    if (openResult.error != pdf::DocumentError::None) {
         QString msg;
-        switch (err) {
+        switch (openResult.error) {
             case pdf::DocumentError::FileNotFound:
                 msg = tr("File not found: %1").arg(filePath);
                 break;
@@ -88,38 +83,31 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
                 break;
         }
         Q_EMIT loadError(msg);
-        return err; // Existing document remains intact on failure
+        return openResult.error; // Existing document state remains intact on failure
     }
 
     // Success: atomically cancel worker work, flush previous cache, and advance epochs
     m_renderWorker.cancelAll();
     m_cache.invalidateDocument(m_currentDocumentId);
-    ++m_currentDocumentId;
+    m_currentDocumentId = nextDocId;
     ++m_currentGeneration;
+    m_renderWorker.setGeneration(m_currentGeneration);
 
-    m_document = std::move(newDoc);
+    m_hasDocument = true;
+    m_pageCount = openResult.pageCount;
+    m_layout.setPageSizes(openResult.pageSizes);
+
     m_currentPage = 0;
     m_docScrollX = 0;
     m_docScrollY = 0;
-
-    std::vector<std::pair<double, double>> sizes;
-    sizes.reserve(m_document->pageCount());
-    for (int i = 0; i < m_document->pageCount(); ++i) {
-        sizes.push_back(m_document->pageSizePoints(i));
-    }
-    m_layout.setPageSizes(sizes);
-
-    m_renderWorker.setDocument(m_currentDocumentId, m_document);
-    m_renderWorker.setGeneration(m_currentGeneration);
-
     m_scale = DESKTOP_100_PERCENT_SCALE;
 
     updateLayoutGeometry();
     verticalScrollBar()->setValue(0);
     horizontalScrollBar()->setValue(0);
 
-    Q_EMIT documentLoaded(QFileInfo(filePath).fileName(), pageCount());
-    Q_EMIT pageChanged(1, pageCount());
+    Q_EMIT documentLoaded(QFileInfo(filePath).fileName(), m_pageCount);
+    Q_EMIT pageChanged(1, m_pageCount);
     Q_EMIT zoomChanged(1.0);
 
     viewport()->update();
@@ -127,17 +115,15 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
 }
 
 void PdfViewerWidget::closeDocument() {
-    m_renderWorker.cancelAll();
-    m_renderWorker.setDocument(0, nullptr);
+    // Close document and page cache serially on worker thread
+    m_renderWorker.closeDocumentSync();
 
-    if (m_document && m_document->isOpen()) {
-        m_cache.invalidateDocument(m_currentDocumentId);
-        m_document->close();
-        m_document.reset();
-    }
+    m_cache.invalidateDocument(m_currentDocumentId);
     ++m_currentDocumentId;
     ++m_currentGeneration;
 
+    m_hasDocument = false;
+    m_pageCount = 0;
     m_layout.setPageSizes({});
     m_currentPage = 0;
     m_docScrollX = 0;
@@ -161,7 +147,7 @@ void PdfViewerWidget::previousPage() {
 }
 
 void PdfViewerWidget::goToPage(int pageIndex) {
-    if (!m_document || !m_document->isOpen() || pageCount() == 0) {
+    if (!isDocumentOpen()) {
         return;
     }
     if (pageIndex < 0 || pageIndex >= pageCount()) {
@@ -174,6 +160,9 @@ void PdfViewerWidget::goToPage(int pageIndex) {
     // Align page top to viewport top
     setDocScrollPosition(m_docScrollX, pl.topPixel);
     m_navigating = false;
+
+    ++m_currentGeneration;
+    m_renderWorker.setGeneration(m_currentGeneration);
 
     Q_EMIT pageChanged(m_currentPage + 1, pageCount());
     viewport()->update();
@@ -224,11 +213,11 @@ void PdfViewerWidget::zoomReset() {
 }
 
 void PdfViewerWidget::zoomFitWidth() {
-    if (!m_document || pageCount() == 0) {
+    if (!isDocumentOpen()) {
         return;
     }
     const double dpr = effectiveDpr();
-    double pagePtW = m_document->pageSizePoints(m_currentPage).first;
+    double pagePtW = m_layout.getPageLayout(m_currentPage).widthPoints;
     if (pagePtW <= 0.0) {
         pagePtW = layout::DEFAULT_PLACEHOLDER_WIDTH_POINTS;
     }
@@ -251,15 +240,25 @@ void PdfViewerWidget::zoomFitWidth() {
 }
 
 void PdfViewerWidget::onScrollValueChanged() {
-    if (m_navigating || !m_document || !m_document->isOpen() || pageCount() == 0) {
+    if (m_navigating || !isDocumentOpen()) {
         return;
     }
     const double dpr = effectiveDpr();
     const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
     const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
 
-    m_docScrollX = m_scrollMapper.sliderToDoc(horizontalScrollBar()->value(), m_layout.maxDocumentWidth(), vpW);
-    m_docScrollY = m_scrollMapper.sliderToDoc(verticalScrollBar()->value(), m_layout.totalDocumentHeight(), vpH);
+    int64_t newScrollX = m_scrollMapper.sliderToDoc(horizontalScrollBar()->value(), m_layout.maxDocumentWidth(), vpW);
+    int64_t newScrollY = m_scrollMapper.sliderToDoc(verticalScrollBar()->value(), m_layout.totalDocumentHeight(), vpH);
+
+    bool scrollChanged = (newScrollX != m_docScrollX || newScrollY != m_docScrollY);
+    if (scrollChanged) {
+        m_docScrollX = newScrollX;
+        m_docScrollY = newScrollY;
+
+        // Advance request generation on scroll to prune off-screen queued work
+        ++m_currentGeneration;
+        m_renderWorker.setGeneration(m_currentGeneration);
+    }
 
     auto visPages = m_layout.getVisiblePages(m_docScrollY, vpH);
     if (visPages.isValid()) {
@@ -366,7 +365,7 @@ void PdfViewerWidget::updateScrollBars() {
 }
 
 void PdfViewerWidget::updateLayoutGeometry() {
-    if (!m_document || !m_document->isOpen() || pageCount() == 0) {
+    if (!isDocumentOpen()) {
         return;
     }
     const double dpr = effectiveDpr();
@@ -404,7 +403,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     QPainter painter(viewport());
     painter.fillRect(viewport()->rect(), QColor("#323639"));
 
-    if (!m_document || !m_document->isOpen() || pageCount() == 0) {
+    if (!isDocumentOpen()) {
         return;
     }
 

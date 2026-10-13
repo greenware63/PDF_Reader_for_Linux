@@ -319,9 +319,11 @@ int main(int argc, char* argv[]) {
     std::cout << "[TEST 9] Testing RenderWorker request cancellation and generation pruning..." << std::endl;
     {
         pdf::RenderWorker worker;
-        auto doc = pdf::createDocument();
-        doc->loadFromFile(multiPath);
-        worker.setDocument(100, std::move(doc));
+        auto openRes = worker.openDocumentSync(100, multiPath);
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open multiPath on worker" << std::endl;
+            return 1;
+        }
 
         // Queue generation 1 tile request
         auto keyGen1 = pdf::TileKey::create(100, 0, 0, 0, 1.0, 1.0);
@@ -362,9 +364,7 @@ int main(int argc, char* argv[]) {
     std::cout << "[TEST 10] Testing document replacement under pending render requests..." << std::endl;
     {
         pdf::RenderWorker worker;
-        auto docA = pdf::createDocument();
-        docA->loadFromFile(multiPath);
-        worker.setDocument(1, std::move(docA));
+        worker.openDocumentSync(1, multiPath);
 
         // Queue requests for Doc A
         for (int c = 0; c < 3; ++c) {
@@ -372,9 +372,6 @@ int main(int argc, char* argv[]) {
             worker.enqueueRequest({1, 1, 0, {c * 512, 0, 512, 512}, 1.0, 1.0, k, 10});
         }
 
-        // Replace document immediately with Doc B
-        auto docB = pdf::createDocument();
-        docB->loadFromFile(samplePath);
         bool docADelivered = false;
         bool docBDelivered = false;
 
@@ -383,7 +380,8 @@ int main(int argc, char* argv[]) {
             if (docId == 2) docBDelivered = true;
         });
 
-        worker.setDocument(2, std::move(docB));
+        // Replace document immediately with Doc B serially on worker
+        worker.openDocumentSync(2, samplePath);
         auto kB = pdf::TileKey::create(2, 0, 0, 0, 1.0, 1.0);
         worker.enqueueRequest({2, 1, 0, {0, 0, 512, 512}, 1.0, 1.0, kB, 10});
 

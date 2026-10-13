@@ -24,6 +24,7 @@ void RenderWorker::stop() {
         }
         m_running.store(false);
         m_queue.clear();
+        m_controlQueue.clear();
         m_cv.notify_all();
         m_idleCv.notify_all();
     }
@@ -32,14 +33,77 @@ void RenderWorker::stop() {
     }
 }
 
-void RenderWorker::setDocument(int64_t documentId, std::shared_ptr<IDocument> document) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_activeDocumentId.store(documentId);
-    m_document = std::move(document);
-    m_workerPageCache.clear();
-    m_queue.clear();
-    m_cv.notify_all();
-    m_idleCv.notify_all();
+OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string& filePath, const std::string& password) {
+    auto promise = std::make_shared<std::promise<OpenResult>>();
+    auto future = promise->get_future();
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_running.load()) {
+            return {DocumentError::Unknown, 0, {}};
+        }
+
+        m_activeDocumentId.store(documentId);
+        m_queue.clear();
+
+        m_controlQueue.push_back({[this, filePath, password, promise]() {
+            OpenResult result;
+            auto newDoc = createDocument();
+            auto err = newDoc->loadFromFile(filePath, password);
+            if (err != DocumentError::None) {
+                result.error = err;
+                promise->set_value(std::move(result));
+                return;
+            }
+
+            // Success: safely replace active document and purge worker page cache on worker thread
+            m_workerPageCache.clear();
+            if (m_workerDocument) {
+                m_workerDocument->close();
+            }
+            m_workerDocument = std::move(newDoc);
+
+            result.error = DocumentError::None;
+            result.pageCount = m_workerDocument->pageCount();
+            result.pageSizes.reserve(result.pageCount);
+            for (int i = 0; i < result.pageCount; ++i) {
+                result.pageSizes.push_back(m_workerDocument->pageSizePoints(i));
+            }
+            promise->set_value(std::move(result));
+        }});
+
+        m_cv.notify_one();
+    }
+
+    return future.get();
+}
+
+void RenderWorker::closeDocumentSync() {
+    auto promise = std::make_shared<std::promise<void>>();
+    auto future = promise->get_future();
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_running.load()) {
+            return;
+        }
+
+        m_activeDocumentId.store(0);
+        m_queue.clear();
+
+        m_controlQueue.push_back({[this, promise]() {
+            m_workerPageCache.clear();
+            if (m_workerDocument) {
+                m_workerDocument->close();
+                m_workerDocument.reset();
+            }
+            promise->set_value();
+        }});
+
+        m_cv.notify_one();
+    }
+
+    future.get();
 }
 
 void RenderWorker::setGeneration(uint64_t generation) {
@@ -51,7 +115,7 @@ void RenderWorker::setGeneration(uint64_t generation) {
         }),
         m_queue.end()
     );
-    if (m_queue.empty() && !m_isRendering) {
+    if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering) {
         m_idleCv.notify_all();
     }
 }
@@ -114,13 +178,15 @@ void RenderWorker::enqueueRequests(std::vector<TileRenderRequest> requests) {
 void RenderWorker::cancelAll() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_queue.clear();
-    m_idleCv.notify_all();
+    if (m_controlQueue.empty() && !m_isRendering) {
+        m_idleCv.notify_all();
+    }
 }
 
 void RenderWorker::waitForIdle() {
     std::unique_lock<std::mutex> lock(m_mutex);
     m_idleCv.wait(lock, [&]() {
-        return m_queue.empty() && !m_isRendering;
+        return m_queue.empty() && m_controlQueue.empty() && !m_isRendering;
     });
 }
 
@@ -131,79 +197,102 @@ size_t RenderWorker::pendingCount() {
 
 void RenderWorker::workerLoop() {
     while (m_running.load()) {
+        ControlTask ctrlTask;
+        bool hasControlTask = false;
         TileRenderRequest req;
-        std::shared_ptr<IDocument> doc;
+        bool hasRenderRequest = false;
+
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             m_cv.wait(lock, [&]() {
-                return !m_running.load() || !m_queue.empty();
+                return !m_running.load() || !m_controlQueue.empty() || !m_queue.empty();
             });
 
             if (!m_running.load()) {
                 break;
             }
 
-            req = std::move(m_queue.front());
-            m_queue.erase(m_queue.begin());
+            // Prioritize control tasks (open/close) over tile rendering
+            if (!m_controlQueue.empty()) {
+                ctrlTask = std::move(m_controlQueue.front());
+                m_controlQueue.erase(m_controlQueue.begin());
+                hasControlTask = true;
+            } else if (!m_queue.empty()) {
+                req = std::move(m_queue.front());
+                m_queue.erase(m_queue.begin());
 
-            // Check if stale before starting render
-            if (req.documentId != m_activeDocumentId.load() || req.generation < m_currentGeneration.load()) {
-                if (m_queue.empty()) {
+                // Check if tile request is stale
+                if (req.documentId != m_activeDocumentId.load() || req.generation < m_currentGeneration.load()) {
+                    if (m_queue.empty() && m_controlQueue.empty()) {
+                        m_idleCv.notify_all();
+                    }
+                    continue;
+                }
+
+                m_isRendering = true;
+                hasRenderRequest = true;
+            }
+        }
+
+        if (hasControlTask) {
+            ctrlTask.execute();
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering) {
+                m_idleCv.notify_all();
+            }
+            continue;
+        }
+
+        if (hasRenderRequest) {
+            PixelBuffer buffer;
+            bool renderedSuccessfully = false;
+
+            if (m_workerDocument && m_running.load()) {
+                IPage* page = nullptr;
+                auto it = m_workerPageCache.find(req.pageIndex);
+                if (it != m_workerPageCache.end()) {
+                    page = it->second.get();
+                } else {
+                    auto newPage = m_workerDocument->getPage(req.pageIndex);
+                    if (newPage) {
+                        page = newPage.get();
+                        m_workerPageCache.emplace(req.pageIndex, std::move(newPage));
+                    }
+                }
+
+                if (page) {
+                    buffer = page->renderTile(req.rect, req.scale, req.dpr);
+                    renderedSuccessfully = buffer.isValid() && (buffer.data() != nullptr);
+                }
+            }
+
+            if (m_running.load() &&
+                req.documentId == m_activeDocumentId.load() &&
+                req.generation >= m_currentGeneration.load())
+            {
+                if (renderedSuccessfully) {
+                    Q_EMIT tileReady(req.documentId, req.generation, req.key, buffer);
+                } else {
+                    Q_EMIT tileFailed(req.documentId, req.generation, req.key);
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_isRendering = false;
+                if (m_queue.empty() && m_controlQueue.empty()) {
                     m_idleCv.notify_all();
                 }
-                continue;
-            }
-
-            m_isRendering = true;
-            doc = m_document;
-        }
-
-        PixelBuffer buffer;
-        bool renderedSuccessfully = false;
-
-        if (doc && m_running.load()) {
-            IPage* page = nullptr;
-            auto it = m_workerPageCache.find(req.pageIndex);
-            if (it != m_workerPageCache.end()) {
-                page = it->second.get();
-            } else {
-                auto newPage = doc->getPage(req.pageIndex);
-                if (newPage) {
-                    page = newPage.get();
-                    m_workerPageCache.emplace(req.pageIndex, std::move(newPage));
-                }
-            }
-
-            if (page) {
-                buffer = page->renderTile(req.rect, req.scale, req.dpr);
-                renderedSuccessfully = buffer.isValid() && (buffer.data() != nullptr);
-            }
-        }
-
-        // Before emitting result, check if request became stale during rendering
-        if (m_running.load() &&
-            req.documentId == m_activeDocumentId.load() &&
-            req.generation >= m_currentGeneration.load())
-        {
-            if (renderedSuccessfully) {
-                Q_EMIT tileReady(req.documentId, req.generation, req.key, buffer);
-            } else {
-                Q_EMIT tileFailed(req.documentId, req.generation, req.key);
-            }
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_isRendering = false;
-            if (m_queue.empty()) {
-                m_idleCv.notify_all();
             }
         }
     }
 
-    // Clean up worker cache before thread termination
+    // Clean up worker cache and document on the worker thread before exit
     m_workerPageCache.clear();
-    m_document.reset();
+    if (m_workerDocument) {
+        m_workerDocument->close();
+        m_workerDocument.reset();
+    }
 }
 
 } // namespace pdf

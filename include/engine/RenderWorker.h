@@ -9,6 +9,10 @@
 #include <atomic>
 #include <memory>
 #include <unordered_map>
+#include <future>
+#include <functional>
+#include <string>
+#include <utility>
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
 #include "engine/PixelBuffer.h"
@@ -27,10 +31,16 @@ struct TileRenderRequest {
     int priority{0}; // Higher value = rendered first
 };
 
+struct OpenResult {
+    DocumentError error{DocumentError::None};
+    int pageCount{0};
+    std::vector<std::pair<double, double>> pageSizes;
+};
+
 /**
- * @brief Dedicated single-threaded engine worker for serializing all PDFium calls off the UI thread.
- * Queues tile requests by priority, discards stale work using document and request generations,
- * delivers results back via Qt signals, and shuts down cleanly.
+ * @brief Dedicated single-threaded engine worker for serializing ALL PDFium calls off the UI thread.
+ * Document loading, metadata queries, page creation, tile rendering, and resource teardown
+ * run strictly on this worker thread.
  */
 class RenderWorker : public QObject {
     Q_OBJECT
@@ -43,13 +53,18 @@ public:
     RenderWorker& operator=(const RenderWorker&) = delete;
 
     /**
-     * @brief Sets or swaps the active document handle on the worker.
-     * All pending requests for previous documents are discarded immediately.
+     * @brief Opens a PDF file serially on the worker thread.
+     * Extracts pageCount and page sizes on the worker thread without touching PDFium from the UI thread.
      */
-    void setDocument(int64_t documentId, std::shared_ptr<IDocument> document);
+    OpenResult openDocumentSync(int64_t documentId, const std::string& filePath, const std::string& password = "");
 
     /**
-     * @brief Sets current request generation. Stale requests with older generations are dropped.
+     * @brief Closes the active document and clears all open page handles serially on the worker thread.
+     */
+    void closeDocumentSync();
+
+    /**
+     * @brief Sets current request generation. Discards queued requests with older generations.
      */
     void setGeneration(uint64_t generation);
 
@@ -69,7 +84,7 @@ public:
     void cancelAll();
 
     /**
-     * @brief Blocks until all queued requests and current in-flight render complete.
+     * @brief Blocks until all queued requests, control tasks, and in-flight render complete.
      */
     void waitForIdle();
 
@@ -90,6 +105,10 @@ Q_SIGNALS:
 private:
     void workerLoop();
 
+    struct ControlTask {
+        std::function<void()> execute;
+    };
+
     std::atomic<bool> m_running{true};
     std::atomic<int64_t> m_activeDocumentId{0};
     std::atomic<uint64_t> m_currentGeneration{0};
@@ -99,9 +118,11 @@ private:
     std::condition_variable m_idleCv;
     bool m_isRendering{false};
 
-    std::shared_ptr<IDocument> m_document;
+    std::vector<ControlTask> m_controlQueue;
     std::vector<TileRenderRequest> m_queue;
 
+    // Document and open page handles are accessed EXCLUSIVELY on the worker thread inside workerLoop()
+    std::unique_ptr<IDocument> m_workerDocument;
     std::unordered_map<int, std::unique_ptr<IPage>> m_workerPageCache;
 
     std::thread m_thread;

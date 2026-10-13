@@ -29,7 +29,8 @@ public:
     void closeDocument();
 
     int currentPage() const { return m_currentPage; }
-    int pageCount() const;
+    int pageCount() const { return m_pageCount; }
+    bool isDocumentOpen() const { return m_hasDocument && m_pageCount > 0; }
     double currentZoom() const { return m_scale; }
 
     const layout::DocumentLayout& layout() const { return m_layout; }
@@ -90,12 +91,13 @@ private:
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
     void drawPendingPlaceholder(QPainter& painter, const QRectF& rect);
 
-    std::shared_ptr<pdf::IDocument> m_document;
     layout::DocumentLayout m_layout;
     layout::ScrollMapper m_scrollMapper;
     pdf::TileCache m_cache;
     pdf::RenderWorker m_renderWorker;
 
+    bool m_hasDocument{false};
+    int m_pageCount{0};
     int64_t m_currentDocumentId{1};
     uint64_t m_currentGeneration{1};
     int m_currentPage{0};
