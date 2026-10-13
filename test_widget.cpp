@@ -69,8 +69,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Test 1: Open good document, then bad document -> good document remains open!
-    std::cout << "[TEST 1] Testing failed open preservation (good document remains active)..." << std::endl;
+    // Test 1: Open good document, then bad document -> good document remains open and can still render!
+    std::cout << "[TEST 1] Testing failed open preservation (good document remains active and renders)..." << std::endl;
     auto err = viewer.openDocument(QString::fromStdString(samplePath));
     if (err != pdf::DocumentError::None) {
         std::cerr << "[FAIL] Failed to open " << samplePath << std::endl;
@@ -93,7 +93,27 @@ int main(int argc, char* argv[]) {
                   << viewer.pageCount() << " != " << origCount << std::endl;
         return 1;
     }
-    std::cout << "  -> Passed: Failed open preserves active document intact." << std::endl;
+
+    // Invalidate cached tiles for the open document to force rendering fresh tiles from worker
+    int64_t docId = viewer.currentDocumentId();
+    viewer.cache().invalidateDocument(docId);
+
+    // Warmup render to enqueue visible tiles
+    QImage testImg(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32_Premultiplied);
+    QPainter p(&testImg);
+    viewer.viewport()->render(&p);
+    p.end();
+
+    viewer.waitForRendering();
+
+    // Verify that tile was successfully rendered and stored in cache for the active document
+    auto key0 = pdf::TileKey::create(docId, 0, 0, 0, pdf::quantizeScale(viewer.currentZoom()), viewer.effectiveDpr());
+    auto buf = viewer.cache().get(key0);
+    if (!buf || !buf->isValid() || buf->data() == nullptr) {
+        std::cerr << "[FAIL] Failed open corrupted active document rendering! Tile key0 not present/valid in cache." << std::endl;
+        return 1;
+    }
+    std::cout << "  -> Passed: Failed open preserves active document intact and rendering continues to function." << std::endl;
 
     // Test 2: Multi-page navigation at zoom where bottom clamps
     std::cout << "[TEST 2] Testing multi-page navigation when scroll position clamps at bottom..." << std::endl;

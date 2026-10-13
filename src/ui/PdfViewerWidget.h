@@ -32,6 +32,7 @@ public:
     int pageCount() const { return m_pageCount; }
     bool isDocumentOpen() const { return m_hasDocument && m_pageCount > 0; }
     double currentZoom() const { return m_scale; }
+    int64_t currentDocumentId() const { return m_currentDocumentId; }
 
     const layout::DocumentLayout& layout() const { return m_layout; }
     const pdf::TileCache& cache() const { return m_cache; }

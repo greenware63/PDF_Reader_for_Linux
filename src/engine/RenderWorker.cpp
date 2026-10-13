@@ -43,20 +43,30 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
             return {DocumentError::Unknown, 0, {}};
         }
 
+        int64_t oldDocId = m_activeDocumentId.load();
+        auto savedQueue = std::move(m_queue);
         m_activeDocumentId.store(documentId);
-        m_queue.clear();
 
-        m_controlQueue.push_back({[this, filePath, password, promise]() {
+        m_controlQueue.push_back({[this, documentId, oldDocId, savedQueue = std::move(savedQueue), filePath, password, promise]() mutable {
             OpenResult result;
             auto newDoc = createDocument();
             auto err = newDoc->loadFromFile(filePath, password);
             if (err != DocumentError::None) {
+                // If opening failed, restore previous document ID and queued requests
+                m_activeDocumentId.store(oldDocId);
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_queue.insert(m_queue.begin(),
+                                   std::make_move_iterator(savedQueue.begin()),
+                                   std::make_move_iterator(savedQueue.end()));
+                }
                 result.error = err;
                 promise->set_value(std::move(result));
                 return;
             }
 
-            // Success: safely replace active document and purge worker page cache on worker thread
+            // Success: safely replace active document and active ID, and purge worker page cache on worker thread
+            m_activeDocumentId.store(documentId);
             m_workerPageCache.clear();
             if (m_workerDocument) {
                 m_workerDocument->close();
