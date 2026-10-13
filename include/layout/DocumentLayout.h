@@ -8,30 +8,38 @@
 
 namespace layout {
 
+// Standard fallback placeholder dimensions in PDF points (US Letter: 8.5 x 11 inches)
+constexpr double DEFAULT_PLACEHOLDER_WIDTH_POINTS = 612.0;
+constexpr double DEFAULT_PLACEHOLDER_HEIGHT_POINTS = 792.0;
+
 /**
  * @brief Canonical page pixel dimension calculation shared between layout and engine.
  * Ensures the layout grid and tile renderer agree on pixel sizes to the exact pixel.
  * Hardened against non-positive dimensions, NaNs, infinities, and massive MediaBoxes.
+ * Subsitutes fallback dimensions (612x792 pt) if dimensions are unreadable / invalid,
+ * preventing ghost 0x0 pages that collapse page numbers and scrollbars into gaps.
  */
 inline void computePagePixelDimensions(double widthPoints, double heightPoints,
                                        double scale, double dpr,
                                        int& outPixelW, int& outPixelH) {
-    // Sane upper limit per dimension (~13 meters wide at 96 DPI) to prevent integer overflow
     constexpr int MAX_SAFE_PIXEL_DIM = 500000;
 
-    if (!(widthPoints > 0.0) || !(heightPoints > 0.0) ||
-        std::isnan(widthPoints) || std::isnan(heightPoints) ||
-        std::isinf(widthPoints) || std::isinf(heightPoints)) {
-        outPixelW = 0;
-        outPixelH = 0;
-        return;
+    double effW = widthPoints;
+    double effH = heightPoints;
+
+    // Substitute standard placeholder size if invalid or unreadable
+    if (!(effW > 0.0) || !(effH > 0.0) ||
+        std::isnan(effW) || std::isnan(effH) ||
+        std::isinf(effW) || std::isinf(effH)) {
+        effW = DEFAULT_PLACEHOLDER_WIDTH_POINTS;
+        effH = DEFAULT_PLACEHOLDER_HEIGHT_POINTS;
     }
 
     const double effDpr = (dpr > 0.0 && !std::isnan(dpr) && !std::isinf(dpr)) ? dpr : 1.0;
     const double s = (scale > 0.0 && !std::isnan(scale) && !std::isinf(scale)) ? scale : 1.0;
 
-    double rawW = std::round(widthPoints * s * effDpr);
-    double rawH = std::round(heightPoints * s * effDpr);
+    double rawW = std::round(effW * s * effDpr);
+    double rawH = std::round(effH * s * effDpr);
 
     if (std::isnan(rawW) || !(rawW > 0.0)) {
         outPixelW = 1;
