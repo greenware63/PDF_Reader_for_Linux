@@ -44,15 +44,26 @@ QImage PdfiumPage::render(double scale, double devicePixelRatio) {
     }
 
     // Clamp resolution if exceeding safe bounds to avoid bad_alloc / OOM
-    const int64_t totalPixels = static_cast<int64_t>(pixelW) * pixelH;
+    int64_t totalPixels = static_cast<int64_t>(pixelW) * pixelH;
     if (pixelW > MAX_DIMENSION || pixelH > MAX_DIMENSION || totalPixels > MAX_TOTAL_PIXELS) {
         double factorW = (pixelW > MAX_DIMENSION) ? static_cast<double>(MAX_DIMENSION) / pixelW : 1.0;
         double factorH = (pixelH > MAX_DIMENSION) ? static_cast<double>(MAX_DIMENSION) / pixelH : 1.0;
         double factorTotal = (totalPixels > MAX_TOTAL_PIXELS) ? std::sqrt(static_cast<double>(MAX_TOTAL_PIXELS) / totalPixels) : 1.0;
         double factor = std::min({factorW, factorH, factorTotal});
 
-        pixelW = std::max(1, static_cast<int>(std::round(pixelW * factor)));
-        pixelH = std::max(1, static_cast<int>(std::round(pixelH * factor)));
+        pixelW = std::max(1, static_cast<int>(std::floor(pixelW * factor)));
+        pixelH = std::max(1, static_cast<int>(std::floor(pixelH * factor)));
+
+        // Strict boundary enforcement to guarantee pixel caps never exceed limits due to rounding
+        if (pixelW > MAX_DIMENSION) pixelW = MAX_DIMENSION;
+        if (pixelH > MAX_DIMENSION) pixelH = MAX_DIMENSION;
+        while (static_cast<int64_t>(pixelW) * pixelH > MAX_TOTAL_PIXELS && pixelW > 1 && pixelH > 1) {
+            if (pixelW >= pixelH) {
+                --pixelW;
+            } else {
+                --pixelH;
+            }
+        }
     }
 
     // Qt's Format_ARGB32_Premultiplied on little-endian x86_64 matches PDFium's BGRA memory format
@@ -82,7 +93,6 @@ QImage PdfiumPage::render(double scale, double devicePixelRatio) {
 
     // Scale effective DPR proportionally so the logical widget display size
     // (pixelW / effectiveDpr) remains exactly equal to targetLogicalW (m_width * scale).
-    // The page becomes blurrier under extreme zoom rather than visually shrinking.
     const double effectiveDpr = static_cast<double>(pixelW) / targetLogicalW;
     image.setDevicePixelRatio(effectiveDpr);
     return image;

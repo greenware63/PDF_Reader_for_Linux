@@ -2,6 +2,7 @@
 #include <vector>
 #include <fstream>
 #include <cmath>
+#include <cstdint>
 #include <QImage>
 #include <QColor>
 #include "engine/IDocument.h"
@@ -165,26 +166,68 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "  -> Passed: in-memory document remained safe and readable after doc->close()." << std::endl;
 
-    // Test 9: Logical size preservation under clamping (Problem 2 fix verification)
-    std::cout << "[TEST 9] Testing logical size preservation under extreme zoom clamping..." << std::endl;
+    // Test 9: Logical size preservation & pixel boundary verification under extreme zoom clamping
+    std::cout << "[TEST 9] Testing logical size preservation & pixel cap enforcement..." << std::endl;
     constexpr double EXTREME_ZOOM = 15.0; // 15x zoom triggers pixel clamping
     QImage clampedImage = page->render(EXTREME_ZOOM, 2.0);
     if (clampedImage.isNull()) {
         std::cerr << "[FAIL] Extreme zoom render returned null image" << std::endl;
         return 1;
     }
-    double logicalW = clampedImage.width() / clampedImage.devicePixelRatio();
-    double expectedLogicalW = w * EXTREME_ZOOM;
-    if (std::abs(logicalW - expectedLogicalW) > 1.0) {
-        std::cerr << "[FAIL] Page logical width shrank! Expected: " << expectedLogicalW 
-                  << ", Got: " << logicalW << std::endl;
+
+    // Verify absolute physical pixel bounds
+    constexpr int MAX_DIMENSION = 8192;
+    constexpr int64_t MAX_TOTAL_PIXELS = 16 * 1024 * 1024;
+    int64_t totalClampedPixels = static_cast<int64_t>(clampedImage.width()) * clampedImage.height();
+    if (clampedImage.width() > MAX_DIMENSION || clampedImage.height() > MAX_DIMENSION) {
+        std::cerr << "[FAIL] Clamped image exceeded MAX_DIMENSION: " 
+                  << clampedImage.width() << " x " << clampedImage.height() << std::endl;
         return 1;
     }
-    std::cout << "  -> Passed: logical size perfectly preserved (expected: " 
-              << expectedLogicalW << " pt, logical: " << logicalW << " pt)." << std::endl;
+    if (totalClampedPixels > MAX_TOTAL_PIXELS) {
+        std::cerr << "[FAIL] Clamped image exceeded MAX_TOTAL_PIXELS: " << totalClampedPixels << std::endl;
+        return 1;
+    }
+
+    // Verify both logical width and logical height are preserved
+    double logicalW = clampedImage.width() / clampedImage.devicePixelRatio();
+    double logicalH = clampedImage.height() / clampedImage.devicePixelRatio();
+    double expectedLogicalW = w * EXTREME_ZOOM;
+    double expectedLogicalH = h * EXTREME_ZOOM;
+
+    if (std::abs(logicalW - expectedLogicalW) > 1.0 || std::abs(logicalH - expectedLogicalH) > 1.0) {
+        std::cerr << "[FAIL] Page logical dimensions shrank! Expected: " 
+                  << expectedLogicalW << " x " << expectedLogicalH 
+                  << ", Got: " << logicalW << " x " << logicalH << std::endl;
+        return 1;
+    }
+    std::cout << "  -> Passed: physical pixels capped at " << clampedImage.width() << " x " << clampedImage.height()
+              << " (" << (totalClampedPixels / (1024 * 1024)) << " MP <= 16 MP), logical points: " 
+              << logicalW << " x " << logicalH << " pt." << std::endl;
+
+    // Test 10: File reload while retaining prior page
+    std::cout << "[TEST 10] Testing document reload while holding previous page reference..." << std::endl;
+    auto retainedPage = doc->getPage(0);
+    if (!retainedPage) {
+        std::cerr << "[FAIL] Failed to obtain page prior to reload" << std::endl;
+        return 1;
+    }
+    // Reload document from file
+    err = doc->loadFromFile(pdfPath);
+    if (err != pdf::DocumentError::None) {
+        std::cerr << "[FAIL] Reload failed: " << static_cast<int>(err) << std::endl;
+        return 1;
+    }
+    // Retained page from previous document session must still be safely renderable
+    QImage retainedRender = retainedPage->render(1.0, 1.0);
+    if (retainedRender.isNull()) {
+        std::cerr << "[FAIL] Retained page failed to render after file reload!" << std::endl;
+        return 1;
+    }
+    std::cout << "  -> Passed: retained page from earlier load remained safely accessible." << std::endl;
 
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 9 TESTS PASSED SUCCESSFULLY!       " << std::endl;
+    std::cout << " ALL 10 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
