@@ -39,34 +39,44 @@ inline int dprToMilli(double dpr) {
 }
 
 /**
- * @brief Canonical mapping from quantized integer zoom step to floating-point display scale.
- * Uses 1.2x geometric scaling: step 0 = 1.0 (100%), step 1 = 1.2, step -1 = 0.833, etc.
- * Clamped to [-10, 15] (approx 0.16x to 15.4x).
+ * @brief Clamps and quantizes display scale to milli-units (e.g. 1.3333 -> 1.333).
+ * Prevents floating-point hash wobble while expressing arbitrary zoom levels:
+ * default 100% (96/72 = 1.333), Fit-Width, Fit-Page, typed percentage, or pinch zoom.
+ * Clamped strictly to [0.05, 30.0] to prevent arithmetic overflow on absurd inputs.
  */
-inline double zoomStepToScale(int zoomStep) {
-    const int clampedStep = std::clamp(zoomStep, -10, 15);
-    return std::pow(1.2, clampedStep);
+inline double quantizeScale(double scale) {
+    if (std::isnan(scale) || std::isinf(scale) || scale <= 0.0) {
+        return 1.0;
+    }
+    const double clamped = std::clamp(scale, 0.05, 30.0);
+    const int milli = static_cast<int>(std::round(clamped * 1000.0));
+    return static_cast<double>(milli) / 1000.0;
+}
+
+inline int scaleToMilli(double scale) {
+    const double q = quantizeScale(scale);
+    return static_cast<int>(std::round(q * 1000.0));
 }
 
 /**
- * @brief Identifies a unique rendered tile across documents, pages, grids, zoom steps, and DPR.
- * DPR is quantized to milli-units (1.5 -> 1500) to ensure reliable hashing and comparison.
+ * @brief Identifies a unique rendered tile across documents, pages, grids, quantized scale, and DPR.
+ * Both scale and DPR are quantized to milli-units (1.333 -> 1333, 1.5 -> 1500) to ensure reliable hashing and comparison.
  */
 struct TileKey {
     int64_t documentId{0};
     int pageIndex{0};
     int col{0};
     int row{0};
-    int zoomStep{0};
-    int dprMilli{1000}; // Scaled by 1000 to eliminate floating-point hash jitter
+    int scaleMilli{1000}; // Quantized scale (e.g. 1.333x -> 1333)
+    int dprMilli{1000};   // Quantized DPR (e.g. 1.5x -> 1500)
 
-    static TileKey create(int64_t docId, int pageIdx, int c, int r, int zStep, double dpr) {
+    static TileKey create(int64_t docId, int pageIdx, int c, int r, double scale, double dpr) {
         return TileKey{
             docId,
             pageIdx,
             c,
             r,
-            zStep,
+            scaleToMilli(scale),
             dprToMilli(dpr)
         };
     }
@@ -76,7 +86,7 @@ struct TileKey {
                pageIndex == other.pageIndex &&
                col == other.col &&
                row == other.row &&
-               zoomStep == other.zoomStep &&
+               scaleMilli == other.scaleMilli &&
                dprMilli == other.dprMilli;
     }
 };
@@ -91,10 +101,10 @@ struct TileKeyHash {
         combine(std::hash<int>{}(k.pageIndex));
         combine(std::hash<int>{}(k.col));
         combine(std::hash<int>{}(k.row));
-        combine(std::hash<int>{}(k.zoomStep));
+        combine(std::hash<int>{}(k.scaleMilli));
         combine(std::hash<int>{}(k.dprMilli));
         return h;
-    }
+    };
 };
 
 struct TileCacheEntry {
@@ -116,6 +126,8 @@ struct TileCacheEntry {
  */
 class TileCache {
 public:
+    static constexpr size_t TOMBSTONE_BYTE_WEIGHT = pdf::TOMBSTONE_BYTE_WEIGHT;
+
     explicit TileCache(size_t maxBytesBudget = 128 * 1024 * 1024); // 128 MB default budget
     ~TileCache() = default;
 
@@ -139,16 +151,17 @@ public:
     /**
      * @brief Retrieves a copy of the cached pixel buffer and promotes the tile to Most Recently Used.
      * Returning a value copy avoids lifetime hazards when subsequent cache operations evict the tile.
-     * @return Optional containing PixelBuffer if found and not failed; std::nullopt otherwise.
+     * @return Optional containing PixelBuffer if found and not failed; std::nullopt otherwise.\n
      */
     std::optional<PixelBuffer> get(const TileKey& key);
 
     /**
      * @brief Inserts or updates a rendered tile in the cache, promoting it to Most Recently Used.
+     * If the buffer is invalid, automatically calls markFailed(key) and returns false.
      * Automatically evicts unpinned tiles if the total memory exceeds the byte budget.
      * @note To prevent visible tiles from being evicted immediately when memory is tight,
      * callers should call pin() or setPinnedKeys() BEFORE put().
-     * @return True if the tile is retained in cache; false if evicted immediately (e.g. over budget and unpinned).
+     * @return True if the tile is retained in cache; false if evicted immediately or invalid.
      */
     bool put(const TileKey& key, PixelBuffer buffer);
 
@@ -170,7 +183,7 @@ public:
     void unpin(const TileKey& key);
 
     /**
-     * @brief Atomically updates the set of pinned tiles to exactly the provided keys.
+     * @brief Atomically updates the set of pinned tiles to exactly the provided keys.\n
      * Any previous pins not in the new set are released.
      */
     void setPinnedKeys(const std::vector<TileKey>& keys);
@@ -187,6 +200,7 @@ public:
 
     /**
      * @brief Invalidates and evicts all tiles belonging to a specific document (e.g. on close).
+     * Also drops any pins associated with documentId.
      */
     void invalidateDocument(int64_t documentId);
 

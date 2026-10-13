@@ -34,7 +34,12 @@ std::optional<PixelBuffer> TileCache::get(const TileKey& key) {
 }
 
 bool TileCache::put(const TileKey& key, PixelBuffer buffer) {
-    const size_t newBytes = buffer.isValid() ? (static_cast<size_t>(buffer.stride()) * buffer.height()) : 0;
+    if (!buffer.isValid() || buffer.data() == nullptr) {
+        markFailed(key);
+        return false;
+    }
+
+    const size_t newBytes = static_cast<size_t>(buffer.stride()) * buffer.height();
 
     auto it = m_cacheMap.find(key);
     if (it != m_cacheMap.end()) {
@@ -116,10 +121,18 @@ void TileCache::invalidateDocument(int64_t documentId) {
                 m_currentBytes -= mapIt->second.entry.bytesUsed;
                 m_cacheMap.erase(mapIt);
             }
-            m_pinnedSet.erase(*it);
             it = m_lruList.erase(it);
         } else {
             ++it;
+        }
+    }
+
+    // Drop any pins associated with documentId
+    for (auto pinIt = m_pinnedSet.begin(); pinIt != m_pinnedSet.end(); ) {
+        if (pinIt->documentId == documentId) {
+            pinIt = m_pinnedSet.erase(pinIt);
+        } else {
+            ++pinIt;
         }
     }
 }
