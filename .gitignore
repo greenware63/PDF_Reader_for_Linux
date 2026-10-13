@@ -17,6 +17,7 @@ out/
 *.a
 *.lib
 
-# Output artifacts
+# Output & test artifacts
 test_rendered_page0.png
 generated_test.pdf
+complex_seam_test.pdf

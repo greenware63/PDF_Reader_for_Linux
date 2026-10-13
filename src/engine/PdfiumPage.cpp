@@ -1,4 +1,5 @@
 #include "PdfiumPage.h"
+#include "layout/DocumentLayout.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -33,20 +34,18 @@ PdfiumPage::~PdfiumPage() {
 }
 
 void PdfiumPage::getPixelDimensions(double scale, double devicePixelRatio, int& outWidth, int& outHeight) const {
-    if (m_width <= 0.0 || m_height <= 0.0) {
-        outWidth = 0;
-        outHeight = 0;
-        return;
-    }
-
-    const double desiredDpr = (devicePixelRatio > 0.0) ? devicePixelRatio : 1.0;
-    // Compute unconstrained virtual pixel coordinates for tiling
-    outWidth = std::max(1, static_cast<int>(std::round(m_width * scale * desiredDpr)));
-    outHeight = std::max(1, static_cast<int>(std::round(m_height * scale * desiredDpr)));
+    // Single canonical calculation shared with DocumentLayout
+    layout::computePagePixelDimensions(m_width, m_height, scale, devicePixelRatio, outWidth, outHeight);
 }
 
 PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double devicePixelRatio) {
     if (!m_page || m_width <= 0.0 || m_height <= 0.0 || !rect.isValid()) {
+        return {};
+    }
+
+    // Guard requested tile dimensions against oversized requests
+    if (rect.width > MAX_TILE_DIM || rect.height > MAX_TILE_DIM ||
+        (static_cast<int64_t>(rect.width) * rect.height > MAX_TILE_PIXELS)) {
         return {};
     }
 
@@ -67,7 +66,6 @@ PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double d
         return {};
     }
 
-    // Guard individual tile dimensions against absurd requests
     if (tileW > MAX_TILE_DIM || tileH > MAX_TILE_DIM || (static_cast<int64_t>(tileW) * tileH > MAX_TILE_PIXELS)) {
         return {};
     }
