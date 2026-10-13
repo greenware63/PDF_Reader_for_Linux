@@ -134,9 +134,10 @@ static void generateSubpixelPdfFixture(const std::string& path) {
     std::string contentStream;
     // White background
     contentStream += "1.0 1.0 1.0 rg 0 0 595 842 re f\n";
-    // Pure blue box with fractional coordinate: x = 20.35 pt, y = 772.35 pt, w = 40 pt, h = 40 pt
+    // Pure blue box with fractional coordinates: x = 20.35 pt, y = 772.35 pt, w = 40 pt, h = 40 pt
     // Drawn as a path polygon so PDFium's sub-pixel anti-aliasing path rasterizer evaluates fractional edge coverage
-    contentStream += "0.0 0.0 1.0 rg 20.35 772.35 m 60.35 772.35 l 60.35 812.35 l 20.351 812.35 l h f\n";
+    // on both the left vertical edge (x = 20.35 pt -> 610.5 px) and top horizontal edge (dist from top 29.65 pt -> 889.5 px)
+    contentStream += "0.0 0.0 1.0 rg 20.35 772.35 m 60.35 772.351 l 60.35 812.351 l 20.351 812.35 l h f\n";
 
     std::string pdf;
     pdf += "%PDF-1.4\n";
@@ -413,13 +414,30 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        const std::vector<std::pair<double, double>> expectedSizes = {
+            {595.0, 842.0}, // Page 0: Portrait A4
+            {842.0, 595.0}, // Page 1: Landscape A4
+            {842.0, 595.0}, // Page 2: Rotated 90 degrees (/Rotate 90)
+            {500.0, 650.0}  // Page 3: Cropped page (CropBox 500x650)
+        };
+
         constexpr double TEST_SCALE = 1.3333333333333333;
         constexpr double TEST_DPR = 1.75;
+
+        std::vector<std::pair<double, double>> layoutPageSizes;
 
         for (int p = 0; p < multiDoc->pageCount(); ++p) {
             auto [docW, docH] = multiDoc->pageSizePoints(p);
             if (docW <= 0.0 || docH <= 0.0) {
                 std::cerr << "[FAIL] multiDoc->pageSizePoints failed for page " << p << std::endl;
+                return 1;
+            }
+
+            // Explicitly assert expected point dimensions
+            if (std::abs(docW - expectedSizes[p].first) > 1e-3 || std::abs(docH - expectedSizes[p].second) > 1e-3) {
+                std::cerr << "[FAIL] Page " << p << " point dimensions incorrect: Expected ("
+                          << expectedSizes[p].first << "x" << expectedSizes[p].second 
+                          << "), Got (" << docW << "x" << docH << ")" << std::endl;
                 return 1;
             }
 
@@ -441,17 +459,39 @@ int main(int argc, char* argv[]) {
             int enginePixW = 0, enginePixH = 0;
             pageObj->getPixelDimensions(TEST_SCALE, TEST_DPR, enginePixW, enginePixH);
 
-            int layoutPixW = 0, layoutPixH = 0;
-            layout::computePagePixelDimensions(docW, docH, TEST_SCALE, TEST_DPR, layoutPixW, layoutPixH);
+            int helperPixW = 0, helperPixH = 0;
+            layout::computePagePixelDimensions(docW, docH, TEST_SCALE, TEST_DPR, helperPixW, helperPixH);
 
-            if (enginePixW != layoutPixW || enginePixH != layoutPixH) {
+            if (enginePixW != helperPixW || enginePixH != helperPixH) {
                 std::cerr << "[FAIL] Page " << p << " pixel dimension mismatch: Engine=(" 
-                          << enginePixW << "x" << enginePixH << ") vs Layout=(" 
-                          << layoutPixW << "x" << layoutPixH << ")" << std::endl;
+                          << enginePixW << "x" << enginePixH << ") vs Helper=(" 
+                          << helperPixW << "x" << helperPixH << ")" << std::endl;
+                return 1;
+            }
+
+            layoutPageSizes.push_back({docW, docH});
+        }
+
+        // Feed sizes through DocumentLayout and verify layout page dimensions
+        layout::DocumentLayout docLayout;
+        docLayout.setPageSizes(layoutPageSizes);
+        docLayout.updateLayout(TEST_SCALE, TEST_DPR, 1920);
+
+        for (int p = 0; p < multiDoc->pageCount(); ++p) {
+            const auto& pl = docLayout.getPageLayout(p);
+            auto pageObj = multiDoc->getPage(p);
+            int enginePixW = 0, enginePixH = 0;
+            pageObj->getPixelDimensions(TEST_SCALE, TEST_DPR, enginePixW, enginePixH);
+
+            if (pl.widthPixel != enginePixW || pl.heightPixel != enginePixH) {
+                std::cerr << "[FAIL] Page " << p << " layout mismatch: DocumentLayout=(" 
+                          << pl.widthPixel << "x" << pl.heightPixel << ") vs Engine=(" 
+                          << enginePixW << "x" << enginePixH << ")" << std::endl;
                 return 1;
             }
         }
-        std::cout << "  -> Passed: IDocument::pageSizePoints and DocumentLayout agree with Engine across Portrait, Landscape, Rotated 90, and Cropped pages." << std::endl;
+
+        std::cout << "  -> Passed: Exact expected point dimensions asserted and DocumentLayout verified with Engine across Portrait, Landscape, Rotated 90, and Cropped pages." << std::endl;
     }
 
     // Test 12: Complex Fixture Tile Stitching with Spatial Diagnostics
@@ -593,7 +633,7 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "  -> Passed: Raster difference bounded at " << maxObserved << "/255 across both grids." << std::endl;
 
-    // Test 13: Sub-Pixel Fractional Edge Straddling and Partial Blend Verification
+    // Test 13: Sub-Pixel Fractional Edge Straddling and Partial Blend Verification (X and Y axes)
     std::cout << "[TEST 13] Testing Sub-Pixel Fractional Edge Straddling and Partial Blend at Extreme Zoom..." << std::endl;
     std::string subpixelFixturePath = "subpixel_test.pdf";
     generateSubpixelPdfFixture(subpixelFixturePath);
@@ -615,53 +655,67 @@ int main(int argc, char* argv[]) {
     subpixelPage->getPixelDimensions(EXTREME_ZOOM, EXTREME_DPR, extremeW, extremeH);
 
     // Target box has fractional left edge: x = 20.35 pt -> at 30x scale: 610.5 px.
+    // Distance from top edge: 842 - 812.351 = 29.649 pt -> at 30x scale: 889.47 px.
+    // Left edge straddle:
     // Pixel 609 is outside (white background).
     // Pixel 610 is the fractional boundary pixel (anti-aliased blend).
     // Pixel 611 is inside the blue rectangle.
     int anchorX = 610;
-    int targetTop = static_cast<int>(std::round((842.0 - (772.35 + 40.0)) * EXTREME_ZOOM * EXTREME_DPR));
+    int targetTop = 890;
 
-    // Request a 100x20 tile centered around anchorX
-    pdf::PixelBuffer fracTile = subpixelPage->renderTile({anchorX - 50, targetTop + 10, 100, 20}, EXTREME_ZOOM, EXTREME_DPR);
-    if (!fracTile.isValid() || fracTile.width() != 100 || fracTile.height() != 20) {
-        std::cerr << "[FAIL] Failed to render fractional edge straddle tile" << std::endl;
+    // 13a. Left Edge Horizontal Straddle Tile: [anchorX - 50, targetTop + 10, width=100, height=20]
+    pdf::PixelBuffer leftTile = subpixelPage->renderTile({anchorX - 50, targetTop + 10, 100, 20}, EXTREME_ZOOM, EXTREME_DPR);
+    if (!leftTile.isValid() || leftTile.width() != 100 || leftTile.height() != 20) {
+        std::cerr << "[FAIL] Failed to render left fractional edge straddle tile" << std::endl;
         return 1;
     }
 
-    const uint32_t* row10 = reinterpret_cast<const uint32_t*>(fracTile.data() + 10 * fracTile.stride());
+    const uint32_t* leftRow10 = reinterpret_cast<const uint32_t*>(leftTile.data() + 10 * leftTile.stride());
+    uint8_t leftR49 = static_cast<uint8_t>((leftRow10[49] >> 16) & 0xFF);
+    uint8_t leftR50 = static_cast<uint8_t>((leftRow10[50] >> 16) & 0xFF);
+    uint8_t leftR51 = static_cast<uint8_t>((leftRow10[51] >> 16) & 0xFF);
 
-    // Inspect columns 48 through 52 (local tile coords; col 50 corresponds to x=610)
-    int foundTransitionCol = -1;
-    uint8_t redOutside = 0, redBlend = 0, redInside = 0;
-    for (int c = 48; c <= 52; ++c) {
-        uint8_t rPrev = static_cast<uint8_t>((row10[c - 1] >> 16) & 0xFF);
-        uint8_t rCur  = static_cast<uint8_t>((row10[c] >> 16) & 0xFF);
-        uint8_t rNext = static_cast<uint8_t>((row10[c + 1] >> 16) & 0xFF);
-        // White background has R=255; blue rectangle has R=0.
-        // A fractional boundary pixel has an intermediate anti-aliased value: 0 < rCur < 255.
-        if (rPrev > 200 && rCur < rPrev && rCur > rNext && rNext < 50) {
-            foundTransitionCol = c;
-            redOutside = rPrev;
-            redBlend   = rCur;
-            redInside  = rNext;
-            break;
-        }
+    if (leftR49 < 240 || leftR50 < 100 || leftR50 > 160 || leftR51 > 15) {
+        std::cout << "  [DEBUG] Left straddle column values:\n"
+                  << "     Col 49 (outside): R=" << static_cast<int>(leftR49) << "\n"
+                  << "     Col 50 (blend)  : R=" << static_cast<int>(leftR50) << "\n"
+                  << "     Col 51 (inside) : R=" << static_cast<int>(leftR51) << "\n";
+        std::cerr << "[FAIL] Left edge sub-pixel partial blend failed expected range [100, 160] at col 50!" << std::endl;
+        return 1;
     }
+    std::cout << "  -> Left edge boundary verified at exact col 50: Outside R=" << static_cast<int>(leftR49) 
+              << " -> Blend R=" << static_cast<int>(leftR50) 
+              << " -> Inside R=" << static_cast<int>(leftR51) << std::endl;
 
-    if (foundTransitionCol < 0) {
-        std::cout << "  [DEBUG] Straddle column values (Red channel):\n";
-        for (int c = 47; c <= 53; ++c) {
-            std::cout << "     Col " << c << ": " << static_cast<int>((row10[c] >> 16) & 0xFF) << "\n";
-        }
-        std::cerr << "[FAIL] Sub-pixel partial blend not observed across boundary columns!" << std::endl;
+    // 13b. Top Edge Vertical Straddle Tile: [anchorX + 10, anchorY - 50, width=20, height=100]
+    // The top edge is at y = 889.5 px.
+    // Tile y extends from anchorY - 50 = 839 to 939.
+    // Row 49 is at y = 888 (outside, white).
+    // Row 50 is at y = 889 (fractional boundary pixel).
+    // Row 51 is at y = 890 (inside, blue).
+    int anchorY = 889;
+    pdf::PixelBuffer topTile = subpixelPage->renderTile({anchorX + 10, anchorY - 50, 20, 100}, EXTREME_ZOOM, EXTREME_DPR);
+    if (!topTile.isValid() || topTile.width() != 20 || topTile.height() != 100) {
+        std::cerr << "[FAIL] Failed to render top fractional edge straddle tile" << std::endl;
         return 1;
     }
 
-    std::cout << "  -> Found anti-aliasing edge blend at local column " << foundTransitionCol << ":\n"
-              << "     Outside (white) R=" << static_cast<int>(redOutside) 
-              << " -> Partial Blend R=" << static_cast<int>(redBlend) 
-              << " -> Inside (blue) R=" << static_cast<int>(redInside) << std::endl;
-    std::cout << "  -> Passed: Partial anti-aliased sub-pixel blend verified at fractional coordinate." << std::endl;
+    uint8_t topR49 = static_cast<uint8_t>((reinterpret_cast<const uint32_t*>(topTile.data() + 49 * topTile.stride())[10] >> 16) & 0xFF);
+    uint8_t topR50 = static_cast<uint8_t>((reinterpret_cast<const uint32_t*>(topTile.data() + 50 * topTile.stride())[10] >> 16) & 0xFF);
+    uint8_t topR51 = static_cast<uint8_t>((reinterpret_cast<const uint32_t*>(topTile.data() + 51 * topTile.stride())[10] >> 16) & 0xFF);
+
+    if (topR49 < 240 || topR50 < 100 || topR50 > 160 || topR51 > 15) {
+        std::cout << "  [DEBUG] Top straddle row values (Col 10):\n"
+                  << "     Row 49 (outside): R=" << static_cast<int>(topR49) << "\n"
+                  << "     Row 50 (blend)  : R=" << static_cast<int>(topR50) << "\n"
+                  << "     Row 51 (inside) : R=" << static_cast<int>(topR51) << "\n";
+        std::cerr << "[FAIL] Top edge sub-pixel partial blend failed expected range [100, 160] at row 50!" << std::endl;
+        return 1;
+    }
+    std::cout << "  -> Top edge boundary verified at exact row 50: Outside R=" << static_cast<int>(topR49) 
+              << " -> Blend R=" << static_cast<int>(topR50) 
+              << " -> Inside R=" << static_cast<int>(topR51) << std::endl;
+    std::cout << "  -> Passed: Sub-pixel anti-aliased edge blends confirmed on both horizontal and vertical axes." << std::endl;
 
     std::cout << "========================================" << std::endl;
     std::cout << " ALL 13 TESTS PASSED SUCCESSFULLY!      " << std::endl;
