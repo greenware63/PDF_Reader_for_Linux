@@ -147,7 +147,7 @@ private:
     std::unique_ptr<IDocument> m_workerDocument;
 
     // Bounded LRU page cache on worker thread
-    static constexpr size_t MAX_WORKER_PAGE_CACHE = 16;
+    static constexpr size_t MAX_WORKER_PAGE_CACHE = 64;
     std::list<int> m_workerPageLru; // front = MRU, back = LRU
     std::unordered_map<int, std::pair<std::unique_ptr<IPage>, std::list<int>::iterator>> m_workerPageCache;
 

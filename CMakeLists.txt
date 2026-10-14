@@ -39,9 +39,11 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-# Autodetect installed Qt 6 MinGW on Windows if present
-if(WIN32 AND EXISTS "C:/Qt/6.7.2/mingw_64")
-    list(PREPEND CMAKE_PREFIX_PATH "C:/Qt/6.7.2/mingw_64")
+# Optional Windows fallback if CMAKE_PREFIX_PATH is not set by user environment
+if(WIN32 AND NOT DEFINED CMAKE_PREFIX_PATH AND NOT DEFINED ENV{CMAKE_PREFIX_PATH} AND NOT DEFINED ENV{Qt6_DIR})
+    if(EXISTS "C:/Qt/6.7.2/mingw_64")
+        list(PREPEND CMAKE_PREFIX_PATH "C:/Qt/6.7.2/mingw_64")
+    endif()
 endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)

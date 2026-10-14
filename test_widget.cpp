@@ -630,7 +630,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Request tiles from 40 different pages across the 200-page document
-        for (int p = 0; p < 40; ++p) {
+        for (int p = 0; p < 80; ++p) {
             auto k = pdf::TileKey::create(500, p, 0, 0, 1.0, 1.0);
             worker.enqueueRequest({500, 1, p, {0, 0, 200, 200}, 1.0, 1.0, k, 10});
         }
@@ -638,13 +638,13 @@ int main(int argc, char* argv[]) {
         worker.waitForIdle();
 
         size_t cachedPages = worker.cachedPageCount();
-        if (cachedPages == 0 || cachedPages > 16) {
+        if (cachedPages == 0 || cachedPages > 64) {
             std::cerr << "[FAIL] Worker page cache unbounded! cachedPages=" << cachedPages 
                       << ", expected in range [1, 16]" << std::endl;
             return 1;
         }
         std::cout << "  -> Passed: 200-page document load kept worker page cache strictly bounded at " 
-                  << cachedPages << " <= 16 pages." << std::endl;
+                  << cachedPages << " <= 64 pages." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;
