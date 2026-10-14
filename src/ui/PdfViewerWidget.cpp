@@ -9,6 +9,7 @@
 #include <QCoreApplication>
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 
 namespace ui {
 
@@ -94,6 +95,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_docScrollX = 0;
     m_docScrollY = 0;
     m_scale = DESKTOP_100_PERCENT_SCALE;
+    m_fallbackScales.clear(); // tiles of the previous document are gone; nothing to stand in
 
     const double dpr = effectiveDpr();
     m_lastVpWidthDevice = static_cast<int64_t>(std::round(viewport()->width() * dpr));
@@ -206,6 +208,7 @@ void PdfViewerWidget::closeDocument() {
     ++m_currentGeneration;
 
     m_hasDocument = false;
+    m_fallbackScales.clear();
     m_pageCount = 0;
     m_layout.setPageSizes({});
     m_currentPage = 0;
@@ -276,6 +279,13 @@ void PdfViewerWidget::setZoom(double zoom, const QPoint* anchorWidgetPos) {
     ++m_currentGeneration;
     m_inFlightKeys.clear();
     m_renderWorker.setGeneration(m_currentGeneration);
+
+    // Remember the scale we are leaving: its cached tiles are drawn (scaled) while the new ones render
+    const double previousScale = pdf::quantizeScale(m_scale);
+    m_fallbackScales.erase(std::remove(m_fallbackScales.begin(), m_fallbackScales.end(), qScale), m_fallbackScales.end());
+    if (previousScale != qScale) {
+        rememberFallbackScale(previousScale);
+    }
 
     m_scale = qScale;
     m_layout.updateLayout(m_scale, dpr, vpW);
@@ -386,7 +396,10 @@ void PdfViewerWidget::onTileReady(int64_t documentId, uint64_t /*generation*/, c
         return;
     }
     m_cache.put(key, buffer);
-    viewport()->update();
+    // Prefetched off-screen tiles do not change what is on screen: skip the repaint
+    if (m_cache.isPinned(key)) {
+        viewport()->update();
+    }
 }
 
 void PdfViewerWidget::onTileFailed(int64_t documentId, uint64_t /*generation*/, const pdf::TileKey& key) {
@@ -530,6 +543,84 @@ void PdfViewerWidget::drawLoadingOverlay(QPainter& painter) {
     painter.drawText(box, Qt::AlignCenter, text);
 }
 
+void PdfViewerWidget::rememberFallbackScale(double previousScale) {
+    m_fallbackScales.erase(std::remove(m_fallbackScales.begin(), m_fallbackScales.end(), previousScale), m_fallbackScales.end());
+    m_fallbackScales.insert(m_fallbackScales.begin(), previousScale);
+    if (m_fallbackScales.size() > MAX_FALLBACK_SCALES) {
+        m_fallbackScales.resize(MAX_FALLBACK_SCALES);
+    }
+}
+
+// Paints whatever part of `tile` can be reconstructed from cached tiles of earlier zoom levels,
+// scaled to the current zoom. The caller has already drawn the pending placeholder underneath,
+// so uncovered regions simply stay paper-coloured. Returns true if anything was drawn.
+bool PdfViewerWidget::drawFallbackTile(QPainter& painter, const layout::VisibleTile& t, const QRectF& tileRect, double qScale, double qDpr) {
+    constexpr int TILE = 512;
+    constexpr int MAX_SOURCE_TILES = 64; // guards against huge zoom jumps touching thousands of old tiles
+    bool drawnAny = false;
+
+    painter.save();
+    painter.setClipRect(tileRect);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+    for (const double oldScale : m_fallbackScales) {
+        if (oldScale == qScale) {
+            continue;
+        }
+        // Region of this tile expressed in the old zoom's page-pixel grid
+        const double r = oldScale / qScale;
+        const double sx0 = t.tileXOnPage * r;
+        const double sx1 = (t.tileXOnPage + t.tileWidth) * r;
+        const double sy0 = t.tileYOnPage * r;
+        const double sy1 = (t.tileYOnPage + t.tileHeight) * r;
+
+        const int c0 = static_cast<int>(std::floor(sx0 / TILE));
+        const int c1 = static_cast<int>(std::floor((sx1 - 1e-6) / TILE));
+        const int r0 = static_cast<int>(std::floor(sy0 / TILE));
+        const int r1 = static_cast<int>(std::floor((sy1 - 1e-6) / TILE));
+        if (c1 < c0 || r1 < r0 || static_cast<int64_t>(c1 - c0 + 1) * (r1 - r0 + 1) > MAX_SOURCE_TILES) {
+            continue;
+        }
+
+        bool fullyCovered = true;
+        for (int row = r0; row <= r1; ++row) {
+            for (int col = c0; col <= c1; ++col) {
+                auto buf = m_cache.get(pdf::TileKey::create(m_currentDocumentId, t.pageIndex, col, row, oldScale, qDpr));
+                if (!buf.has_value()) {
+                    fullyCovered = false;
+                    continue;
+                }
+                const double ox = static_cast<double>(col) * TILE;
+                const double oy = static_cast<double>(row) * TILE;
+                const double ix0 = std::max(sx0, ox);
+                const double iy0 = std::max(sy0, oy);
+                const double ix1 = std::min(sx1, ox + buf->width());
+                const double iy1 = std::min(sy1, oy + buf->height());
+                if (ix1 <= ix0 || iy1 <= iy0) {
+                    fullyCovered = false;
+                    continue;
+                }
+                const QRectF src(ix0 - ox, iy0 - oy, ix1 - ix0, iy1 - iy0);
+                const QRectF dst(tileRect.x() + (ix0 / r - t.tileXOnPage),
+                                 tileRect.y() + (iy0 / r - t.tileYOnPage),
+                                 (ix1 - ix0) / r,
+                                 (iy1 - iy0) / r);
+                painter.drawImage(dst, toQImage(*buf), src);
+                drawnAny = true;
+            }
+        }
+        if (fullyCovered) {
+            break; // the most recent zoom level covers the whole tile; older ones would only be overdrawn
+        }
+    }
+
+    painter.restore();
+    if (drawnAny) {
+        ++m_fallbackTilesDrawn;
+    }
+    return drawnAny;
+}
+
 void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     QPainter painter(viewport());
     painter.fillRect(viewport()->rect(), QColor("#323639"));
@@ -634,8 +725,12 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
                 drawErrorPlaceholder(painter, tileRect);
             }
         } else {
-            // Pending render miss: draw placeholder on UI thread and queue request to worker if not already in flight
+            // Pending render miss: draw placeholder (plus a scaled earlier-zoom stand-in if we have one)
+            // on the UI thread and queue request to worker if not already in flight
             drawPendingPlaceholder(painter, tileRect);
+            if (!m_fallbackScales.empty()) {
+                drawFallbackTile(painter, t, tileRect, qScale, qDpr);
+            }
 
             if (m_inFlightKeys.find(key) == m_inFlightKeys.end()) {
                 int64_t tileMidX = tileVpX + t.tileWidth / 2;
@@ -646,6 +741,43 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
                 pdf::PixelRect pRect{t.tileXOnPage, t.tileYOnPage, t.tileWidth, t.tileHeight};
                 pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority});
                 m_inFlightKeys.insert(key);
+            }
+        }
+    }
+
+    // 5. Prefetch ring: one viewport height above and below the visible area, rendered only after
+    // every visible tile (priorities are always negative, visible ones are >= 0).
+    if (m_prefetchEnabled && !tiles.empty()) {
+        constexpr size_t MAX_PREFETCH_PER_PAINT = 16;
+        const int64_t ringTop = std::max<int64_t>(0, scrollDocY - vpHeightDevice);
+        const int64_t ringBottom = std::min<int64_t>(m_layout.totalDocumentHeight(), scrollDocY + 2 * vpHeightDevice);
+        if (ringBottom > ringTop) {
+            std::unordered_set<pdf::TileKey, pdf::TileKeyHash> visibleSet(visibleKeys.begin(), visibleKeys.end());
+            struct Candidate { int64_t distSq; layout::VisibleTile tile; pdf::TileKey key; };
+            std::vector<Candidate> candidates;
+
+            const auto ringTiles = m_layout.getVisibleTiles({scrollDocX, ringTop, vpWidthDevice, ringBottom - ringTop}, 512);
+            for (const auto& t : ringTiles) {
+                const auto key = pdf::TileKey::create(m_currentDocumentId, t.pageIndex, t.col, t.row, qScale, qDpr);
+                if (visibleSet.count(key) || m_inFlightKeys.count(key) || m_cache.contains(key)) {
+                    continue; // visible, already requested, cached, or a remembered failure (never retried speculatively)
+                }
+                const int64_t dx = (t.docX - scrollDocX) + t.tileWidth / 2 - vpCenterX;
+                const int64_t dy = (t.docY - scrollDocY) + t.tileHeight / 2 - vpCenterY;
+                candidates.push_back({dx * dx + dy * dy, t, key});
+            }
+
+            std::sort(candidates.begin(), candidates.end(),
+                      [](const Candidate& a, const Candidate& b) { return a.distSq < b.distSq; });
+            if (candidates.size() > MAX_PREFETCH_PER_PAINT) {
+                candidates.resize(MAX_PREFETCH_PER_PAINT);
+            }
+            for (const auto& c : candidates) {
+                const int priority = -1 - static_cast<int>(std::min<int64_t>(c.distSq >> 12, 1000000000));
+                pdf::PixelRect pRect{c.tile.tileXOnPage, c.tile.tileYOnPage, c.tile.tileWidth, c.tile.tileHeight};
+                pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, c.tile.pageIndex, pRect, qScale, qDpr, c.key, priority});
+                m_inFlightKeys.insert(c.key);
+                ++m_prefetchRequestsIssued;
             }
         }
     }

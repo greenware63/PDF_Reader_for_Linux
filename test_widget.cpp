@@ -6,6 +6,7 @@
 #include <QThread>
 #include <QElapsedTimer>
 #include <QCoreApplication>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <iostream>
@@ -865,8 +866,166 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: one signal per call, failure keeps the active document, waitForIdle covers opens." << std::endl;
     }
 
+    std::cout << "[TEST 21] Testing zoom fallback: scaled old tiles are shown while new-zoom tiles render..." << std::endl;
+    {
+        err = viewer.openDocument(QString::fromStdString(multiPath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open multiPath for zoom fallback test" << std::endl;
+            return 1;
+        }
+        viewer.resize(900, 600);
+        viewer.goToPage(0);
+        viewer.setZoom(1.0);
+
+        auto renderFrame = [&]() {
+            QImage frame(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+            QPainter pFrame(&frame);
+            viewer.viewport()->render(&pFrame);
+            pFrame.end();
+            return frame;
+        };
+        auto isBlue = [](const QImage& img, int x, int y) {
+            const QRgb px = img.pixel(x, y);
+            return qBlue(px) > 200 && qRed(px) < 60 && qGreen(px) < 60;
+        };
+
+        renderFrame();
+        viewer.waitForRendering();
+        renderFrame();
+        if (!isBlue(renderFrame(), 450, 300)) {
+            std::cerr << "[FAIL] Page not rendered at 100% before zoom test" << std::endl;
+            return 1;
+        }
+
+        // Make new-zoom tiles take long enough that none can arrive before the first frame at the new zoom
+        viewer.renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(150));
+        const size_t fallbackBefore = viewer.fallbackTilesDrawn();
+        viewer.setZoom(1.5);
+        QImage zoomed = renderFrame();
+        const size_t fallbackUsed = viewer.fallbackTilesDrawn() - fallbackBefore;
+
+        const bool centerBlue = isBlue(zoomed, 450, 300);
+        const bool quarterBlue = isBlue(zoomed, 450, 150) || isBlue(zoomed, 450, 450);
+        viewer.waitForRendering();
+        viewer.renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(0));
+
+        if (fallbackUsed == 0 || !centerBlue || !quarterBlue) {
+            std::cerr << "[FAIL] Zoom fallback missing: fallbackTiles=" << fallbackUsed
+                      << " centerBlue=" << centerBlue << " otherBlue=" << quarterBlue << std::endl;
+            return 1;
+        }
+
+        // After rendering completes the real tiles replace the stand-ins
+        const size_t fallbackAfterSettle = viewer.fallbackTilesDrawn();
+        QImage settled = renderFrame();
+        if (!isBlue(settled, 450, 300) || viewer.fallbackTilesDrawn() != fallbackAfterSettle) {
+            std::cerr << "[FAIL] Fallback must not be used once the real tiles are cached" << std::endl;
+            return 1;
+        }
+
+        // A different document must never reuse the previous document's tiles as fallback
+        err = viewer.openDocument(QString::fromStdString(samplePath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to reopen sample.pdf after zoom fallback test" << std::endl;
+            return 1;
+        }
+        const size_t fallbackBeforeReopen = viewer.fallbackTilesDrawn();
+        renderFrame();
+        if (viewer.fallbackTilesDrawn() != fallbackBeforeReopen) {
+            std::cerr << "[FAIL] Fallback leaked across documents" << std::endl;
+            return 1;
+        }
+        viewer.waitForRendering();
+        std::cout << "  -> Passed: " << fallbackUsed << " tiles shown scaled from the old zoom; replaced by real tiles; no leakage across documents." << std::endl;
+    }
+
+    std::cout << "[TEST 22] Testing prefetch ring: off-screen tiles are rendered, after the visible ones..." << std::endl;
+    {
+        err = viewer.openDocument(QString::fromStdString(multiPath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open multiPath for prefetch test" << std::endl;
+            return 1;
+        }
+        viewer.resize(900, 600);
+        viewer.setZoom(1.0);
+        viewer.goToPage(0);
+
+        auto renderFrame = [&]() {
+            QImage frame(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+            QPainter pFrame(&frame);
+            viewer.viewport()->render(&pFrame);
+            pFrame.end();
+        };
+        const double dpr = viewer.effectiveDpr();
+        const double scale = pdf::quantizeScale(viewer.currentZoom());
+        const int64_t vpW = static_cast<int64_t>(std::round(viewer.viewport()->width() * dpr));
+        const int64_t vpH = static_cast<int64_t>(std::round(viewer.viewport()->height() * dpr));
+
+        // (a) tiles just below the viewport get rendered without ever being scrolled into view
+        const size_t prefetchBefore = viewer.prefetchRequestsIssued();
+        renderFrame();
+        viewer.waitForRendering();
+        if (viewer.prefetchRequestsIssued() == prefetchBefore) {
+            std::cerr << "[FAIL] No prefetch requests were issued" << std::endl;
+            return 1;
+        }
+        auto below = viewer.layout().getVisibleTiles({viewer.currentDocScrollX(), viewer.currentDocScrollY() + vpH, vpW, vpH / 2}, 512);
+        int prefetchedBelow = 0;
+        for (const auto& t : below) {
+            if (viewer.cache().contains(pdf::TileKey::create(viewer.currentDocumentId(), t.pageIndex, t.col, t.row, scale, dpr))) {
+                ++prefetchedBelow;
+            }
+        }
+        if (below.empty() || prefetchedBelow == 0) {
+            std::cerr << "[FAIL] Tiles just below the viewport were not prefetched (below=" << below.size() << ")" << std::endl;
+            return 1;
+        }
+
+        // (b) on a fresh area, every visible tile is delivered before any prefetched tile
+        std::vector<pdf::TileKey> deliveryOrder;
+        QMetaObject::Connection orderConn = QObject::connect(
+            &viewer.renderWorker(), &pdf::RenderWorker::tileReady, &viewer,
+            [&](int64_t, uint64_t, const pdf::TileKey& k, const pdf::PixelBuffer&) { deliveryOrder.push_back(k); });
+        viewer.renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(10));
+        viewer.goToPage(3);
+        renderFrame();
+        viewer.waitForRendering();
+        viewer.renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(0));
+        QObject::disconnect(orderConn);
+
+        auto visTiles = viewer.layout().getVisibleTiles({viewer.currentDocScrollX(), viewer.currentDocScrollY(), vpW, vpH}, 512);
+        std::vector<pdf::TileKey> visKeys;
+        for (const auto& t : visTiles) {
+            visKeys.push_back(pdf::TileKey::create(viewer.currentDocumentId(), t.pageIndex, t.col, t.row, scale, dpr));
+        }
+        if (visKeys.empty() || deliveryOrder.size() <= visKeys.size()) {
+            std::cerr << "[FAIL] Expected prefetched deliveries beyond the " << visKeys.size()
+                      << " visible tiles, got " << deliveryOrder.size() << std::endl;
+            return 1;
+        }
+        for (size_t i = 0; i < visKeys.size(); ++i) {
+            if (std::find(visKeys.begin(), visKeys.end(), deliveryOrder[i]) == visKeys.end()) {
+                std::cerr << "[FAIL] A prefetched tile was rendered before a visible one (position " << i << ")" << std::endl;
+                return 1;
+            }
+        }
+
+        // (c) the switch works: with prefetch off nothing new is requested
+        viewer.setPrefetchEnabled(false);
+        const size_t issued = viewer.prefetchRequestsIssued();
+        viewer.goToPage(1);
+        renderFrame();
+        viewer.waitForRendering();
+        viewer.setPrefetchEnabled(true);
+        if (viewer.prefetchRequestsIssued() != issued) {
+            std::cerr << "[FAIL] setPrefetchEnabled(false) still issued prefetch requests" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: ring tiles pre-rendered, visible tiles always first, prefetch can be disabled." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 20 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 22 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

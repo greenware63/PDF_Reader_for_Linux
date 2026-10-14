@@ -92,6 +92,13 @@ public:
     const layout::DocumentLayout& layout() const noexcept { return m_layout; }
     size_t inFlightCount() const noexcept { return m_inFlightKeys.size(); }
 
+    /// Tiles drawn from a previous zoom level (scaled) because the current-zoom tile was not ready yet.
+    size_t fallbackTilesDrawn() const noexcept { return m_fallbackTilesDrawn; }
+    /// Prefetch (off-screen) tile requests handed to the worker so far.
+    size_t prefetchRequestsIssued() const noexcept { return m_prefetchRequestsIssued; }
+    /// Enables/disables the off-screen prefetch ring (enabled by default).
+    void setPrefetchEnabled(bool enabled) noexcept { m_prefetchEnabled = enabled; }
+
 Q_SIGNALS:
     void documentLoaded(const QString& title, int pages);
     void loadError(const QString& errorMessage);
@@ -119,6 +126,8 @@ private:
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
     void drawPendingPlaceholder(QPainter& painter, const QRectF& rect);
     void drawLoadingOverlay(QPainter& painter);
+    bool drawFallbackTile(QPainter& painter, const layout::VisibleTile& tile, const QRectF& tileRect, double qScale, double qDpr);
+    void rememberFallbackScale(double previousScale);
 
     QString openErrorMessage(pdf::DocumentError error, const QString& filePath) const;
     void applyOpenedDocument(int64_t newDocumentId, const QString& filePath, const pdf::OpenResult& result);
@@ -153,6 +162,16 @@ private:
     // Primary 64-bit document coordinates, immune to 32-bit slider resize quantization
     int64_t m_docScrollX{0};
     int64_t m_docScrollY{0};
+
+    // Recently used zoom scales (newest first, quantized); their cached tiles serve as scaled stand-ins
+    // while tiles for the current zoom are still rendering.
+    static constexpr size_t MAX_FALLBACK_SCALES = 3;
+    std::vector<double> m_fallbackScales;
+    size_t m_fallbackTilesDrawn{0};
+
+    // Off-screen prefetch ring (one viewport height above and below the visible area)
+    bool m_prefetchEnabled{true};
+    size_t m_prefetchRequestsIssued{0};
 
     // Cached previous viewport dimensions to anchor precisely during resizes
     int64_t m_lastVpWidthDevice{0};
