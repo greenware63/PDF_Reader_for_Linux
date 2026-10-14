@@ -132,7 +132,7 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
     return pdf::DocumentError::None;
 }
 
-void PdfViewerWidget::openDocumentAsync(const QString& filePath) {
+void PdfViewerWidget::openDocumentAsync(const QString& filePath, const QString& password) {
     if (filePath.isEmpty()) {
         Q_EMIT loadError(openErrorMessage(pdf::DocumentError::FileNotFound, filePath));
         return;
@@ -140,19 +140,20 @@ void PdfViewerWidget::openDocumentAsync(const QString& filePath) {
     if (m_loading) {
         // Coalesce: only the most recent request made during a load is opened afterwards
         m_queuedOpenPath = filePath;
+        m_queuedOpenPassword = password;
         m_hasQueuedOpen = true;
         return;
     }
-    startAsyncOpen(filePath);
+    startAsyncOpen(filePath, password);
 }
 
-void PdfViewerWidget::startAsyncOpen(const QString& filePath) {
+void PdfViewerWidget::startAsyncOpen(const QString& filePath, const QString& password) {
     m_loading = true;
     m_pendingOpenId = m_currentDocumentId + 1;
     m_pendingOpenPath = filePath;
     Q_EMIT loadingChanged(true, QFileInfo(filePath).fileName());
     viewport()->update();
-    m_renderWorker.openDocumentAsync(m_pendingOpenId, filePath.toStdString());
+    m_renderWorker.openDocumentAsync(m_pendingOpenId, filePath.toStdString(), password.toStdString());
 }
 
 void PdfViewerWidget::cancelPendingOpen() {
@@ -163,6 +164,7 @@ void PdfViewerWidget::cancelPendingOpen() {
     m_pendingOpenPath.clear();
     m_hasQueuedOpen = false;
     m_queuedOpenPath.clear();
+    m_queuedOpenPassword.clear();
     if (wasLoading) {
         Q_EMIT loadingChanged(false, name);
         viewport()->update();
@@ -180,6 +182,7 @@ void PdfViewerWidget::onDocumentOpened(int64_t documentId, pdf::OpenResult resul
     m_pendingOpenPath.clear();
 
     if (result.error != pdf::DocumentError::None) {
+        Q_EMIT documentOpenFailed(path, result.error);
         Q_EMIT loadError(openErrorMessage(result.error, path));
     } else {
         applyOpenedDocument(documentId, path, result);
@@ -187,9 +190,11 @@ void PdfViewerWidget::onDocumentOpened(int64_t documentId, pdf::OpenResult resul
 
     if (m_hasQueuedOpen) {
         const QString next = m_queuedOpenPath;
+        const QString nextPassword = m_queuedOpenPassword;
         m_hasQueuedOpen = false;
         m_queuedOpenPath.clear();
-        startAsyncOpen(next); // stays "loading"; no intermediate loadingChanged(false)
+        m_queuedOpenPassword.clear();
+        startAsyncOpen(next, nextPassword); // stays "loading"; no intermediate loadingChanged(false)
         return;
     }
 

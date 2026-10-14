@@ -4,9 +4,45 @@
 #include <QStatusBar>
 #include <QMenuBar>
 #include <QAction>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QCloseEvent>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QVBoxLayout>
 #include <cmath>
 
 namespace ui {
+
+namespace {
+
+class PasswordDialog final : public QDialog {
+public:
+    using QDialog::QDialog;
+
+    void reject() override {
+        if (m_dismissible) {
+            QDialog::reject();
+        }
+    }
+
+    void setDismissible(bool dismissible) {
+        m_dismissible = dismissible;
+    }
+
+private:
+    void closeEvent(QCloseEvent* event) override {
+        if (m_dismissible) {
+            QDialog::closeEvent(event);
+        } else {
+            event->ignore();
+        }
+    }
+
+    bool m_dismissible{true};
+};
+
+} // namespace
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
@@ -24,6 +60,7 @@ void MainWindow::setupUi() {
     connect(m_viewer, &PdfViewerWidget::pageChanged, this, &MainWindow::onPageChanged);
     connect(m_viewer, &PdfViewerWidget::zoomChanged, this, &MainWindow::onZoomChanged);
     connect(m_viewer, &PdfViewerWidget::loadError, this, &MainWindow::onLoadError);
+    connect(m_viewer, &PdfViewerWidget::documentOpenFailed, this, &MainWindow::onDocumentOpenFailed);
     connect(m_viewer, &PdfViewerWidget::loadingChanged, this, &MainWindow::onLoadingChanged);
 
     statusBar()->showMessage(tr("Ready - Open a PDF to begin"));
@@ -86,6 +123,21 @@ bool MainWindow::openFile(const QString& filePath) {
 }
 
 void MainWindow::onLoadingChanged(bool loading, const QString& fileName) {
+    if (m_passwordDialog) {
+        auto* dialog = static_cast<PasswordDialog*>(m_passwordDialog.data());
+        dialog->setDismissible(!loading);
+        if (m_passwordInput) {
+            m_passwordInput->setEnabled(!loading);
+        }
+        if (auto* buttons = dialog->findChild<QDialogButtonBox*>()) {
+            if (auto* cancel = buttons->button(QDialogButtonBox::Cancel)) {
+                cancel->setEnabled(!loading);
+            }
+            if (auto* open = buttons->button(QDialogButtonBox::Ok)) {
+                open->setEnabled(!loading);
+            }
+        }
+    }
     if (loading) {
         statusBar()->showMessage(tr("Opening '%1'\u2026").arg(fileName));
         setCursor(Qt::BusyCursor);
@@ -108,6 +160,7 @@ void MainWindow::openFileDialog() {
 }
 
 void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
+    closePasswordDialog();
     setWindowTitle(tr("%1 - PDF Reader").arg(title));
     statusBar()->showMessage(tr("Loaded '%1' (%2 pages)").arg(title).arg(totalPages));
 }
@@ -127,7 +180,78 @@ void MainWindow::onZoomChanged(double zoomRatio) {
 }
 
 void MainWindow::onLoadError(const QString& errorMessage) {
+    if (m_passwordDialog) {
+        return;
+    }
     statusBar()->showMessage(errorMessage, 6000);
+}
+
+void MainWindow::onDocumentOpenFailed(const QString& filePath, pdf::DocumentError error) {
+    if (error == pdf::DocumentError::PasswordRequired || error == pdf::DocumentError::BadPassword) {
+        showPasswordDialog(filePath, error == pdf::DocumentError::BadPassword);
+    } else {
+        closePasswordDialog();
+    }
+}
+
+void MainWindow::showPasswordDialog(const QString& filePath, bool incorrectPassword) {
+    if (!m_passwordDialog || m_passwordFilePath != filePath) {
+        closePasswordDialog();
+        auto* dialog = new PasswordDialog(this);
+        dialog->setObjectName(QStringLiteral("passwordDialog"));
+        dialog->setWindowTitle(tr("Password Required"));
+        dialog->setModal(true);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+
+        auto* prompt = new QLabel(tr("Enter the password for this PDF:"), dialog);
+        m_passwordInput = new QLineEdit(dialog);
+        m_passwordInput->setObjectName(QStringLiteral("passwordInput"));
+        m_passwordInput->setEchoMode(QLineEdit::Password);
+        m_passwordWarning = new QLabel(dialog);
+        m_passwordWarning->setObjectName(QStringLiteral("passwordWarning"));
+        m_passwordWarning->setStyleSheet(QStringLiteral("color: #b00020;"));
+        m_passwordWarning->setVisible(false);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
+        buttons->button(QDialogButtonBox::Ok)->setText(tr("Open"));
+
+        auto* layout = new QVBoxLayout(dialog);
+        layout->addWidget(prompt);
+        layout->addWidget(m_passwordInput);
+        layout->addWidget(m_passwordWarning);
+        layout->addWidget(buttons);
+
+        connect(buttons, &QDialogButtonBox::accepted, dialog, [this]() {
+            const QString password = m_passwordInput->text();
+            m_passwordInput->clear();
+            m_passwordWarning->clear();
+            m_passwordWarning->hide();
+            m_viewer->openDocumentAsync(m_passwordFilePath, password);
+        });
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+        connect(dialog, &QDialog::finished, this, [this]() {
+            m_passwordDialog = nullptr;
+            m_passwordInput = nullptr;
+            m_passwordWarning = nullptr;
+            m_passwordFilePath.clear();
+        });
+
+        m_passwordDialog = dialog;
+        m_passwordFilePath = filePath;
+    }
+
+    m_passwordWarning->setText(incorrectPassword ? tr("Incorrect password") : QString());
+    m_passwordWarning->setVisible(incorrectPassword);
+    m_passwordInput->clear();
+    m_passwordInput->setEnabled(true);
+    m_passwordDialog->show();
+    m_passwordInput->setFocus();
+}
+
+void MainWindow::closePasswordDialog() {
+    if (m_passwordDialog) {
+        static_cast<PasswordDialog*>(m_passwordDialog.data())->setDismissible(true);
+        m_passwordDialog->reject();
+    }
 }
 
 } // namespace ui

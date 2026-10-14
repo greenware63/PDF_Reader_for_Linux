@@ -39,10 +39,10 @@ public:
      * The currently open document stays visible and interactive while the file loads; on success the
      * viewer switches to the new document and emits documentLoaded(), on failure it emits loadError()
      * and keeps the current document. Calls made while an open is in progress are coalesced:
-     * only the most recent pending path is opened after the current one finishes.
+     * only the most recent pending path/password is opened after the current one finishes.
      * loadingChanged() is emitted when loading starts and when the last queued open finishes.
      */
-    void openDocumentAsync(const QString& filePath);
+    void openDocumentAsync(const QString& filePath, const QString& password = QString());
 
     /// @return true while an asynchronous open is in progress or queued.
     bool isLoading() const noexcept { return m_loading; }
@@ -102,6 +102,7 @@ public:
 Q_SIGNALS:
     void documentLoaded(const QString& title, int pages);
     void loadError(const QString& errorMessage);
+    void documentOpenFailed(const QString& filePath, pdf::DocumentError error);
     void loadingChanged(bool loading, const QString& fileName);
     void pageChanged(int currentPage, int totalPages);
     void zoomChanged(double zoomRatio);
@@ -131,7 +132,7 @@ private:
 
     QString openErrorMessage(pdf::DocumentError error, const QString& filePath) const;
     void applyOpenedDocument(int64_t newDocumentId, const QString& filePath, const pdf::OpenResult& result);
-    void startAsyncOpen(const QString& filePath);
+    void startAsyncOpen(const QString& filePath, const QString& password);
     void cancelPendingOpen();
 
     layout::DocumentLayout m_layout;
@@ -145,6 +146,7 @@ private:
     QString m_pendingOpenPath;
     bool m_hasQueuedOpen{false};
     QString m_queuedOpenPath;
+    QString m_queuedOpenPassword;
 
     bool m_hasDocument{false};
     int m_pageCount{0};

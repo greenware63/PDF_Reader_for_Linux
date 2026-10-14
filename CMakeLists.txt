@@ -204,6 +204,24 @@ target_link_libraries(test_widget PRIVATE
     pdf_engine
 )
 
+# Headless tests for the encrypted-PDF password prompt workflow.
+add_executable(test_password_prompt
+    test_password_prompt.cpp
+    src/ui/MainWindow.h
+    src/ui/MainWindow.cpp
+    src/ui/PdfViewerWidget.cpp
+)
+
+target_include_directories(test_password_prompt PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(test_password_prompt PRIVATE
+    Qt6::Widgets
+    pdf_engine
+)
+
 # CTest registration
 enable_testing()
 add_test(
@@ -226,6 +244,13 @@ add_test(
     COMMAND test_widget "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
 )
 
+add_test(
+    NAME PasswordPromptTestSuite
+    COMMAND test_password_prompt
+        "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/encrypted.pdf"
+)
+
 if(WIN32)
     get_filename_component(COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     get_filename_component(QT_BIN_DIR "${Qt6Core_DIR}/../../../bin" ABSOLUTE)
@@ -243,6 +268,9 @@ if(WIN32)
     set_tests_properties(ViewportWidgetTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
     )
+    set_tests_properties(PasswordPromptTestSuite PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
+    )
 endif()
 
 # Scoped workaround specifically for Windows MinGW GCC >= 15 toolchain (CWG 2387 bug in Qt 6.7.2 qcomparehelpers.h)
@@ -250,6 +278,7 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION
     target_link_options(pdf-reader PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_render PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_widget PRIVATE -Wl,--allow-multiple-definition)
+    target_link_options(test_password_prompt PRIVATE -Wl,--allow-multiple-definition)
 endif()
 
 # Deployment & RPATH handling
@@ -272,6 +301,12 @@ if(WIN32)
             "$<TARGET_FILE_DIR:test_widget>"
         COMMENT "Deploying pdfium.dll next to test_widget"
     )
+    add_custom_command(TARGET test_password_prompt POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${pdfium_binaries_SOURCE_DIR}/bin/pdfium.dll"
+            "$<TARGET_FILE_DIR:test_password_prompt>"
+        COMMENT "Deploying pdfium.dll next to test_password_prompt"
+    )
 elseif(UNIX AND NOT APPLE)
     set_target_properties(pdf-reader PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
@@ -282,6 +317,10 @@ elseif(UNIX AND NOT APPLE)
         INSTALL_RPATH "$ORIGIN/../lib"
     )
     set_target_properties(test_widget PROPERTIES
+        BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../lib"
+    )
+    set_target_properties(test_password_prompt PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../lib"
     )
