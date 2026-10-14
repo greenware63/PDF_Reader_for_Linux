@@ -166,6 +166,21 @@ public:
                        int64_t viewportW, int64_t viewportH,
                        int64_t& outScrollX, int64_t& outScrollY) const;
 
+    /**
+     * @brief Finds the 0-based page index containing the given 64-bit document coordinates, or -1.
+     */
+    int getPageAt(int64_t docX, int64_t docY) const;
+
+    /**
+     * @brief Maps 64-bit document device coordinates to top-down page points on the specified page.
+     */
+    bool documentToPagePoints(int pageIndex, int64_t docX, int64_t docY, double& outPageX, double& outPageY) const;
+
+    /**
+     * @brief Maps top-down page points to 64-bit document device coordinates.
+     */
+    bool pagePointsToDocument(int pageIndex, double pageX, double pageY, int64_t& outDocX, int64_t& outDocY) const;
+
 private:
     std::vector<PageLayout> m_pages;
     int64_t m_totalHeight{0};

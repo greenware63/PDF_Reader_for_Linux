@@ -1,12 +1,12 @@
 #pragma once
 
 #include "PixelBuffer.h"
+#include "PageText.h"
 
 namespace pdf {
 
 /**
- * @brief Pure C++ abstract interface representing a single PDF page.
- * Completely decoupled from Qt or any UI framework.
+ * @brief Pure C++ abstract interface representing a single PDF page.\n * Completely decoupled from Qt or any UI framework.
  */
 class IPage {
 public:
@@ -46,6 +46,12 @@ public:
      * @brief Renders the entire page into a PixelBuffer, with memory caps for legacy whole-page viewing.
      */
     virtual PixelBuffer renderWholePage(double scale, double devicePixelRatio) = 0;
+
+    /**
+     * @brief Extracts text and character bounding boxes for the page.
+     * Must be called only from the worker thread.
+     */
+    virtual PageText extractText() = 0;
 };
 
 } // namespace pdf

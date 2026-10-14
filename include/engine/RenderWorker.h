@@ -18,6 +18,7 @@
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
 #include "engine/PixelBuffer.h"
+#include "engine/PageText.h"
 #include "cache/TileCache.h"
 
 namespace pdf {
@@ -91,6 +92,17 @@ public:
     void enqueueRequests(std::vector<TileRenderRequest> requests);
 
     /**
+     * @brief Requests extraction of text and character bounding boxes for a page asynchronously.
+     * Result is emitted via pageTextReady().
+     */
+    void requestPageText(int64_t documentId, int pageIndex);
+
+    /**
+     * @brief Synchronously extracts text for a page on the worker thread (blocks caller).
+     */
+    std::shared_ptr<const PageText> getPageTextSync(int64_t documentId, int pageIndex);
+
+    /**
      * @brief Cancels all pending queued requests.
      */
     void cancelAll();
@@ -138,9 +150,12 @@ Q_SIGNALS:
     void tileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key);
     /// Emitted exactly once per openDocumentAsync() call, from the worker thread.
     void documentOpened(int64_t documentId, pdf::OpenResult result);
+    /// Emitted when text extraction for a page completes on the worker thread.
+    void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
 
 private:
     void workerLoop();
+    IPage* getOrLoadWorkerPage(int pageIndex);
 
     struct ControlTask {
         std::function<void()> execute;
@@ -179,7 +194,3 @@ private:
 };
 
 } // namespace pdf
-
-Q_DECLARE_METATYPE(pdf::OpenResult)
-Q_DECLARE_METATYPE(pdf::TileKey)
-Q_DECLARE_METATYPE(pdf::PixelBuffer)

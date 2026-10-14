@@ -1,4 +1,4 @@
-#include "layout/DocumentLayout.h"
+﻿#include "layout/DocumentLayout.h"
 
 namespace layout {
 
@@ -249,6 +249,43 @@ void DocumentLayout::resolveAnchor(const ScrollAnchor& anchor, int64_t viewportO
 
     outScrollX = std::clamp<int64_t>(outScrollX, 0, maxScrollX);
     outScrollY = std::clamp<int64_t>(outScrollY, 0, maxScrollY);
+}
+
+
+int DocumentLayout::getPageAt(int64_t docX, int64_t docY) const {
+    for (size_t i = 0; i < m_pages.size(); ++i) {
+        const auto& p = m_pages[i];
+        if (docX >= p.leftPixel && docX <= p.rightPixel() &&
+            docY >= p.topPixel && docY <= p.bottomPixel()) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+bool DocumentLayout::documentToPagePoints(int pageIndex, int64_t docX, int64_t docY, double& outPageX, double& outPageY) const {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(m_pages.size())) {
+        return false;
+    }
+    const auto& p = m_pages[pageIndex];
+    const double effScale = m_scale * m_dpr;
+    if (effScale <= 0.0) {
+        return false;
+    }
+    outPageX = static_cast<double>(docX - p.leftPixel) / effScale;
+    outPageY = static_cast<double>(docY - p.topPixel) / effScale;
+    return true;
+}
+
+bool DocumentLayout::pagePointsToDocument(int pageIndex, double pageX, double pageY, int64_t& outDocX, int64_t& outDocY) const {
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(m_pages.size())) {
+        return false;
+    }
+    const auto& p = m_pages[pageIndex];
+    const double effScale = m_scale * m_dpr;
+    outDocX = p.leftPixel + static_cast<int64_t>(std::round(pageX * effScale));
+    outDocY = p.topPixel + static_cast<int64_t>(std::round(pageY * effScale));
+    return true;
 }
 
 } // namespace layout

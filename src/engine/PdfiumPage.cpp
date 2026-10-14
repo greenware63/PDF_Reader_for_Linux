@@ -1,6 +1,8 @@
-#include "PdfiumPage.h"
+﻿#include "PdfiumPage.h"
 #include "PdfiumMutex.h"
 #include "layout/DocumentLayout.h"
+#include <fpdf_text.h>
+#include <vector>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -167,6 +169,64 @@ PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio) {
 
     FPDFBitmap_Destroy(bitmap);
     return buffer;
+}
+
+
+PageText PdfiumPage::extractText() {
+    PageText result;
+    result.pageIndex = m_pageIndex;
+    result.widthPoints = m_width;
+    result.heightPoints = m_height;
+
+    if (!m_page) {
+        return result;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    FPDF_TEXTPAGE textPage = FPDFText_LoadPage(m_page);
+    if (!textPage) {
+        return result;
+    }
+
+    const int count = FPDFText_CountChars(textPage);
+    if (count <= 0) {
+        FPDFText_ClosePage(textPage);
+        return result;
+    }
+
+    result.chars.reserve(count);
+
+    std::vector<unsigned short> buffer(count + 1, 0);
+    int extracted = FPDFText_GetText(textPage, 0, count, buffer.data());
+    if (extracted > 1) {
+        result.text.assign(reinterpret_cast<const char16_t*>(buffer.data()), std::min(count, extracted - 1));
+    }
+
+    for (int i = 0; i < count; ++i) {
+        PageCharBox box;
+        box.unicode = FPDFText_GetUnicode(textPage, i);
+        double left = 0.0, right = 0.0, bottom = 0.0, top = 0.0;
+        if (FPDFText_GetCharBox(textPage, i, &left, &right, &bottom, &top)) {
+            box.left = std::min(left, right);
+            box.right = std::max(left, right);
+            // In PDF user space, top > bottom with origin at bottom-left.
+            // Convert to top-down page coordinates:
+            box.top = m_height - std::max(top, bottom);
+            box.bottom = m_height - std::min(top, bottom);
+        }
+        result.chars.push_back(box);
+    }
+
+    if (result.text.empty()) {
+        result.text.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            result.text.push_back(static_cast<char16_t>(result.chars[i].unicode));
+        }
+    }
+
+    FPDFText_ClosePage(textPage);
+    return result;
 }
 
 } // namespace pdf

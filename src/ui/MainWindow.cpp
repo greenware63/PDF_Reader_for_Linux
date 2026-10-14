@@ -79,6 +79,14 @@ void MainWindow::setupActions() {
     QAction* exitAction = fileMenu->addAction(tr("E&xit"), this, &QWidget::close);
     exitAction->setShortcut(QKeySequence::Quit);
 
+    QMenu* editMenu = menuBar()->addMenu(tr("&Edit"));
+    QAction* copyAction = editMenu->addAction(tr("&Copy"), m_viewer, &PdfViewerWidget::copySelection);
+    copyAction->setShortcut(QKeySequence::Copy);
+    copyAction->setEnabled(false);
+    connect(m_viewer, &PdfViewerWidget::selectionChanged, copyAction, [this, copyAction]() {
+        copyAction->setEnabled(m_viewer->hasSelection());
+    });
+
     // Toolbar
     QToolBar* toolbar = addToolBar(tr("Main Toolbar"));
     toolbar->setMovable(false);
@@ -87,13 +95,13 @@ void MainWindow::setupActions() {
     toolbar->addSeparator();
 
     // Page navigation controls
-    QAction* prevAction = toolbar->addAction(tr("◀ Prev"), m_viewer, &PdfViewerWidget::previousPage);
+    QAction* prevAction = toolbar->addAction(tr("\u25c0 Prev"), m_viewer, &PdfViewerWidget::previousPage);
     prevAction->setShortcut(QKeySequence(Qt::Key_PageUp));
 
     m_pageStatusLabel = new QLabel(tr(" Page 0 / 0 "), this);
     toolbar->addWidget(m_pageStatusLabel);
 
-    QAction* nextAction = toolbar->addAction(tr("Next ▶"), m_viewer, &PdfViewerWidget::nextPage);
+    QAction* nextAction = toolbar->addAction(tr("Next \u25b6"), m_viewer, &PdfViewerWidget::nextPage);
     nextAction->setShortcut(QKeySequence(Qt::Key_PageDown));
 
     toolbar->addSeparator();

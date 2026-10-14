@@ -9,6 +9,7 @@
 #include "engine/IPage.h"
 #include "engine/PixelBuffer.h"
 #include "layout/DocumentLayout.h"
+#include "engine/PageText.h"
 
 // Generates a multi-page PDF fixture containing:
 // Page 0: Portrait A4 (595 x 842 pt)
@@ -166,6 +167,41 @@ static void generateSubpixelPdfFixture(const std::string& path) {
         pdf += buf;
     }
     pdf += "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
+
+static void generateTextPdfFixture(const std::string& path, const std::string& text = "Hello PDF World!") {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+
+    std::string content = "BT\n/F1 24 Tf\n100 700 Td\n(" + text + ") Tj\nET\n";
+    offsets.push_back(pdf.size());
+    pdf += "5 0 obj\n<< /Length " + std::to_string(content.size()) + " >>\nstream\n" + content + "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 6\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
 
     std::ofstream out(path, std::ios::binary);
     out.write(pdf.data(), pdf.size());
@@ -717,8 +753,90 @@ int main(int argc, char* argv[]) {
               << " -> Inside R=" << static_cast<int>(topR51) << std::endl;
     std::cout << "  -> Passed: Sub-pixel anti-aliased edge blends confirmed on both horizontal and vertical axes." << std::endl;
 
+    // Test 14: Text extraction, character bounding boxes, hit-testing, and selection
+    std::cout << "[TEST 14] Testing PageText extraction, character bounding boxes, hit-testing, and selection..." << std::endl;
+    {
+        std::string textFixturePath = "text_test.pdf";
+        generateTextPdfFixture(textFixturePath, "Hello PDF World!");
+
+        auto textDoc = pdf::createDocument();
+        if (textDoc->loadFromFile(textFixturePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to load text fixture PDF" << std::endl;
+            return 1;
+        }
+
+        auto textPage = textDoc->getPage(0);
+        if (!textPage) {
+            std::cerr << "[FAIL] Failed to acquire page from text fixture" << std::endl;
+            return 1;
+        }
+
+        pdf::PageText pt = textPage->extractText();
+        if (pt.empty() || pt.charCount() != 16) {
+            std::cerr << "[FAIL] Expected 16 characters extracted, got " << pt.charCount() << std::endl;
+            return 1;
+        }
+
+        // Verify bounding boxes: top-down page coordinates (left, top, right, bottom)
+        for (size_t i = 0; i < pt.charCount(); ++i) {
+            const auto& box = pt.chars[i];
+            if (!box.isValid()) {
+                std::cerr << "[FAIL] Invalid character bounding box at index " << i << std::endl;
+                return 1;
+            }
+            if (box.left < 0.0 || box.right > 595.0 || box.top < 0.0 || box.bottom > 842.0) {
+                std::cerr << "[FAIL] Character box outside page boundaries at index " << i << std::endl;
+                return 1;
+            }
+        }
+
+        // Substring extraction
+        std::u16string helloU16 = pt.getSelectedText(0, 4);
+        if (helloU16 != u"Hello") {
+            std::cerr << "[FAIL] Expected 'Hello' for indices [0..4], got unexpected text" << std::endl;
+            return 1;
+        }
+
+        std::u16string fullU16 = pt.getSelectedText(0, 15);
+        if (fullU16 != u"Hello PDF World!") {
+            std::cerr << "[FAIL] Expected 'Hello PDF World!' for indices [0..15], got unexpected text" << std::endl;
+            return 1;
+        }
+
+        // Selection rectangles
+        auto selRects = pt.getSelectionRects(0, 4);
+        if (selRects.empty()) {
+            std::cerr << "[FAIL] getSelectionRects returned empty for valid range [0..4]" << std::endl;
+            return 1;
+        }
+        for (const auto& r : selRects) {
+            if (!r.isValid() || r.width() <= 0.0 || r.height() <= 0.0) {
+                std::cerr << "[FAIL] Selection rectangle has non-positive area" << std::endl;
+                return 1;
+            }
+        }
+
+        // Hit testing
+        const auto& firstChar = pt.chars[0];
+        double midX = (firstChar.left + firstChar.right) * 0.5;
+        double midY = (firstChar.top + firstChar.bottom) * 0.5;
+        int hit = pt.hitTest(midX, midY);
+        if (hit != 0) {
+            std::cerr << "[FAIL] hitTest at character center expected 0, got " << hit << std::endl;
+            return 1;
+        }
+
+        int hitMiss = pt.hitTest(10.0, 10.0);
+        if (hitMiss != -1) {
+            std::cerr << "[FAIL] hitTest at empty margin expected -1, got " << hitMiss << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: 16 characters extracted, valid top-down boxes, hit-test and selection accurate." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 13 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 14 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

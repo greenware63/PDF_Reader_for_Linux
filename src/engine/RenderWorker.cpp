@@ -9,6 +9,7 @@ RenderWorker::RenderWorker(QObject* parent)
     qRegisterMetaType<pdf::TileKey>("pdf::TileKey");
     qRegisterMetaType<pdf::PixelBuffer>("pdf::PixelBuffer");
     qRegisterMetaType<pdf::OpenResult>("pdf::OpenResult");
+    qRegisterMetaType<std::shared_ptr<pdf::PageText>>("std::shared_ptr<pdf::PageText>");
 
     m_thread = std::thread(&RenderWorker::workerLoop, this);
 }
@@ -45,7 +46,12 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
             return {DocumentError::Unknown, 0, {}};
         }
 
-        int64_t oldDocId = m_activeDocumentId.load();
+        // Cancel pending render requests from older epochs
+        m_queue.clear();
+
+        // Atomically switch target document ID on the control queue before the open completes
+        // BUT remember old document ID in case open fails so we can restore it!
+        const int64_t oldDocId = m_activeDocumentId.load();
         auto savedQueue = std::move(m_queue);
         m_activeDocumentId.store(documentId);
 
@@ -109,20 +115,21 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
 
             OpenResult result;
             auto newDoc = createDocument();
-            const auto err = newDoc->loadFromFile(filePath, password);
+            auto err = newDoc->loadFromFile(filePath, password);
             if (err != DocumentError::None) {
-                // Failure: active document, page cache and queued requests stay exactly as they were
+                // Load failed: leave existing document, its page cache, and queued tiles completely untouched
                 result.error = err;
                 Q_EMIT documentOpened(documentId, result);
                 return;
             }
 
-            // Success: switch the active document. Requests queued for the old document are obsolete.
+            // Load succeeded: atomically switch active document and flush obsolete render requests
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
-                m_queue.clear();
                 m_activeDocumentId.store(documentId);
+                m_queue.clear();
             }
+
             m_workerPageCache.clear();
             m_workerPageLru.clear();
             m_cachedPageCount.store(0, std::memory_order_relaxed);
@@ -133,7 +140,7 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
 
             result.error = DocumentError::None;
             result.pageCount = m_workerDocument->pageCount();
-            result.pageSizes.reserve(static_cast<size_t>(result.pageCount));
+            result.pageSizes.reserve(result.pageCount);
             for (int i = 0; i < result.pageCount; ++i) {
                 result.pageSizes.push_back(m_workerDocument->pageSizePoints(i));
             }
@@ -154,8 +161,9 @@ void RenderWorker::closeDocumentSync() {
             return;
         }
 
-        m_activeDocumentId.store(0);
+        // Cancel any pending render requests
         m_queue.clear();
+        m_activeDocumentId.store(0);
 
         m_controlQueue.push_back({[this, promise]() {
             m_workerPageCache.clear();
@@ -177,12 +185,15 @@ void RenderWorker::closeDocumentSync() {
 void RenderWorker::setGeneration(uint64_t generation) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_currentGeneration.store(generation);
+
+    // Prune requests from previous generations
     m_queue.erase(
         std::remove_if(m_queue.begin(), m_queue.end(), [generation](const TileRenderRequest& req) {
             return req.generation < generation;
         }),
         m_queue.end()
     );
+
     if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering && !m_isControlRunning) {
         m_idleCv.notify_all();
     }
@@ -194,17 +205,16 @@ void RenderWorker::enqueueRequest(TileRenderRequest request) {
         return;
     }
 
-    // Drop immediately if request is for an older document or older generation
     if (request.documentId != m_activeDocumentId.load() || request.generation < m_currentGeneration.load()) {
         return;
     }
 
-    // Deduplicate against the tile being rendered right now (its result is delivered regardless of generation)
+    // Deduplicate against the tile currently rendering on the worker
     if (m_isRendering && m_inFlightKey == request.key) {
         return;
     }
 
-    // Deduplicate against already pending identical requests
+    // Deduplicate against tiles already waiting in queue
     for (const auto& item : m_queue) {
         if (item.key == request.key && item.generation == request.generation) {
             return;
@@ -250,6 +260,53 @@ void RenderWorker::enqueueRequests(std::vector<TileRenderRequest> requests) {
     m_cv.notify_one();
 }
 
+void RenderWorker::requestPageText(int64_t documentId, int pageIndex) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, pageIndex]() {
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            return;
+        }
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (page) {
+            auto pageText = std::make_shared<PageText>(page->extractText());
+            Q_EMIT pageTextReady(documentId, pageIndex, pageText);
+        }
+    }});
+    m_cv.notify_one();
+}
+
+std::shared_ptr<const PageText> RenderWorker::getPageTextSync(int64_t documentId, int pageIndex) {
+    auto promise = std::make_shared<std::promise<std::shared_ptr<const PageText>>>();
+    auto future = promise->get_future();
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+            return nullptr;
+        }
+
+        m_controlQueue.push_back({[this, documentId, pageIndex, promise]() {
+            if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+                promise->set_value(nullptr);
+                return;
+            }
+            IPage* page = getOrLoadWorkerPage(pageIndex);
+            if (page) {
+                promise->set_value(std::make_shared<const PageText>(page->extractText()));
+            } else {
+                promise->set_value(nullptr);
+            }
+        }});
+        m_cv.notify_one();
+    }
+
+    return future.get();
+}
+
 void RenderWorker::cancelAll() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_queue.clear();
@@ -270,6 +327,30 @@ size_t RenderWorker::pendingCount() {
     return m_queue.size();
 }
 
+IPage* RenderWorker::getOrLoadWorkerPage(int pageIndex) {
+    if (!m_workerDocument) {
+        return nullptr;
+    }
+    auto it = m_workerPageCache.find(pageIndex);
+    if (it != m_workerPageCache.end()) {
+        m_workerPageLru.splice(m_workerPageLru.begin(), m_workerPageLru, it->second.second);
+        return it->second.first.get();
+    }
+    auto newPage = m_workerDocument->getPage(pageIndex);
+    if (!newPage) {
+        return nullptr;
+    }
+    if (m_workerPageCache.size() >= MAX_WORKER_PAGE_CACHE && !m_workerPageLru.empty()) {
+        int lruPage = m_workerPageLru.back();
+        m_workerPageLru.pop_back();
+        m_workerPageCache.erase(lruPage);
+    }
+    m_workerPageLru.push_front(pageIndex);
+    auto [insIt, _] = m_workerPageCache.emplace(pageIndex, std::make_pair(std::move(newPage), m_workerPageLru.begin()));
+    m_cachedPageCount.store(m_workerPageCache.size(), std::memory_order_relaxed);
+    return insIt->second.first.get();
+}
+
 void RenderWorker::workerLoop() {
     while (m_running.load()) {
         ControlTask ctrlTask;
@@ -287,7 +368,7 @@ void RenderWorker::workerLoop() {
                 break;
             }
 
-            // Prioritize control tasks (open/close) over tile rendering
+            // Prioritize control tasks (open/close/text) over tile rendering
             if (!m_controlQueue.empty()) {
                 ctrlTask = std::move(m_controlQueue.front());
                 m_controlQueue.erase(m_controlQueue.begin());
@@ -326,28 +407,7 @@ void RenderWorker::workerLoop() {
             bool renderedSuccessfully = false;
 
             if (m_workerDocument && m_running.load()) {
-                IPage* page = nullptr;
-                auto it = m_workerPageCache.find(req.pageIndex);
-                if (it != m_workerPageCache.end()) {
-                    // Cache hit: promote to Most Recently Used
-                    m_workerPageLru.splice(m_workerPageLru.begin(), m_workerPageLru, it->second.second);
-                    page = it->second.first.get();
-                } else {
-                    // Cache miss: load page and enforce LRU bound
-                    auto newPage = m_workerDocument->getPage(req.pageIndex);
-                    if (newPage) {
-                        if (m_workerPageCache.size() >= MAX_WORKER_PAGE_CACHE && !m_workerPageLru.empty()) {
-                            int lruPage = m_workerPageLru.back();
-                            m_workerPageLru.pop_back();
-                            m_workerPageCache.erase(lruPage);
-                        }
-                        m_workerPageLru.push_front(req.pageIndex);
-                        page = newPage.get();
-                        m_workerPageCache.emplace(req.pageIndex, std::make_pair(std::move(newPage), m_workerPageLru.begin()));
-                        m_cachedPageCount.store(m_workerPageCache.size(), std::memory_order_relaxed);
-                    }
-                }
-
+                IPage* page = getOrLoadWorkerPage(req.pageIndex);
                 if (page) {
                     buffer = page->renderTile(req.rect, req.scale, req.dpr);
                     renderedSuccessfully = buffer.isValid() && (buffer.data() != nullptr);
@@ -359,8 +419,7 @@ void RenderWorker::workerLoop() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
 
-            // Fix 1: Deliver completed render whenever documentId matches active document.
-            // Generation is strictly for pruning queued work, not for discarding completed tiles!
+            // Deliver completed render whenever documentId matches active document.
             if (m_running.load() && req.documentId == m_activeDocumentId.load()) {
                 if (renderedSuccessfully) {
                     Q_EMIT tileReady(req.documentId, req.generation, req.key, buffer);

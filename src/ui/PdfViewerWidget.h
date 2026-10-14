@@ -6,17 +6,20 @@
 #include <vector>
 #include <cstdint>
 #include <unordered_set>
+#include <unordered_map>
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
 #include "cache/TileCache.h"
 #include "engine/RenderWorker.h"
+#include "engine/PageText.h"
 
 namespace ui {
 
 /**
  * @brief Professional, high-performance Qt6 PDF Viewer widget.
  * Implements continuous document scrolling, smooth zooming, exact 64-bit coordinate space,
- * compressed scrollbar mapping, sub-pixel rounding-safe fit-width, and asynchronous tiled background rendering.
+ * compressed scrollbar mapping, sub-pixel rounding-safe fit-width, asynchronous background rendering,
+ * and background text extraction with cursor hit-testing, selection highlighting, and clipboard copy.
  * PDFium operations run strictly on the background RenderWorker thread; 0 PDFium calls occur on UI thread.
  */
 class PdfViewerWidget : public QAbstractScrollArea {
@@ -99,6 +102,13 @@ public:
     /// Enables/disables the off-screen prefetch ring (enabled by default).
     void setPrefetchEnabled(bool enabled) noexcept { m_prefetchEnabled = enabled; }
 
+    // Text selection & copy APIs
+    bool hasSelection() const noexcept;
+    QString selectedText() const;
+    void clearSelection();
+    void copySelection();
+    std::shared_ptr<const pdf::PageText> getPageText(int pageIndex) const;
+
 Q_SIGNALS:
     void documentLoaded(const QString& title, int pages);
     void loadError(const QString& errorMessage);
@@ -106,19 +116,37 @@ Q_SIGNALS:
     void loadingChanged(bool loading, const QString& fileName);
     void pageChanged(int currentPage, int totalPages);
     void zoomChanged(double zoomRatio);
+    void selectionChanged();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
 
 private Q_SLOTS:
     void onScrollValueChanged();
     void onTileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key, const pdf::PixelBuffer& buffer);
     void onTileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key);
     void onDocumentOpened(int64_t documentId, pdf::OpenResult result);
+    void onPageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
 
 private:
+    struct TextPosition {
+        int pageIndex{-1};
+        int charIndex{-1};
+        bool isValid() const noexcept { return pageIndex >= 0 && charIndex >= 0; }
+        bool operator==(const TextPosition& o) const noexcept {
+            return pageIndex == o.pageIndex && charIndex == o.charIndex;
+        }
+        bool operator!=(const TextPosition& o) const noexcept {
+            return !(*this == o);
+        }
+    };
+
     void updateLayoutGeometry();
     void updateScrollBars();
 
@@ -129,6 +157,8 @@ private:
     void drawLoadingOverlay(QPainter& painter);
     bool drawFallbackTile(QPainter& painter, const layout::VisibleTile& tile, const QRectF& tileRect, double qScale, double qDpr);
     void rememberFallbackScale(double previousScale);
+    void ensurePageTextRequested(int pageIndex);
+    void drawSelection(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale);
 
     QString openErrorMessage(pdf::DocumentError error, const QString& filePath) const;
     void applyOpenedDocument(int64_t newDocumentId, const QString& filePath, const pdf::OpenResult& result);
@@ -178,6 +208,12 @@ private:
     // Cached previous viewport dimensions to anchor precisely during resizes
     int64_t m_lastVpWidthDevice{0};
     int64_t m_lastVpHeightDevice{0};
+
+    // Text layer and selection
+    std::unordered_map<int, std::shared_ptr<pdf::PageText>> m_pageTextCache;
+    TextPosition m_selectionStart;
+    TextPosition m_selectionEnd;
+    bool m_isSelecting{false};
 };
 
 } // namespace ui

@@ -6,6 +6,9 @@
 #include <QThread>
 #include <QElapsedTimer>
 #include <QCoreApplication>
+#include <QClipboard>
+#include <QMouseEvent>
+#include <QKeyEvent>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -57,6 +60,42 @@ static void generateMultiPagePdf(const std::string& path, int count = 5) {
     std::ofstream out(path, std::ios::binary);
     out.write(pdf.data(), pdf.size());
 }
+
+static void generateTextPdfFixture(const std::string& path, const std::string& text = "Hello PDF World!") {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+
+    std::string content = "BT\n/F1 24 Tf\n100 700 Td\n(" + text + ") Tj\nET\n";
+    offsets.push_back(pdf.size());
+    pdf += "5 0 obj\n<< /Length " + std::to_string(content.size()) + " >>\nstream\n" + content + "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 6\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
+
 
 int main(int argc, char* argv[]) {
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
@@ -1024,8 +1063,184 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: ring tiles pre-rendered, visible tiles always first, prefetch can be disabled." << std::endl;
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Text extraction, selection, and clipboard copy (Tests 23-25)
+    // ---------------------------------------------------------------------------------------------
+    std::string textPath = "widget_text_fixture.pdf";
+    generateTextPdfFixture(textPath, "Hello PDF World!");
+
+    std::cout << "[TEST 23] Testing asynchronous PageText extraction arrival..." << std::endl;
+    {
+        err = viewer.openDocument(QString::fromStdString(textPath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open text fixture in viewer" << std::endl;
+            return 1;
+        }
+
+        viewer.resize(1000, 700);
+        viewer.goToPage(0);
+        viewer.setZoom(1.0);
+
+        // Render viewport to trigger ensurePageTextRequested for page 0
+        QImage frame(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+        QPainter pFrame(&frame);
+        viewer.viewport()->render(&pFrame);
+        pFrame.end();
+
+        // Wait for worker to finish text extraction and deliver pageTextReady
+        viewer.waitForRendering();
+
+        auto pt = viewer.getPageText(0);
+        if (!pt) {
+            std::cerr << "[FAIL] PageText for page 0 was not delivered to cache" << std::endl;
+            return 1;
+        }
+        if (pt->charCount() != 16) {
+            std::cerr << "[FAIL] Expected 16 characters in PageText, got " << pt->charCount() << std::endl;
+            return 1;
+        }
+        if (pt->getSelectedText(0, 15) != u"Hello PDF World!") {
+            std::cerr << "[FAIL] Extracted text mismatch in viewer" << std::endl;
+            return 1;
+        }
+        if (viewer.getPageText(1) != nullptr) {
+            std::cerr << "[FAIL] Non-existent page 1 should not have PageText" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: PageText arrived asynchronously, 16 characters verified." << std::endl;
+    }
+
+    std::cout << "[TEST 24] Testing mouse drag selection and hover cursor..." << std::endl;
+    {
+        auto pt = viewer.getPageText(0);
+        if (!pt || pt->charCount() < 5) {
+            std::cerr << "[FAIL] PageText not available for selection test" << std::endl;
+            return 1;
+        }
+
+        const auto& pl = viewer.layout().getPageLayout(0);
+        const double dpr = viewer.effectiveDpr();
+        const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+        // Character 0 ('H')
+        const auto& b0 = pt->chars[0];
+        double c0X = (b0.left + b0.right) * 0.5;
+        double c0Y = (b0.top + b0.bottom) * 0.5;
+        int64_t doc0X = pl.leftPixel + static_cast<int64_t>(std::round(c0X * effScale));
+        int64_t doc0Y = pl.topPixel + static_cast<int64_t>(std::round(c0Y * effScale));
+        double vp0X = static_cast<double>(doc0X - viewer.currentDocScrollX()) / dpr;
+        double vp0Y = static_cast<double>(doc0Y - viewer.currentDocScrollY()) / dpr;
+
+        // Character 4 ('o')
+        const auto& b4 = pt->chars[4];
+        double c4X = (b4.left + b4.right) * 0.5;
+        double c4Y = (b4.top + b4.bottom) * 0.5;
+        int64_t doc4X = pl.leftPixel + static_cast<int64_t>(std::round(c4X * effScale));
+        int64_t doc4Y = pl.topPixel + static_cast<int64_t>(std::round(c4Y * effScale));
+        double vp4X = static_cast<double>(doc4X - viewer.currentDocScrollX()) / dpr;
+        double vp4Y = static_cast<double>(doc4Y - viewer.currentDocScrollY()) / dpr;
+
+        // Hover test over text
+        QMouseEvent hoverEvent(QEvent::MouseMove, QPointF(vp0X, vp0Y), QPointF(vp0X, vp0Y), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &hoverEvent);
+        if (viewer.viewport()->cursor().shape() != Qt::IBeamCursor) {
+            std::cerr << "[FAIL] Hover cursor over text expected IBeamCursor" << std::endl;
+            return 1;
+        }
+
+        // Hover test away from text
+        QMouseEvent hoverAway(QEvent::MouseMove, QPointF(10, 10), QPointF(10, 10), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &hoverAway);
+        if (viewer.viewport()->cursor().shape() != Qt::ArrowCursor) {
+            std::cerr << "[FAIL] Hover cursor away from text expected ArrowCursor" << std::endl;
+            return 1;
+        }
+
+        // Drag select from 'H' to 'o'
+        QMouseEvent pressEvent(QEvent::MouseButtonPress, QPointF(vp0X, vp0Y), QPointF(vp0X, vp0Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pressEvent);
+
+        QMouseEvent moveEvent(QEvent::MouseMove, QPointF(vp4X, vp4Y), QPointF(vp4X, vp4Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &moveEvent);
+
+        QMouseEvent releaseEvent(QEvent::MouseButtonRelease, QPointF(vp4X, vp4Y), QPointF(vp4X, vp4Y), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &releaseEvent);
+
+        if (!viewer.hasSelection()) {
+            std::cerr << "[FAIL] Expected hasSelection() == true after drag" << std::endl;
+            return 1;
+        }
+        if (viewer.selectedText() != QStringLiteral("Hello")) {
+            std::cerr << "[FAIL] Expected selectedText() == 'Hello', got '" << viewer.selectedText().toStdString() << "'" << std::endl;
+            return 1;
+        }
+
+        // Clear selection
+        viewer.clearSelection();
+        if (viewer.hasSelection() || !viewer.selectedText().isEmpty()) {
+            std::cerr << "[FAIL] clearSelection failed to reset selection" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: IBeam hover cursor, mouse drag selection ('Hello'), and clearSelection verified." << std::endl;
+    }
+
+    std::cout << "[TEST 25] Testing copySelection API and Ctrl+C clipboard copy..." << std::endl;
+    {
+        auto pt = viewer.getPageText(0);
+        const auto& pl = viewer.layout().getPageLayout(0);
+        const double dpr = viewer.effectiveDpr();
+        const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+        const auto& b0 = pt->chars[0];
+        double vp0X = static_cast<double>(pl.leftPixel + static_cast<int64_t>(std::round(((b0.left + b0.right) * 0.5) * effScale)) - viewer.currentDocScrollX()) / dpr;
+        double vp0Y = static_cast<double>(pl.topPixel + static_cast<int64_t>(std::round(((b0.top + b0.bottom) * 0.5) * effScale)) - viewer.currentDocScrollY()) / dpr;
+
+        const auto& b4 = pt->chars[4];
+        double vp4X = static_cast<double>(pl.leftPixel + static_cast<int64_t>(std::round(((b4.left + b4.right) * 0.5) * effScale)) - viewer.currentDocScrollX()) / dpr;
+        double vp4Y = static_cast<double>(pl.topPixel + static_cast<int64_t>(std::round(((b4.top + b4.bottom) * 0.5) * effScale)) - viewer.currentDocScrollY()) / dpr;
+
+        // Select 'Hello'
+        QMouseEvent pressEvent(QEvent::MouseButtonPress, QPointF(vp0X, vp0Y), QPointF(vp0X, vp0Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pressEvent);
+        QMouseEvent moveEvent(QEvent::MouseMove, QPointF(vp4X, vp4Y), QPointF(vp4X, vp4Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &moveEvent);
+        QMouseEvent releaseEvent(QEvent::MouseButtonRelease, QPointF(vp4X, vp4Y), QPointF(vp4X, vp4Y), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &releaseEvent);
+
+        if (viewer.selectedText() != QStringLiteral("Hello")) {
+            std::cerr << "[FAIL] Failed to select 'Hello' for copy test" << std::endl;
+            return 1;
+        }
+
+        // 1. Programmatic copySelection()
+        QGuiApplication::clipboard()->clear();
+        viewer.copySelection();
+        if (QGuiApplication::clipboard()->text() != QStringLiteral("Hello")) {
+            std::cerr << "[FAIL] copySelection did not copy 'Hello' to clipboard: '"
+                      << QGuiApplication::clipboard()->text().toStdString() << "'" << std::endl;
+            return 1;
+        }
+
+        // 2. Keyboard shortcut Ctrl+C
+        QGuiApplication::clipboard()->clear();
+        if (!QGuiApplication::clipboard()->text().isEmpty()) {
+            std::cerr << "[FAIL] Clipboard clear failed" << std::endl;
+            return 1;
+        }
+
+        QKeyEvent copyEvent(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier);
+        QApplication::sendEvent(&viewer, &copyEvent);
+        if (QGuiApplication::clipboard()->text() != QStringLiteral("Hello")) {
+            std::cerr << "[FAIL] Ctrl+C shortcut did not copy 'Hello' to clipboard: '"
+                      << QGuiApplication::clipboard()->text().toStdString() << "'" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: copySelection and Ctrl+C shortcut copy selected text to system clipboard." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 22 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 25 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
