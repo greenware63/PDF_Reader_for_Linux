@@ -10,6 +10,7 @@
 #include "engine/PixelBuffer.h"
 #include "layout/DocumentLayout.h"
 #include "engine/PageText.h"
+#include "engine/PdfiumPage.h"
 
 // Generates a multi-page PDF fixture containing:
 // Page 0: Portrait A4 (595 x 842 pt)
@@ -1051,35 +1052,30 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Actual PDF parsed by PDFium extracted 5 characters with supplementary code points U+1F600 and U+1F680." << std::endl;
     }
 
-    // Test 16: Text fallback reconstruction across merged surrogate pairs
-    std::cout << "[TEST 16] Testing fallback text reconstruction across merged surrogate pairs (no out-of-bounds read)..." << std::endl;
+    // Test 16: Text fallback reconstruction across merged surrogate pairs in production PdfiumPage
+    std::cout << "[TEST 16] Testing fallback text reconstruction across merged surrogate pairs in PdfiumPage..." << std::endl;
     {
-        // Create a PageText with merged surrogate pairs where chars.size() is strictly less than original PDFium count
-        // Original PDFium count was 7 (A, high, low, B, high, low, C), merged into 5 chars.
-        pdf::PageText pt;
-        pt.chars = {
-            pdf::PageCharBox{0.0, 0.0, 10.0, 10.0, U'A'},
-            pdf::PageCharBox{10.0, 0.0, 20.0, 10.0, 0x1F600},
-            pdf::PageCharBox{20.0, 0.0, 30.0, 10.0, U'B'},
-            pdf::PageCharBox{30.0, 0.0, 40.0, 10.0, 0x1F680},
-            pdf::PageCharBox{40.0, 0.0, 50.0, 10.0, U'C'}
-        };
+        std::string suppPdfPath = "actual_supp_unicode.pdf";
+        auto suppDoc = pdf::createDocument();
+        if (suppDoc->loadFromFile(suppPdfPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to load actual supplementary Unicode PDF for fallback test" << std::endl;
+            return 1;
+        }
 
-        // Exercise the exact fallback reconstruction logic from PdfiumPage::extractText()
-        pt.text.clear();
-        if (pt.text.empty() && !pt.chars.empty()) {
-            pt.text.reserve(pt.chars.size() * 2);
-            for (const auto& ch : pt.chars) {
-                char32_t cp = ch.unicode;
-                if (cp == 0) continue;
-                if (cp <= 0xFFFF) {
-                    pt.text.push_back(static_cast<char16_t>(cp));
-                } else if (cp <= 0x10FFFF) {
-                    cp -= 0x10000;
-                    pt.text.push_back(static_cast<char16_t>(0xD800 + ((cp >> 10) & 0x3FF)));
-                    pt.text.push_back(static_cast<char16_t>(0xDC00 + (cp & 0x3FF)));
-                }
-            }
+        auto suppPage = suppDoc->getPage(0);
+        if (!suppPage) {
+            std::cerr << "[FAIL] Failed to open page for fallback test" << std::endl;
+            return 1;
+        }
+
+        // Enable hook to simulate FPDFText_GetText failure, forcing production extractText() to execute its fallback path
+        pdf::PdfiumPage::setSimulateGetTextFailureForTesting(true);
+        pdf::PageText pt = suppPage->extractText();
+        pdf::PdfiumPage::setSimulateGetTextFailureForTesting(false);
+
+        if (pt.empty() || pt.charCount() != 5) {
+            std::cerr << "[FAIL] Fallback production extraction charCount mismatch: expected 5, got " << pt.charCount() << std::endl;
+            return 1;
         }
 
         if (pt.text.size() != 7) {
@@ -1095,8 +1091,12 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Fallback getSelectedText(2, 2) misaligned" << std::endl;
             return 1;
         }
+        if (pt.getSelectedText(1, 1).size() != 2 || pt.getSelectedText(1, 1)[0] != 0xD83D || pt.getSelectedText(1, 1)[1] != 0xDE00) {
+            std::cerr << "[FAIL] Fallback getSelectedText(1, 1) surrogate mismatch" << std::endl;
+            return 1;
+        }
 
-        std::cout << "  -> Passed: Fallback text reconstruction correctly bounds to merged character count without OOB read." << std::endl;
+        std::cout << "  -> Passed: Production PdfiumPage::extractText() fallback correctly reconstructed supplementary text without OOB read." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

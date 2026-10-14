@@ -4,6 +4,7 @@
 #include <fpdfview.h>
 #include <memory>
 #include <type_traits>
+#include <atomic>
 
 namespace pdf {
 
@@ -23,6 +24,8 @@ public:
     PixelBuffer renderTile(const PixelRect& rect, double scale, double devicePixelRatio) override;
     PixelBuffer renderWholePage(double scale, double devicePixelRatio) override;
     PageText extractText() override;
+
+    static void setSimulateGetTextFailureForTesting(bool simulate) noexcept;
 
 private:
     DocumentHandle m_doc;

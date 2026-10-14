@@ -11,6 +11,12 @@
 
 namespace pdf {
 
+static std::atomic<bool> s_simulateGetTextFailureForTesting{false};
+
+void PdfiumPage::setSimulateGetTextFailureForTesting(bool simulate) noexcept {
+    s_simulateGetTextFailureForTesting.store(simulate);
+}
+
 // Safety bounds applied ONLY to whole-page renders to prevent bad_alloc / OOM
 static constexpr int MAX_WHOLE_PAGE_DIM = 8192;
 static constexpr int64_t MAX_WHOLE_PAGE_PIXELS = 16 * 1024 * 1024; // 16 MP max per single buffer (~64 MB)
@@ -198,7 +204,7 @@ PageText PdfiumPage::extractText() {
     result.chars.reserve(count);
 
     std::vector<unsigned short> buffer(count * 2 + 1, 0);
-    int extracted = FPDFText_GetText(textPage, 0, count, buffer.data());
+    int extracted = s_simulateGetTextFailureForTesting.load() ? 0 : FPDFText_GetText(textPage, 0, count, buffer.data());
     if (extracted > 1) {
         result.text.assign(reinterpret_cast<const char16_t*>(buffer.data()), extracted - 1);
     }
