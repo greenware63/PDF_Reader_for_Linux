@@ -1,77 +1,83 @@
 #pragma once
 
 #include <QAbstractScrollArea>
+#include <QString>
 #include <memory>
-#include "engine/IDocument.h"
-#include "engine/IPage.h"
-#include "engine/RenderWorker.h"
+#include <vector>
+#include <cstdint>
+#include <unordered_set>
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
 #include "cache/TileCache.h"
+#include "engine/RenderWorker.h"
 
 namespace ui {
 
-// Desktop 100% zoom standard: 96 DPI / 72 DPI = 1.3333333333333333
-inline constexpr double DESKTOP_100_PERCENT_SCALE = 96.0 / 72.0;
-
+/**
+ * @brief Professional, high-performance Qt6 PDF Viewer widget.
+ * Implements continuous document scrolling, smooth zooming, exact 64-bit coordinate space,
+ * compressed scrollbar mapping, sub-pixel rounding-safe fit-width, and asynchronous tiled background rendering.
+ * PDFium operations run strictly on the background RenderWorker thread; 0 PDFium calls occur on UI thread.
+ */
 class PdfViewerWidget : public QAbstractScrollArea {
     Q_OBJECT
 
 public:
+    static constexpr double DESKTOP_100_PERCENT_SCALE = 96.0 / 72.0; // 1.3333333333333333
+
     explicit PdfViewerWidget(QWidget* parent = nullptr);
     ~PdfViewerWidget() override;
-
-    // Disallow copy/move
-    PdfViewerWidget(const PdfViewerWidget&) = delete;
-    PdfViewerWidget& operator=(const PdfViewerWidget&) = delete;
 
     pdf::DocumentError openDocument(const QString& filePath);
     void closeDocument();
 
-    int currentPage() const { return m_currentPage; }
-    int pageCount() const { return m_pageCount; }
-    bool isDocumentOpen() const { return m_hasDocument && m_pageCount > 0; }
-    double currentZoom() const { return m_scale; }
-    int64_t currentDocumentId() const { return m_currentDocumentId; }
+    bool isDocumentOpen() const noexcept { return m_hasDocument; }
+    int pageCount() const noexcept { return m_pageCount; }
+    int currentPage() const noexcept { return m_currentPage; }
+    double currentZoom() const noexcept { return m_scale; }
+    int64_t currentDocumentId() const noexcept { return m_currentDocumentId; }
+    uint64_t currentGeneration() const noexcept { return m_currentGeneration; }
 
-    const layout::DocumentLayout& layout() const { return m_layout; }
-    const pdf::TileCache& cache() const { return m_cache; }
-    pdf::TileCache& cache() { return m_cache; }
+    int64_t currentDocScrollX() const noexcept { return m_docScrollX; }
+    int64_t currentDocScrollY() const noexcept { return m_docScrollY; }
 
-    int64_t currentDocScrollX() const { return m_docScrollX; }
-    int64_t currentDocScrollY() const { return m_docScrollY; }
+    void setZoom(double zoom, const QPoint* anchorWidgetPos = nullptr);
+    void zoomIn();
+    void zoomOut();
+    void zoomReset();
+    void zoomFitWidth();
 
-    void setDevicePixelRatioOverride(double dpr);
-    double effectiveDpr() const;
+    void goToPage(int pageIndex);
+    void nextPage();
+    void previousPage();
 
     /**
-     * @brief Retries any previously failed tiles by clearing failure tombstones.
+     * @brief Manually triggers retry of all currently failed tiles in the viewport.
      */
     void retryFailedTiles();
 
     /**
-     * @brief Waits until background rendering is idle and flushes Qt event queue.
-     * Useful for deterministic testing.
+     * @brief Injects an explicit Device Pixel Ratio override (for high-DPI testing and simulation).
+     * Passing 0.0 or negative resets back to system devicePixelRatioF().
+     */
+    void setDevicePixelRatioOverride(double dpr);
+    double effectiveDpr() const;
+
+    /**
+     * @brief Blocks until the background render worker has finished all pending requests and in-flight renders.
+     * Useful for deterministic testing and flush operations.
      */
     void waitForRendering();
 
-    pdf::RenderWorker& renderWorker() { return m_renderWorker; }
-
-public Q_SLOTS:
-    void nextPage();
-    void previousPage();
-    void goToPage(int pageIndex);
-    void setZoom(double zoom, const QPoint* anchorWidgetPos = nullptr);
-    void zoomIn();
-    void zoomOut();
-    void zoomFitWidth();
-    void zoomReset();
+    pdf::TileCache& cache() noexcept { return m_cache; }
+    const layout::DocumentLayout& layout() const noexcept { return m_layout; }
+    size_t inFlightCount() const noexcept { return m_inFlightKeys.size(); }
 
 Q_SIGNALS:
-    void pageChanged(int currentPage, int totalPages);
-    void zoomChanged(double zoom);
-    void documentLoaded(const QString& title, int totalPages);
+    void documentLoaded(const QString& title, int pages);
     void loadError(const QString& errorMessage);
+    void pageChanged(int currentPage, int totalPages);
+    void zoomChanged(double zoomRatio);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -107,9 +113,16 @@ private:
     bool m_navigating{false};
     int m_wheelDeltaAccumulator{0};
 
+    // Tracks tile requests currently in-flight on the worker to prevent duplicate enqueues
+    std::unordered_set<pdf::TileKey, pdf::TileKeyHash> m_inFlightKeys;
+
     // Primary 64-bit document coordinates, immune to 32-bit slider resize quantization
     int64_t m_docScrollX{0};
     int64_t m_docScrollY{0};
+
+    // Cached previous viewport dimensions to anchor precisely during resizes
+    int64_t m_lastVpWidthDevice{0};
+    int64_t m_lastVpHeightDevice{0};
 };
 
 } // namespace ui

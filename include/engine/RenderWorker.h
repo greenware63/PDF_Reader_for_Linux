@@ -6,6 +6,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <vector>
+#include <list>
 #include <atomic>
 #include <memory>
 #include <unordered_map>
@@ -98,6 +99,13 @@ public:
      */
     size_t pendingCount();
 
+    /**
+     * @return Number of open IPage handles currently cached on the worker thread.
+     */
+    size_t cachedPageCount() const noexcept {
+        return m_cachedPageCount.load(std::memory_order_relaxed);
+    }
+
 Q_SIGNALS:
     void tileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key, const pdf::PixelBuffer& buffer);
     void tileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key);
@@ -112,6 +120,7 @@ private:
     std::atomic<bool> m_running{true};
     std::atomic<int64_t> m_activeDocumentId{0};
     std::atomic<uint64_t> m_currentGeneration{0};
+    std::atomic<size_t> m_cachedPageCount{0};
 
     std::mutex m_mutex;
     std::condition_variable m_cv;
@@ -123,7 +132,11 @@ private:
 
     // Document and open page handles are accessed EXCLUSIVELY on the worker thread inside workerLoop()
     std::unique_ptr<IDocument> m_workerDocument;
-    std::unordered_map<int, std::unique_ptr<IPage>> m_workerPageCache;
+
+    // Bounded LRU page cache on worker thread
+    static constexpr size_t MAX_WORKER_PAGE_CACHE = 16;
+    std::list<int> m_workerPageLru; // front = MRU, back = LRU
+    std::unordered_map<int, std::pair<std::unique_ptr<IPage>, std::list<int>::iterator>> m_workerPageCache;
 
     std::thread m_thread;
 };

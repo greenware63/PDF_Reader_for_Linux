@@ -162,6 +162,7 @@ public:
 
     /**
      * @brief Clears failure status on a specific tile to allow immediate retry.
+     * Preserves failCount history across retries so exponential backoff grows on deterministic failure.
      * @return true if the tile was marked failed and was cleared; false otherwise.
      */
     bool clearFailed(const TileKey& key);
@@ -170,6 +171,11 @@ public:
      * @brief Clears failure status on all failed tiles.
      */
     void clearAllFailed();
+
+    /**
+     * @brief Returns recorded failure count for a tile key (0 if never failed or successfully rendered).
+     */
+    int failCount(const TileKey& key) const;
 
     /**
      * @brief Retrieves a copy of the cached pixel buffer and promotes the tile to Most Recently Used.
@@ -234,7 +240,7 @@ public:
     void setByteBudget(size_t maxBytes);
 
     /**
-     * @return Maximum byte budget.\n
+     * @return Maximum byte budget.
      */
     size_t byteBudget() const noexcept { return m_maxBytesBudget; }
 
@@ -249,7 +255,7 @@ public:
     size_t size() const noexcept { return m_cacheMap.size(); }
 
     /**
-     * @brief Clears all cached tiles and pinned sets.
+     * @brief Clears all cached tiles, pinned sets, and failure history.
      */
     void clear();
 
@@ -267,6 +273,7 @@ private:
     std::list<TileKey> m_lruList; // Front = MRU, Back = LRU
     std::unordered_map<TileKey, MapEntry, TileKeyHash> m_cacheMap;
     std::unordered_set<TileKey, TileKeyHash> m_pinnedSet;
+    std::unordered_map<TileKey, int, TileKeyHash> m_failHistory;
 };
 
 } // namespace pdf

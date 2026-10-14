@@ -1,9 +1,11 @@
 #include "PdfiumPage.h"
+#include "PdfiumMutex.h"
 #include "layout/DocumentLayout.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 
 namespace pdf {
 
@@ -18,6 +20,7 @@ static constexpr int64_t MAX_TILE_PIXELS = 16 * 1024 * 1024;
 PdfiumPage::PdfiumPage(DocumentHandle doc, int pageIndex)
     : m_doc(std::move(doc)), m_pageIndex(pageIndex) {
     if (m_doc) {
+        std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
         m_page = FPDF_LoadPage(m_doc.get(), pageIndex);
         if (m_page) {
             m_width = FPDF_GetPageWidthF(m_page);
@@ -28,6 +31,7 @@ PdfiumPage::PdfiumPage(DocumentHandle doc, int pageIndex)
 
 PdfiumPage::~PdfiumPage() {
     if (m_page) {
+        std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
         FPDF_ClosePage(m_page);
         m_page = nullptr;
     }
@@ -77,6 +81,8 @@ PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double d
 
     // Pre-fill with opaque white (0xFFFFFFFF in 32-bit little-endian)
     std::memset(buffer.data(), 0xFF, buffer.sizeBytes());
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
 
     FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(
         tileW,
@@ -142,6 +148,8 @@ PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio) {
 
     std::memset(buffer.data(), 0xFF, buffer.sizeBytes());
 
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
     FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(
         pixelW,
         pixelH,
@@ -156,6 +164,7 @@ PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio) {
 
     const int flags = FPDF_ANNOT;
     FPDF_RenderPageBitmap(bitmap, m_page, 0, 0, pixelW, pixelH, 0, flags);
+
     FPDFBitmap_Destroy(bitmap);
     return buffer;
 }

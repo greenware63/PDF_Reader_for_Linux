@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        build_type: [Release, Sanitizer]
+        build_type: [Release, Sanitizer, ThreadSanitizer]
 
     steps:
       - name: Checkout repository
@@ -45,6 +45,14 @@ jobs:
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
+      - name: Configure CMake (ThreadSanitizer)
+        if: matrix.build_type == 'ThreadSanitizer'
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
       - name: Build Project
         run: cmake --build build
 
@@ -53,4 +61,5 @@ jobs:
           QT_QPA_PLATFORM: "offscreen"
           ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+          TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
         run: ctest --test-dir build --output-on-failure

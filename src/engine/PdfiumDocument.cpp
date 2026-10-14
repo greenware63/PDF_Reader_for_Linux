@@ -1,4 +1,5 @@
 #include "PdfiumDocument.h"
+#include "PdfiumMutex.h"
 #include <mutex>
 #include <cstring>
 #include <vector>
@@ -9,6 +10,7 @@ static std::once_flag s_initFlag;
 
 void PdfiumDocument::ensureLibraryInitialized() {
     std::call_once(s_initFlag, []() {
+        std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
         FPDF_LIBRARY_CONFIG config;
         config.version = 2;
         config.m_pUserFontPaths = nullptr;
@@ -44,6 +46,8 @@ PdfiumDocument::~PdfiumDocument() {
 DocumentError PdfiumDocument::loadFromFile(const std::string& filePath, const std::string& password) {
     const char* pwd = password.empty() ? nullptr : password.c_str();
 
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
     // Load into temporary handle first so existing document is preserved on failure
     FPDF_DOCUMENT newDoc = FPDF_LoadDocument(filePath.c_str(), pwd);
     if (!newDoc) {
@@ -65,7 +69,10 @@ DocumentError PdfiumDocument::loadFromFile(const std::string& filePath, const st
 
     // Success: atomically swap active document handle
     m_doc = DocumentHandle(newDoc, [](FPDF_DOCUMENT d) {
-        if (d) FPDF_CloseDocument(d);
+        if (d) {
+            std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+            FPDF_CloseDocument(d);
+        }
     });
     m_lastError = DocumentError::None;
     return DocumentError::None;
@@ -83,6 +90,9 @@ DocumentError PdfiumDocument::loadFromMemory(const void* data, size_t size, cons
     );
 
     const char* pwd = password.empty() ? nullptr : password.c_str();
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
     FPDF_DOCUMENT newDoc = FPDF_LoadMemDocument64(bufferCopy->data(), bufferCopy->size(), pwd);
     if (!newDoc) {
         unsigned long err = FPDF_GetLastError();
@@ -104,7 +114,10 @@ DocumentError PdfiumDocument::loadFromMemory(const void* data, size_t size, cons
     // Tie memory buffer lifetime directly to DocumentHandle deleter.
     // Keeps memory valid as long as either PdfiumDocument or any PdfiumPage exists!
     m_doc = DocumentHandle(newDoc, [buf = std::move(bufferCopy)](FPDF_DOCUMENT d) {
-        if (d) FPDF_CloseDocument(d);
+        if (d) {
+            std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+            FPDF_CloseDocument(d);
+        }
         // buf is destroyed safely AFTER FPDF_CloseDocument completes
     });
     m_lastError = DocumentError::None;
@@ -113,6 +126,7 @@ DocumentError PdfiumDocument::loadFromMemory(const void* data, size_t size, cons
 
 int PdfiumDocument::pageCount() const {
     if (!m_doc) return 0;
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
     return FPDF_GetPageCount(m_doc.get());
 }
 
@@ -120,6 +134,7 @@ std::pair<double, double> PdfiumDocument::pageSizePoints(int pageIndex) const {
     if (!m_doc || pageIndex < 0 || pageIndex >= pageCount()) {
         return {0.0, 0.0};
     }
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
     FS_SIZEF size{0.0f, 0.0f};
     if (FPDF_GetPageSizeByIndexF(m_doc.get(), pageIndex, &size)) {
         return {static_cast<double>(size.width), static_cast<double>(size.height)};

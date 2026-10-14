@@ -9,7 +9,7 @@
 #include <cmath>
 #include <vector>
 
-static void generateMultiPagePdf(const std::string& path) {
+static void generateMultiPagePdf(const std::string& path, int count = 5) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
     std::vector<size_t> offsets;
@@ -18,18 +18,24 @@ static void generateMultiPagePdf(const std::string& path) {
     pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
 
     offsets.push_back(pdf.size());
-    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R] /Count 5 >>\nendobj\n";
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [";
+    for (int i = 0; i < count; ++i) {
+        pdf += std::to_string(3 + i) + " 0 R ";
+    }
+    pdf += "] /Count " + std::to_string(count) + " >>\nendobj\n";
 
-    // 5 pages (A4 595 x 842 pt)
-    for (int i = 0; i < 5; ++i) {
+    // Pages (A4 595 x 842 pt)
+    const int contentObjNum = 3 + count;
+    for (int i = 0; i < count; ++i) {
         offsets.push_back(pdf.size());
-        pdf += std::to_string(3 + i) + " 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 8 0 R >>\nendobj\n";
+        pdf += std::to_string(3 + i) + " 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents " 
+            + std::to_string(contentObjNum) + " 0 R >>\nendobj\n";
     }
 
     offsets.push_back(pdf.size());
     // Solid blue fill across the entire 595 x 842 pt page
     std::string stream = "0 0 1 rg 0 0 595 842 re f\n";
-    pdf += "8 0 obj\n<< /Length " + std::to_string(stream.size()) + " >>\nstream\n" + stream + "\nendstream\nendobj\n";
+    pdf += std::to_string(contentObjNum) + " 0 obj\n<< /Length " + std::to_string(stream.size()) + " >>\nstream\n" + stream + "\nendstream\nendobj\n";
 
     size_t xrefOffset = pdf.size();
     pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";
@@ -118,7 +124,7 @@ int main(int argc, char* argv[]) {
     // Test 2: Multi-page navigation at zoom where bottom clamps
     std::cout << "[TEST 2] Testing multi-page navigation when scroll position clamps at bottom..." << std::endl;
     std::string multiPath = "multi_page_widget.pdf";
-    generateMultiPagePdf(multiPath);
+    generateMultiPagePdf(multiPath, 5);
     err = viewer.openDocument(QString::fromStdString(multiPath));
     if (err != pdf::DocumentError::None || viewer.pageCount() != 5) {
         std::cerr << "[FAIL] Failed to load 5-page fixture: count=" << viewer.pageCount() << std::endl;
@@ -157,8 +163,8 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "  -> Passed: Navigation correctly reaches clamped bottom pages without stalling." << std::endl;
 
-    // Test 3: Offscreen rendering, DPR injection (1.0, 1.5, 2.0), and tile seam verification
-    std::cout << "[TEST 3] Testing DPR injection (1.0, 1.5, 2.0) and tile seam continuity..." << std::endl;
+    // Test 3: Offscreen rendering, DPR injection (1.0, 1.5, 2.0), and device-pixel tile seam verification
+    std::cout << "[TEST 3] Testing DPR injection (1.0, 1.5, 2.0) and device-pixel tile seam continuity..." << std::endl;
     viewer.goToPage(0);
     viewer.zoomReset();
     viewer.resize(1200, 800);
@@ -168,9 +174,10 @@ int main(int argc, char* argv[]) {
         viewer.verticalScrollBar()->setValue(0);
         viewer.horizontalScrollBar()->setValue(0);
 
-        int imgW = viewer.viewport()->width();
-        int imgH = viewer.viewport()->height();
-        QImage renderTarget(imgW, imgH, QImage::Format_ARGB32_Premultiplied);
+        int devW = static_cast<int>(std::round(viewer.viewport()->width() * testDpr));
+        int devH = static_cast<int>(std::round(viewer.viewport()->height() * testDpr));
+        QImage renderTarget(devW, devH, QImage::Format_ARGB32_Premultiplied);
+        renderTarget.setDevicePixelRatio(testDpr);
         renderTarget.fill(Qt::transparent);
 
         // First pass queues visible tiles to background RenderWorker
@@ -195,30 +202,36 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // 2. Scan across horizontal tile boundary on page 0 across column seam (512 px)
+        // 2. Scan across horizontal tile boundary on page 0 across column seam (512 device px)
         const auto& p0Layout = viewer.layout().getPageLayout(0);
         int64_t tileSeamDocX = p0Layout.leftPixel + 512 - viewer.currentDocScrollX();
-        int logicalSeamX = static_cast<int>(std::round(static_cast<double>(tileSeamDocX) / testDpr));
+        int devSeamX = static_cast<int>(tileSeamDocX);
 
         int64_t scanDocY = p0Layout.topPixel + 200 - viewer.currentDocScrollY();
-        int scanY = static_cast<int>(std::round(static_cast<double>(scanDocY) / testDpr));
+        int devScanY = static_cast<int>(scanDocY);
 
-        if (logicalSeamX > 20 && logicalSeamX < imgW - 20 && scanY > 0 && scanY < imgH) {
-            // Scan across the seam: 10 pixels to the left and 10 pixels to the right
-            for (int dx = -10; dx <= 10; ++dx) {
-                QRgb seamPx = renderTarget.pixel(logicalSeamX + dx, scanY);
-                // Blue page: R=0, G=0, B=255. Must have high blue and low red/green
-                if (qBlue(seamPx) < 200 || qRed(seamPx) > 50) {
-                    std::cerr << "[FAIL] Tile seam gap or color discontinuity detected at DPR " << testDpr 
-                              << " at x=" << (logicalSeamX + dx) << ", y=" << scanY 
-                              << ": RGB(" << qRed(seamPx) << "," << qGreen(seamPx) << "," << qBlue(seamPx) << ")" << std::endl;
-                    return 1;
-                }
+        // Hard failure guard: seam coordinate must be strictly inside renderTarget bounds
+        if (devSeamX <= 20 || devSeamX >= devW - 20 || devScanY <= 0 || devScanY >= devH) {
+            std::cerr << "[FAIL] Tile seam coordinates out of bounds at DPR " << testDpr 
+                      << ": devSeamX=" << devSeamX << ", devScanY=" << devScanY 
+                      << ", devW=" << devW << ", devH=" << devH << std::endl;
+            return 1;
+        }
+
+        // Scan device pixels across the seam ±1 and ±3 device pixels
+        for (int dx = -3; dx <= 3; ++dx) {
+            QRgb seamPx = renderTarget.pixel(devSeamX + dx, devScanY);
+            // Solid blue page: R=0, G=0, B=255. Must have high blue and low red/green
+            if (qBlue(seamPx) < 200 || qRed(seamPx) > 50) {
+                std::cerr << "[FAIL] Tile seam gap or color discontinuity detected at DPR " << testDpr 
+                          << " at device x=" << (devSeamX + dx) << ", device y=" << devScanY 
+                          << ": RGB(" << qRed(seamPx) << "," << qGreen(seamPx) << "," << qBlue(seamPx) << ")" << std::endl;
+                return 1;
             }
         }
     }
     viewer.setDevicePixelRatioOverride(0.0); // Reset override
-    std::cout << "  -> Passed: DPR injection (1.0, 1.5, 2.0) and zero tile seam gap verified." << std::endl;
+    std::cout << "  -> Passed: DPR injection (1.0, 1.5, 2.0) and zero tile seam gap verified at device-pixel precision." << std::endl;
 
     // Test 4: 2D cursor zoom anchor precision
     std::cout << "[TEST 4] Testing 2D cursor zoom anchor precision (tolerance <= 1.5 px)..." << std::endl;
@@ -314,25 +327,44 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: zoomFitWidth produces strictly 0 horizontal scrollbar range across DPR 1.0 and 2.0." << std::endl;
     }
 
-    // Test 8: Compressed-scroll resize coordinate preservation
-    std::cout << "[TEST 8] Testing document scroll coordinate preservation across window resizes..." << std::endl;
+    // Test 8: Viewport resize anchor centering and coordinate preservation (tolerance <= 1.0 px)
+    std::cout << "[TEST 8] Testing viewport resize anchor preservation (tolerance <= 1.0 px)..." << std::endl;
     {
         viewer.goToPage(2);
-        int64_t beforeDocY = viewer.currentDocScrollY();
-        if (beforeDocY <= 0) {
-            std::cerr << "[FAIL] Expected positive scrollDocY on page 2" << std::endl;
-            return 1;
-        }
+        const double curDpr = viewer.effectiveDpr();
+        int64_t vpW_before = static_cast<int64_t>(std::round(viewer.viewport()->width() * curDpr));
+        int64_t vpH_before = static_cast<int64_t>(std::round(viewer.viewport()->height() * curDpr));
+
+        int64_t anchorDocX_before = viewer.currentDocScrollX() + vpW_before / 2;
+        int64_t anchorDocY_before = viewer.currentDocScrollY() + vpH_before / 2;
+
+        const auto& p2Before = viewer.layout().getPageLayout(2);
+        double anchorPtX = static_cast<double>(anchorDocX_before - p2Before.leftPixel) / (viewer.currentZoom() * curDpr);
+        double anchorPtY = static_cast<double>(anchorDocY_before - p2Before.topPixel) / (viewer.currentZoom() * curDpr);
 
         // Resize viewport from 800 to 1100
         viewer.resize(1100, 750);
-        // Anchor centering keeps scrollDocY stable
-        int64_t afterDocY = viewer.currentDocScrollY();
-        if (afterDocY <= 0) {
-            std::cerr << "[FAIL] ScrollDocY corrupted after resize: " << afterDocY << std::endl;
+
+        int64_t vpW_after = static_cast<int64_t>(std::round(viewer.viewport()->width() * curDpr));
+        int64_t vpH_after = static_cast<int64_t>(std::round(viewer.viewport()->height() * curDpr));
+
+        int64_t anchorDocX_after = viewer.currentDocScrollX() + vpW_after / 2;
+        int64_t anchorDocY_after = viewer.currentDocScrollY() + vpH_after / 2;
+
+        const auto& p2After = viewer.layout().getPageLayout(2);
+        double reconstructedPtX = static_cast<double>(anchorDocX_after - p2After.leftPixel) / (viewer.currentZoom() * curDpr);
+        double reconstructedPtY = static_cast<double>(anchorDocY_after - p2After.topPixel) / (viewer.currentZoom() * curDpr);
+
+        double driftX = std::abs(reconstructedPtX - anchorPtX) * viewer.currentZoom() * curDpr;
+        double driftY = std::abs(reconstructedPtY - anchorPtY) * viewer.currentZoom() * curDpr;
+
+        if (driftX > 1.0 || driftY > 1.0) {
+            std::cerr << "[FAIL] Resize anchor drift exceeded 1.0 device pixels! driftX=" 
+                      << driftX << " px, driftY=" << driftY << " px" << std::endl;
             return 1;
         }
-        std::cout << "  -> Passed: Exact 64-bit document coordinates preserved across viewport resizing." << std::endl;
+        std::cout << "  -> Passed: Resize anchor point preserved within 1.0 device pixel (driftX=" 
+                  << driftX << ", driftY=" << driftY << ")." << std::endl;
     }
 
     // Test 9: RenderWorker cancellation and request generations
@@ -429,7 +461,7 @@ int main(int argc, char* argv[]) {
 
         // Queue render requests by triggering paint
         QImage target(1200, 800, QImage::Format_ARGB32);
-        QPainter p(&target);
+        QPainter p(&target);\
         tempViewer->viewport()->render(&p);
         p.end();
 
@@ -463,8 +495,100 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: retryFailedTiles cleanly cleared failure tombstones." << std::endl;
     }
 
+    // Test 13: Continuous scrolling without tile starvation (Fix 1)
+    std::cout << "[TEST 13] Testing continuous scrolling without tile starvation..." << std::endl;
+    {
+        err = viewer.openDocument(QString::fromStdString(multiPath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open multiPath for continuous scroll test" << std::endl;
+            return 1;
+        }
+
+        viewer.resize(900, 600);
+        viewer.goToPage(0);
+        viewer.waitForRendering();
+
+        // Perform 50 rapid scroll steps
+        int maxV = viewer.verticalScrollBar()->maximum();
+        if (maxV <= 50) {
+            std::cerr << "[FAIL] Expected scrollbar maximum > 50 for continuous scroll test" << std::endl;
+            return 1;
+        }
+
+        int stepDelta = maxV / 50;
+        for (int i = 1; i <= 50; ++i) {
+            viewer.verticalScrollBar()->setValue(i * stepDelta);
+            // Render to queue visible tiles at this scroll position
+            QImage frame(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+            QPainter pFrame(&frame);
+            viewer.viewport()->render(&pFrame);
+            pFrame.end();
+            QCoreApplication::processEvents();
+        }
+
+        // Wait for rendering to complete
+        viewer.waitForRendering();
+
+        // Verify that tiles arrived and cache is populated for visible tiles on screen
+        if (viewer.cache().size() == 0) {
+            std::cerr << "[FAIL] Tile starvation during continuous scrolling: 0 tiles in cache!" << std::endl;
+            return 1;
+        }
+
+        // Check that visible tiles at the final scroll position are present in cache
+        const double dpr = viewer.effectiveDpr();
+        int64_t vpW = static_cast<int64_t>(std::round(viewer.viewport()->width() * dpr));
+        int64_t vpH = static_cast<int64_t>(std::round(viewer.viewport()->height() * dpr));
+        auto visTiles = viewer.layout().getVisibleTiles({viewer.currentDocScrollX(), viewer.currentDocScrollY(), vpW, vpH}, 512);
+
+        bool allPresent = true;
+        for (const auto& t : visTiles) {
+            auto k = pdf::TileKey::create(viewer.currentDocumentId(), t.pageIndex, t.col, t.row, pdf::quantizeScale(viewer.currentZoom()), dpr);
+            if (!viewer.cache().get(k).has_value()) {
+                allPresent = false;
+                break;
+            }
+        }
+        if (!allPresent) {
+            std::cerr << "[FAIL] Tiles starved during continuous scrolling!" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Continuous 50-step scroll rendered and populated tiles without starvation." << std::endl;
+    }
+
+    // Test 14: 200-page document verifies worker page cache bounded at <= 16 pages (Fix 2)
+    std::cout << "[TEST 14] Testing worker page cache LRU bound on 200-page document..." << std::endl;
+    {
+        std::string path200 = "doc_200_pages.pdf";
+        generateMultiPagePdf(path200, 200);
+
+        pdf::RenderWorker worker;
+        auto res = worker.openDocumentSync(500, path200);
+        if (res.error != pdf::DocumentError::None || res.pageCount != 200) {
+            std::cerr << "[FAIL] Failed to open 200-page document: pages=" << res.pageCount << std::endl;
+            return 1;
+        }
+
+        // Request tiles from 40 different pages across the 200-page document
+        for (int p = 0; p < 40; ++p) {
+            auto k = pdf::TileKey::create(500, p, 0, 0, 1.0, 1.0);
+            worker.enqueueRequest({500, 1, p, {0, 0, 200, 200}, 1.0, 1.0, k, 10});
+        }
+
+        worker.waitForIdle();
+
+        size_t cachedPages = worker.cachedPageCount();
+        if (cachedPages == 0 || cachedPages > 16) {
+            std::cerr << "[FAIL] Worker page cache unbounded! cachedPages=" << cachedPages 
+                      << ", expected in range [1, 16]" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: 200-page document load kept worker page cache strictly bounded at " 
+                  << cachedPages << " <= 16 pages." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 12 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 14 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

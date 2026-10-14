@@ -68,6 +68,8 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
             // Success: safely replace active document and active ID, and purge worker page cache on worker thread
             m_activeDocumentId.store(documentId);
             m_workerPageCache.clear();
+            m_workerPageLru.clear();
+            m_cachedPageCount.store(0, std::memory_order_relaxed);
             if (m_workerDocument) {
                 m_workerDocument->close();
             }
@@ -103,6 +105,8 @@ void RenderWorker::closeDocumentSync() {
 
         m_controlQueue.push_back({[this, promise]() {
             m_workerPageCache.clear();
+            m_workerPageLru.clear();
+            m_cachedPageCount.store(0, std::memory_order_relaxed);
             if (m_workerDocument) {
                 m_workerDocument->close();
                 m_workerDocument.reset();
@@ -220,7 +224,7 @@ void RenderWorker::workerLoop() {
 
             if (!m_running.load()) {
                 break;
-            }
+            }\
 
             // Prioritize control tasks (open/close) over tile rendering
             if (!m_controlQueue.empty()) {
@@ -231,7 +235,7 @@ void RenderWorker::workerLoop() {
                 req = std::move(m_queue.front());
                 m_queue.erase(m_queue.begin());
 
-                // Check if tile request is stale
+                // Check if tile request is stale (e.g. cancelled by generation or obsolete docId)
                 if (req.documentId != m_activeDocumentId.load() || req.generation < m_currentGeneration.load()) {
                     if (m_queue.empty() && m_controlQueue.empty()) {
                         m_idleCv.notify_all();
@@ -261,12 +265,22 @@ void RenderWorker::workerLoop() {
                 IPage* page = nullptr;
                 auto it = m_workerPageCache.find(req.pageIndex);
                 if (it != m_workerPageCache.end()) {
-                    page = it->second.get();
+                    // Cache hit: promote to Most Recently Used
+                    m_workerPageLru.splice(m_workerPageLru.begin(), m_workerPageLru, it->second.second);
+                    page = it->second.first.get();
                 } else {
+                    // Cache miss: load page and enforce LRU bound
                     auto newPage = m_workerDocument->getPage(req.pageIndex);
                     if (newPage) {
+                        if (m_workerPageCache.size() >= MAX_WORKER_PAGE_CACHE && !m_workerPageLru.empty()) {
+                            int lruPage = m_workerPageLru.back();
+                            m_workerPageLru.pop_back();
+                            m_workerPageCache.erase(lruPage);
+                        }
+                        m_workerPageLru.push_front(req.pageIndex);
                         page = newPage.get();
-                        m_workerPageCache.emplace(req.pageIndex, std::move(newPage));
+                        m_workerPageCache.emplace(req.pageIndex, std::make_pair(std::move(newPage), m_workerPageLru.begin()));
+                        m_cachedPageCount.store(m_workerPageCache.size(), std::memory_order_relaxed);
                     }
                 }
 
@@ -276,10 +290,9 @@ void RenderWorker::workerLoop() {
                 }
             }
 
-            if (m_running.load() &&
-                req.documentId == m_activeDocumentId.load() &&
-                req.generation >= m_currentGeneration.load())
-            {
+            // Fix 1: Deliver completed render whenever documentId matches active document.
+            // Generation is strictly for pruning queued work, not for discarding completed tiles!
+            if (m_running.load() && req.documentId == m_activeDocumentId.load()) {
                 if (renderedSuccessfully) {
                     Q_EMIT tileReady(req.documentId, req.generation, req.key, buffer);
                 } else {
@@ -299,6 +312,8 @@ void RenderWorker::workerLoop() {
 
     // Clean up worker cache and document on the worker thread before exit
     m_workerPageCache.clear();
+    m_workerPageLru.clear();
+    m_cachedPageCount.store(0, std::memory_order_relaxed);
     if (m_workerDocument) {
         m_workerDocument->close();
         m_workerDocument.reset();

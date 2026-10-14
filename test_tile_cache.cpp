@@ -11,7 +11,7 @@
 
 int main() {
     std::cout << "========================================" << std::endl;
-    std::cout << " RUNNING TILE CACHE UNIT TESTS (11 TESTS) " << std::endl;
+    std::cout << " RUNNING TILE CACHE UNIT TESTS (12 TESTS) " << std::endl;
     std::cout << "========================================" << std::endl;
 
     // Test 1: Empty cache initialization & basic properties
@@ -123,10 +123,14 @@ int main() {
         cache.put(k1, pdf::PixelBuffer::allocate(100, 100));
         cache.put(k2, pdf::PixelBuffer::allocate(100, 100));
 
-        // Pin k1 (even though k1 is older than k2)
+        // Pin k1
         cache.pin(k1);
+        if (!cache.isPinned(k1)) {
+            std::cerr << "[FAIL] k1 should be pinned" << std::endl;
+            return 1;
+        }
 
-        // Adding k3 forces eviction. Since k1 is pinned, k2 MUST be evicted!
+        // Put k3 -> k2 should be evicted because k1 is pinned
         cache.put(k3, pdf::PixelBuffer::allocate(100, 100));
 
         if (!cache.contains(k1)) {
@@ -134,14 +138,28 @@ int main() {
             return 1;
         }
         if (cache.contains(k2)) {
-            std::cerr << "[FAIL] Unpinned tile k2 should have been evicted instead of pinned k1" << std::endl;
+            std::cerr << "[FAIL] Unpinned tile k2 should have been evicted" << std::endl;
             return 1;
         }
-        std::cout << "  -> Passed: Pinned tile was successfully protected from eviction." << std::endl;
+        if (!cache.contains(k3)) {
+            std::cerr << "[FAIL] Newly added tile k3 should be in cache" << std::endl;
+            return 1;
+        }
+
+        // Unpin k1 and insert k4 -> k1 should now be eligible for eviction
+        cache.unpin(k1);
+        auto k4 = pdf::TileKey::create(1, 0, 3, 0, 1.0, 1.0);
+        cache.put(k4, pdf::PixelBuffer::allocate(100, 100));
+
+        if (cache.contains(k1)) {
+            std::cerr << "[FAIL] Unpinned tile k1 should have been evicted by k4" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Pin and unpin correctly guard tiles against eviction." << std::endl;
     }
 
     // Test 5: setPinnedKeys batch operation
-    std::cout << "[TEST 5] Testing setPinnedKeys batch replacement..." << std::endl;
+    std::cout << "[TEST 5] Testing setPinnedKeys batch update..." << std::endl;
     {
         pdf::TileCache cache(1024 * 1024);
         auto k1 = pdf::TileKey::create(1, 0, 0, 0, 1.0, 1.0);
@@ -149,42 +167,43 @@ int main() {
         auto k3 = pdf::TileKey::create(1, 0, 2, 0, 1.0, 1.0);
 
         cache.pin(k1);
-        if (!cache.isPinned(k1)) {
-            std::cerr << "[FAIL] k1 should be pinned" << std::endl;
-            return 1;
-        }
-
-        // Replace entire pinned set with {k2, k3}
         cache.setPinnedKeys({k2, k3});
 
         if (cache.isPinned(k1)) {
-            std::cerr << "[FAIL] k1 should no longer be pinned after setPinnedKeys" << std::endl;
+            std::cerr << "[FAIL] k1 should have been unpinned by setPinnedKeys" << std::endl;
             return 1;
         }
         if (!cache.isPinned(k2) || !cache.isPinned(k3)) {
-            std::cerr << "[FAIL] k2 and k3 should be pinned" << std::endl;
+            std::cerr << "[FAIL] k2 and k3 should be pinned by setPinnedKeys" << std::endl;
             return 1;
         }
-        std::cout << "  -> Passed: setPinnedKeys atomically replaced pin set." << std::endl;
+
+        cache.clearPinned();
+        if (cache.isPinned(k2) || cache.isPinned(k3)) {
+            std::cerr << "[FAIL] clearPinned failed to unpin keys" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Batch pin and clearPinned verified." << std::endl;
     }
 
-    // Test 6: Tombstones for failed tiles and weight accounting
-    std::cout << "[TEST 6] Testing markFailed, tombstones, and bounded byte weights..." << std::endl;
+    // Test 6: Failure tombstones memory accounting and clearing
+    std::cout << "[TEST 6] Testing failure tombstones and TOMBSTONE_BYTE_WEIGHT accounting..." << std::endl;
     {
         pdf::TileCache cache(1024 * 1024);
         auto k1 = pdf::TileKey::create(1, 0, 0, 0, 1.0, 1.0);
 
         cache.markFailed(k1);
+
         if (!cache.contains(k1)) {
-            std::cerr << "[FAIL] Tombstone tile should be contained in cache" << std::endl;
+            std::cerr << "[FAIL] Cache should contain failed key" << std::endl;
             return 1;
         }
         if (!cache.isFailed(k1)) {
-            std::cerr << "[FAIL] Tile should be marked failed" << std::endl;
+            std::cerr << "[FAIL] isFailed() should return true for failed key" << std::endl;
             return 1;
         }
         if (cache.get(k1).has_value()) {
-            std::cerr << "[FAIL] get() on failed tile should return nullopt" << std::endl;
+            std::cerr << "[FAIL] get() on failed key should return nullopt" << std::endl;
             return 1;
         }
         if (cache.bytesUsed() != pdf::TileCache::TOMBSTONE_BYTE_WEIGHT) {
@@ -624,8 +643,86 @@ int main() {
         std::cout << "  -> Passed: Transient failure recovery, exponential backoff, and explicit clearing verified." << std::endl;
     }
 
+    // Test 12: Deterministic failure backoff intervals strictly grow across retries
+    std::cout << "[TEST 12] Testing growing backoff intervals on deterministic failures..." << std::endl;
+    {
+        pdf::TileCache cache(1024 * 1024);
+        auto key = pdf::TileKey::create(42, 5, 0, 0, 1.0, 1.0);
+        constexpr auto baseBackoff = std::chrono::milliseconds(40);
+
+        // Failure 1: failCount = 1, delay = 40ms * 1 = 40ms
+        cache.markFailed(key);
+        if (cache.failCount(key) != 1) {
+            std::cerr << "[FAIL] Expected failCount 1, got " << cache.failCount(key) << std::endl;
+            return 1;
+        }
+        if (cache.canRetry(key, baseBackoff)) {
+            std::cerr << "[FAIL] canRetry should be false immediately" << std::endl;
+            return 1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(45));
+        if (!cache.canRetry(key, baseBackoff)) {
+            std::cerr << "[FAIL] canRetry should be true after 45ms for failCount 1" << std::endl;
+            return 1;
+        }
+
+        // Retry 1 occurs: clearFailed is called
+        cache.clearFailed(key);
+        if (cache.isFailed(key)) {
+            std::cerr << "[FAIL] clearFailed should clear failed status" << std::endl;
+            return 1;
+        }
+        // Deterministic failure occurs again: markFailed called
+        cache.markFailed(key);
+        if (cache.failCount(key) != 2) {
+            std::cerr << "[FAIL] Expected failCount 2 after retry failed again, got " << cache.failCount(key) << std::endl;
+            return 1;
+        }
+        // Failure 2 delay: baseBackoff * 2 = 80ms!
+        // At 50ms, 50ms < 80ms -> must NOT be retryable yet!
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (cache.canRetry(key, baseBackoff)) {
+            std::cerr << "[FAIL] Backoff was defeated! canRetry was true at 50ms, expected >= 80ms" << std::endl;
+            return 1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(40)); // Total 90ms > 80ms
+        if (!cache.canRetry(key, baseBackoff)) {
+            std::cerr << "[FAIL] canRetry should be true after 90ms for failCount 2" << std::endl;
+            return 1;
+        }
+
+        // Retry 2 occurs: clearFailed is called
+        cache.clearFailed(key);
+        // Fails a 3rd time
+        cache.markFailed(key);
+        if (cache.failCount(key) != 3) {
+            std::cerr << "[FAIL] Expected failCount 3, got " << cache.failCount(key) << std::endl;
+            return 1;
+        }
+        // Failure 3 delay: baseBackoff * 4 = 160ms!
+        std::this_thread::sleep_for(std::chrono::milliseconds(90)); // 90ms < 160ms
+        if (cache.canRetry(key, baseBackoff)) {
+            std::cerr << "[FAIL] Backoff was defeated! canRetry was true at 90ms, expected >= 160ms" << std::endl;
+            return 1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(80)); // Total 170ms > 160ms
+        if (!cache.canRetry(key, baseBackoff)) {
+            std::cerr << "[FAIL] canRetry should be true after 170ms for failCount 3" << std::endl;
+            return 1;
+        }
+
+        // Successful put clears failure history
+        auto validBuf = pdf::PixelBuffer::allocate(20, 20);
+        cache.put(key, validBuf);
+        if (cache.failCount(key) != 0) {
+            std::cerr << "[FAIL] Successful put must reset failCount to 0" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Backoff intervals strictly grow (40ms -> 80ms -> 160ms) and reset on successful put." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 11 TILE CACHE TESTS PASSED!        " << std::endl;
+    std::cout << " ALL 12 TILE CACHE TESTS PASSED!        " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

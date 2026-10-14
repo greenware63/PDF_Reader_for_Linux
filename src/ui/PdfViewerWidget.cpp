@@ -31,8 +31,10 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
 }
 
 PdfViewerWidget::~PdfViewerWidget() {
+    // Clean teardown: stop worker and flush memory without touching scrollbars or emitting pageChanged during destruction
     m_renderWorker.stop();
-    closeDocument();
+    m_cache.clear();
+    m_inFlightKeys.clear();
 }
 
 void PdfViewerWidget::setDevicePixelRatioOverride(double dpr) {
@@ -46,6 +48,7 @@ double PdfViewerWidget::effectiveDpr() const {
 
 void PdfViewerWidget::retryFailedTiles() {
     m_cache.clearAllFailed();
+    m_inFlightKeys.clear();
     viewport()->update();
 }
 
@@ -89,6 +92,7 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
     // Success: atomically cancel worker work, flush previous cache, and advance epochs
     m_renderWorker.cancelAll();
     m_cache.invalidateDocument(m_currentDocumentId);
+    m_inFlightKeys.clear();
     m_currentDocumentId = nextDocId;
     ++m_currentGeneration;
     m_renderWorker.setGeneration(m_currentGeneration);
@@ -101,6 +105,10 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
     m_docScrollX = 0;
     m_docScrollY = 0;
     m_scale = DESKTOP_100_PERCENT_SCALE;
+
+    const double dpr = effectiveDpr();
+    m_lastVpWidthDevice = static_cast<int64_t>(std::round(viewport()->width() * dpr));
+    m_lastVpHeightDevice = static_cast<int64_t>(std::round(viewport()->height() * dpr));
 
     updateLayoutGeometry();
     verticalScrollBar()->setValue(0);
@@ -119,6 +127,7 @@ void PdfViewerWidget::closeDocument() {
     m_renderWorker.closeDocumentSync();
 
     m_cache.invalidateDocument(m_currentDocumentId);
+    m_inFlightKeys.clear();
     ++m_currentDocumentId;
     ++m_currentGeneration;
 
@@ -128,6 +137,8 @@ void PdfViewerWidget::closeDocument() {
     m_currentPage = 0;
     m_docScrollX = 0;
     m_docScrollY = 0;
+    m_lastVpWidthDevice = 0;
+    m_lastVpHeightDevice = 0;
 
     updateScrollBars();
     viewport()->update();
@@ -154,6 +165,10 @@ void PdfViewerWidget::goToPage(int pageIndex) {
         return;
     }
 
+    const double dpr = effectiveDpr();
+    m_lastVpWidthDevice = static_cast<int64_t>(std::round(viewport()->width() * dpr));
+    m_lastVpHeightDevice = static_cast<int64_t>(std::round(viewport()->height() * dpr));
+
     m_navigating = true;
     m_currentPage = pageIndex;
     const auto& pl = m_layout.getPageLayout(pageIndex);
@@ -162,6 +177,7 @@ void PdfViewerWidget::goToPage(int pageIndex) {
     m_navigating = false;
 
     ++m_currentGeneration;
+    m_inFlightKeys.clear();
     m_renderWorker.setGeneration(m_currentGeneration);
 
     Q_EMIT pageChanged(m_currentPage + 1, pageCount());
@@ -184,6 +200,7 @@ void PdfViewerWidget::setZoom(double zoom, const QPoint* anchorWidgetPos) {
     auto anchor = m_layout.createAnchor(curDocX, curDocY);
 
     ++m_currentGeneration;
+    m_inFlightKeys.clear();
     m_renderWorker.setGeneration(m_currentGeneration);
 
     m_scale = qScale;
@@ -193,6 +210,9 @@ void PdfViewerWidget::setZoom(double zoom, const QPoint* anchorWidgetPos) {
     int64_t newDocX = 0, newDocY = 0;
     m_layout.resolveAnchor(anchor, anchorVpX, anchorVpY, vpW, vpH, newDocX, newDocY);
     setDocScrollPosition(newDocX, newDocY);
+
+    m_lastVpWidthDevice = vpW;
+    m_lastVpHeightDevice = vpH;
 
     viewport()->update();
 
@@ -257,8 +277,12 @@ void PdfViewerWidget::onScrollValueChanged() {
 
         // Advance request generation on scroll to prune off-screen queued work
         ++m_currentGeneration;
+        m_inFlightKeys.clear();
         m_renderWorker.setGeneration(m_currentGeneration);
     }
+
+    m_lastVpWidthDevice = vpW;
+    m_lastVpHeightDevice = vpH;
 
     auto visPages = m_layout.getVisiblePages(m_docScrollY, vpH);
     if (visPages.isValid()) {
@@ -282,16 +306,18 @@ void PdfViewerWidget::onScrollValueChanged() {
     viewport()->update();
 }
 
-void PdfViewerWidget::onTileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key, const pdf::PixelBuffer& buffer) {
-    if (documentId != m_currentDocumentId || generation < m_currentGeneration) {
-        return; // Discard stale tile result
+void PdfViewerWidget::onTileReady(int64_t documentId, uint64_t /*generation*/, const pdf::TileKey& key, const pdf::PixelBuffer& buffer) {
+    m_inFlightKeys.erase(key);
+    if (documentId != m_currentDocumentId) {
+        return;
     }
     m_cache.put(key, buffer);
     viewport()->update();
 }
 
-void PdfViewerWidget::onTileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key) {
-    if (documentId != m_currentDocumentId || generation < m_currentGeneration) {
+void PdfViewerWidget::onTileFailed(int64_t documentId, uint64_t /*generation*/, const pdf::TileKey& key) {
+    m_inFlightKeys.erase(key);
+    if (documentId != m_currentDocumentId) {
         return;
     }
     m_cache.markFailed(key);
@@ -334,6 +360,9 @@ void PdfViewerWidget::setDocScrollPosition(int64_t docX, int64_t docY) {
     m_docScrollX = std::clamp<int64_t>(docX, 0, maxX);
     m_docScrollY = std::clamp<int64_t>(docY, 0, maxY);
 
+    m_lastVpWidthDevice = vpW;
+    m_lastVpHeightDevice = vpH;
+
     QSignalBlocker blockV(verticalScrollBar());
     QSignalBlocker blockH(horizontalScrollBar());
 
@@ -373,8 +402,11 @@ void PdfViewerWidget::updateLayoutGeometry() {
     const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
     const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
 
-    int64_t curDocX = m_docScrollX + vpW / 2;
-    int64_t curDocY = m_docScrollY + vpH / 2;
+    const int64_t oldVpW = (m_lastVpWidthDevice > 0) ? m_lastVpWidthDevice : vpW;
+    const int64_t oldVpH = (m_lastVpHeightDevice > 0) ? m_lastVpHeightDevice : vpH;
+
+    int64_t curDocX = m_docScrollX + oldVpW / 2;
+    int64_t curDocY = m_docScrollY + oldVpH / 2;
     auto anchor = m_layout.createAnchor(curDocX, curDocY);
 
     m_layout.updateLayout(qScale, dpr, vpW);
@@ -383,6 +415,9 @@ void PdfViewerWidget::updateLayoutGeometry() {
     int64_t newDocX = 0, newDocY = 0;
     m_layout.resolveAnchor(anchor, vpW / 2, vpH / 2, vpW, vpH, newDocX, newDocY);
     setDocScrollPosition(newDocX, newDocY);
+
+    m_lastVpWidthDevice = vpW;
+    m_lastVpHeightDevice = vpH;
 
     viewport()->update();
 }
@@ -476,14 +511,36 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
 
         auto cachedBuf = m_cache.get(key);
         if (cachedBuf.has_value()) {
+            m_inFlightKeys.erase(key);
             QImage img = toQImage(*cachedBuf);
             painter.drawImage(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), img);
         } else if (m_cache.isFailed(key)) {
             if (m_cache.canRetry(key)) {
-                // Backoff interval elapsed: allow retry
-                m_cache.clearFailed(key);
-                drawPendingPlaceholder(painter, tileRect);
+                if (m_inFlightKeys.find(key) != m_inFlightKeys.end()) {
+                    // Already in flight to worker for retry; avoid re-enqueueing duplicate
+                    drawPendingPlaceholder(painter, tileRect);
+                } else {
+                    // Backoff interval elapsed: allow retry
+                    m_cache.clearFailed(key);
+                    drawPendingPlaceholder(painter, tileRect);
 
+                    int64_t tileMidX = tileVpX + t.tileWidth / 2;
+                    int64_t tileMidY = tileVpY + t.tileHeight / 2;
+                    int64_t distSq = (tileMidX - vpCenterX) * (tileMidX - vpCenterX) + (tileMidY - vpCenterY) * (tileMidY - vpCenterY);
+                    int priority = static_cast<int>(std::max<int64_t>(0, 10000000 - distSq));
+
+                    pdf::PixelRect pRect{t.tileXOnPage, t.tileYOnPage, t.tileWidth, t.tileHeight};
+                    pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority});
+                    m_inFlightKeys.insert(key);
+                }
+            } else {
+                drawErrorPlaceholder(painter, tileRect);
+            }
+        } else {
+            // Pending render miss: draw placeholder on UI thread and queue request to worker if not already in flight
+            drawPendingPlaceholder(painter, tileRect);
+
+            if (m_inFlightKeys.find(key) == m_inFlightKeys.end()) {
                 int64_t tileMidX = tileVpX + t.tileWidth / 2;
                 int64_t tileMidY = tileVpY + t.tileHeight / 2;
                 int64_t distSq = (tileMidX - vpCenterX) * (tileMidX - vpCenterX) + (tileMidY - vpCenterY) * (tileMidY - vpCenterY);
@@ -491,20 +548,8 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
 
                 pdf::PixelRect pRect{t.tileXOnPage, t.tileYOnPage, t.tileWidth, t.tileHeight};
                 pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority});
-            } else {
-                drawErrorPlaceholder(painter, tileRect);
+                m_inFlightKeys.insert(key);
             }
-        } else {
-            // Pending render miss: draw placeholder on UI thread and queue request to worker
-            drawPendingPlaceholder(painter, tileRect);
-
-            int64_t tileMidX = tileVpX + t.tileWidth / 2;
-            int64_t tileMidY = tileVpY + t.tileHeight / 2;
-            int64_t distSq = (tileMidX - vpCenterX) * (tileMidX - vpCenterX) + (tileMidY - vpCenterY) * (tileMidY - vpCenterY);
-            int priority = static_cast<int>(std::max<int64_t>(0, 10000000 - distSq));
-
-            pdf::PixelRect pRect{t.tileXOnPage, t.tileYOnPage, t.tileWidth, t.tileHeight};
-            pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority});
         }
     }
 
