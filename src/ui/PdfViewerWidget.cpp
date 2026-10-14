@@ -260,9 +260,20 @@ void PdfViewerWidget::goToPage(int pageIndex) {
 
     const auto& pl = m_layout.getPageLayout(pageIndex);
 
+    const int64_t oldScrollX = m_docScrollX;
+    const int64_t oldScrollY = m_docScrollY;
+
     m_navigating = true;
     setDocScrollPosition(m_docScrollX, pl.topPixel);
     m_navigating = false;
+
+    if (m_docScrollX != oldScrollX || m_docScrollY != oldScrollY) {
+        // setDocScrollPosition() blocks the scrollbar signals, so prune queued tiles of the old position
+        // here (as onScrollValueChanged() does); otherwise a long jump renders stale tiles first.
+        ++m_currentGeneration;
+        m_inFlightKeys.clear();
+        m_renderWorker.setGeneration(m_currentGeneration);
+    }
 
     if (m_currentPage != pageIndex) {
         m_currentPage = pageIndex;
@@ -277,7 +288,7 @@ void PdfViewerWidget::setZoom(double zoom, const QPoint* anchorWidgetPos) {
         return;
     }
 
-    // Strict zoom bounds: 10% to 1000%
+    // Zoom bounds in scale units (1.0 = 72 dpi, so 100% on screen is 96/72): 0.1 .. 10.0
     zoom = std::clamp(zoom, 0.1, 10.0);
     if (std::abs(zoom - m_scale) < 1e-4) {
         return;
@@ -333,11 +344,11 @@ void PdfViewerWidget::setZoom(double zoom, const QPoint* anchorWidgetPos) {
 }
 
 void PdfViewerWidget::zoomIn() {
-    setZoom(m_scale * 1.25);
+    setZoom(m_scale * ZOOM_STEP);
 }
 
 void PdfViewerWidget::zoomOut() {
-    setZoom(m_scale / 1.25);
+    setZoom(m_scale / ZOOM_STEP);
 }
 
 void PdfViewerWidget::zoomReset() {
@@ -441,8 +452,38 @@ void PdfViewerWidget::onPageTextReady(int64_t documentId, int pageIndex, std::sh
     if (documentId != m_currentDocumentId) {
         return;
     }
-    m_pageTextCache[pageIndex] = std::move(text);
+    m_pageTextCache[pageIndex] = text ? std::move(text) : std::make_shared<pdf::PageText>();
+    trimPageTextCache();
     viewport()->update();
+}
+
+void PdfViewerWidget::trimPageTextCache() {
+    if (m_pageTextCache.size() <= MAX_CACHED_TEXT_PAGES) {
+        return;
+    }
+    // Pages that must stay: the selection range (its text is needed for copy) ...
+    int keepFirst = 1 << 30, keepLast = -1;
+    if (m_selectionStart.isValid() && m_selectionEnd.isValid()) {
+        keepFirst = std::min(m_selectionStart.pageIndex, m_selectionEnd.pageIndex);
+        keepLast = std::max(m_selectionStart.pageIndex, m_selectionEnd.pageIndex);
+    }
+    // ... and, of the rest, the pages nearest to the one being viewed. Requests still in flight are kept.
+    std::vector<int> evictable;
+    evictable.reserve(m_pageTextCache.size());
+    for (const auto& [page, text] : m_pageTextCache) {
+        if (text && (page < keepFirst || page > keepLast)) {
+            evictable.push_back(page);
+        }
+    }
+    std::sort(evictable.begin(), evictable.end(), [this](int a, int b) {
+        return std::abs(a - m_currentPage) > std::abs(b - m_currentPage); // farthest first
+    });
+    for (int page : evictable) {
+        if (m_pageTextCache.size() <= MAX_CACHED_TEXT_PAGES) {
+            break;
+        }
+        m_pageTextCache.erase(page);
+    }
 }
 
 void PdfViewerWidget::ensurePageTextRequested(int pageIndex) {
@@ -467,11 +508,11 @@ void PdfViewerWidget::wheelEvent(QWheelEvent* event) {
 
         QPoint pos = event->position().toPoint();
         while (m_wheelDeltaAccumulator >= DELTA_THRESHOLD) {
-            setZoom(m_scale * 1.2, &pos);
+            setZoom(m_scale * ZOOM_STEP, &pos);
             m_wheelDeltaAccumulator -= DELTA_THRESHOLD;
         }
         while (m_wheelDeltaAccumulator <= -DELTA_THRESHOLD) {
-            setZoom(m_scale / 1.2, &pos);
+            setZoom(m_scale / ZOOM_STEP, &pos);
             m_wheelDeltaAccumulator += DELTA_THRESHOLD;
         }
         event->accept();

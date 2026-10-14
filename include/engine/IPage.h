@@ -6,7 +6,8 @@
 namespace pdf {
 
 /**
- * @brief Pure C++ abstract interface representing a single PDF page.\n * Completely decoupled from Qt or any UI framework.
+ * @brief Pure C++ abstract interface representing a single PDF page.
+ * Completely decoupled from Qt or any UI framework.
  */
 class IPage {
 public:

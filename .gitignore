@@ -24,3 +24,9 @@ multi_page_fixture.pdf
 subpixel_test.pdf
 multi_page_widget.pdf
 doc_200_pages.pdf
+doc_60_pages.pdf
+doc_120_pages.pdf
+text_plain.pdf
+text_crop.pdf
+text_rot90.pdf
+text_rot270_crop.pdf

@@ -271,10 +271,10 @@ void RenderWorker::requestPageText(int64_t documentId, int pageIndex) {
             return;
         }
         IPage* page = getOrLoadWorkerPage(pageIndex);
-        if (page) {
-            auto pageText = std::make_shared<PageText>(page->extractText());
-            Q_EMIT pageTextReady(documentId, pageIndex, pageText);
-        }
+        // Always answer, even for a page that fails to load (empty text), so the UI never waits forever
+        auto pageText = page ? std::make_shared<PageText>(page->extractText()) : std::make_shared<PageText>();
+        pageText->pageIndex = pageIndex;
+        Q_EMIT pageTextReady(documentId, pageIndex, pageText);
     }});
     m_cv.notify_one();
 }

@@ -1,4 +1,4 @@
-﻿#include "layout/DocumentLayout.h"
+#include "layout/DocumentLayout.h"
 
 namespace layout {
 

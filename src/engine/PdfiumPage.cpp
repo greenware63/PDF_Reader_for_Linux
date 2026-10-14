@@ -209,18 +209,35 @@ PageText PdfiumPage::extractText() {
         result.text.assign(reinterpret_cast<const char16_t*>(buffer.data()), extracted - 1);
     }
 
+    // FPDFText_GetCharBox() reports boxes in PDF user space (bottom-left origin, unrotated, and offset by
+    // the page's crop box origin). The page is rendered through FPDF_RenderPageBitmap, which applies the
+    // crop box and /Rotate, so convert with the same transform: FPDF_PageToDevice() at 1 device pixel per
+    // point yields top-down coordinates that match the rendered page for any crop box and rotation.
+    // FPDF_PageToDevice returns integers, so use a device rect of 16 pixels per point (1/16 pt resolution)
+    // and scale the results back to points.
+    constexpr double DEVICE_PIXELS_PER_POINT = 16.0;
+    const int devW = std::max(1, static_cast<int>(std::lround(m_width * DEVICE_PIXELS_PER_POINT)));
+    const int devH = std::max(1, static_cast<int>(std::lround(m_height * DEVICE_PIXELS_PER_POINT)));
+    const double sx = m_width / devW;
+    const double sy = m_height / devH;
+    auto userRectToTopDown = [&](double l, double r, double b, double t, PageCharBox& out) -> bool {
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        FPDF_PageToDevice(m_page, 0, 0, devW, devH, 0, l, b, &x0, &y0);
+        FPDF_PageToDevice(m_page, 0, 0, devW, devH, 0, r, t, &x1, &y1);
+        out.left = std::min(x0, x1) * sx;
+        out.right = std::max(x0, x1) * sx;
+        out.top = std::min(y0, y1) * sy;
+        out.bottom = std::max(y0, y1) * sy;
+        return true;
+    };
+
     for (int i = 0; i < count; ++i) {
         unsigned int u = FPDFText_GetUnicode(textPage, i);
         PageCharBox box;
         box.unicode = u;
         double left = 0.0, right = 0.0, bottom = 0.0, top = 0.0;
         if (FPDFText_GetCharBox(textPage, i, &left, &right, &bottom, &top)) {
-            box.left = std::min(left, right);
-            box.right = std::max(left, right);
-            // In PDF user space, top > bottom with origin at bottom-left.
-            // Convert to top-down page coordinates:
-            box.top = m_height - std::max(top, bottom);
-            box.bottom = m_height - std::min(top, bottom);
+            userRectToTopDown(left, right, bottom, top, box);
         }
 
         // If this character is a high surrogate and the following character is a low surrogate,
@@ -230,17 +247,50 @@ PageText PdfiumPage::extractText() {
             if (nextU >= 0xDC00 && nextU <= 0xDFFF) {
                 box.unicode = 0x10000 + ((u - 0xD800) << 10) + (nextU - 0xDC00);
                 double l2 = 0.0, r2 = 0.0, b2 = 0.0, t2 = 0.0;
-                if (FPDFText_GetCharBox(textPage, i + 1, &l2, &r2, &b2, &t2)) {
-                    box.left = std::min({box.left, l2, r2});
-                    box.right = std::max({box.right, l2, r2});
-                    box.top = std::min({box.top, m_height - std::max(t2, b2)});
-                    box.bottom = std::max({box.bottom, m_height - std::min(t2, b2)});
+                PageCharBox low;
+                if (FPDFText_GetCharBox(textPage, i + 1, &l2, &r2, &b2, &t2) && userRectToTopDown(l2, r2, b2, t2, low)) {
+                    box.left = std::min(box.left, low.left);
+                    box.right = std::max(box.right, low.right);
+                    box.top = std::min(box.top, low.top);
+                    box.bottom = std::max(box.bottom, low.bottom);
                 }
                 ++i; // consume low surrogate
             }
         }
 
         result.chars.push_back(box);
+    }
+
+    // Spaces (and similar glyphs) come back from PDFium with a zero-thickness box: zero height on
+    // horizontal text, zero width on text rotated by 90/270 degrees. Give them the extent of the nearest
+    // neighbouring glyph across the line so word gaps can be hit-tested and highlighted like any other
+    // character.
+    for (size_t i = 0; i < result.chars.size(); ++i) {
+        auto& c = result.chars[i];
+        if (c.isValid()) {
+            continue;
+        }
+        const bool flatVertically = c.right > c.left && !(c.bottom > c.top);
+        const bool flatHorizontally = c.bottom > c.top && !(c.right > c.left);
+        if (!flatVertically && !flatHorizontally) {
+            continue; // no geometry at all (e.g. generated line break): leave as is
+        }
+        const PageCharBox* donor = nullptr;
+        if (i > 0 && result.chars[i - 1].isValid()) {
+            donor = &result.chars[i - 1];
+        } else if (i + 1 < result.chars.size() && result.chars[i + 1].isValid()) {
+            donor = &result.chars[i + 1];
+        }
+        if (!donor) {
+            continue;
+        }
+        if (flatVertically) {
+            c.top = donor->top;
+            c.bottom = donor->bottom;
+        } else {
+            c.left = donor->left;
+            c.right = donor->right;
+        }
     }
 
     if (result.text.empty() && !result.chars.empty()) {

@@ -214,6 +214,37 @@ static void generateTextPdfFixture(const std::string& path, const std::string& t
 }
 
 
+// One page with "HELLO WORLD" (black, 24pt Helvetica) and optional extra page-dictionary entries
+// (e.g. a /CropBox or /Rotate), used to check text geometry against the rendered pixels.
+static void generateTextPdf(const std::string& path, const std::string& extraPageEntries) {
+    const std::string content = "0 g BT /F1 24 Tf 100 600 Td (HELLO WORLD) Tj ET";
+    std::vector<std::string> objs = {
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " + extraPageEntries +
+            " /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        "<< /Length " + std::to_string(content.size()) + " >>\nstream\n" + content + "\nendstream",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    };
+    std::string pdf = "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+    for (size_t i = 0; i < objs.size(); ++i) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(i + 1) + " 0 obj\n" + objs[i] + "\nendobj\n";
+    }
+    const size_t xref = pdf.size();
+    pdf += "xref\n0 " + std::to_string(objs.size() + 1) + "\n0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size " + std::to_string(objs.size() + 1) + " /Root 1 0 R >>\nstartxref\n" +
+           std::to_string(xref) + "\n%%EOF\n";
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), static_cast<std::streamsize>(pdf.size()));
+}
+
 int main(int argc, char* argv[]) {
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1541,8 +1572,161 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Actual PDF with supplementary Unicode loaded in widget, selected with mouse, and copied to clipboard." << std::endl;
     }
 
+
+    std::cout << "[TEST 28] Testing text boxes line up with the rendered page (crop box, /Rotate)..." << std::endl;
+    {
+        struct Case { const char* name; const char* file; const char* extra; };
+        const Case cases[] = {
+            {"plain page", "text_plain.pdf", ""},
+            {"crop box offset (50,100)", "text_crop.pdf", "/CropBox [50 100 562 692]"},
+            {"/Rotate 90", "text_rot90.pdf", "/Rotate 90"},
+            {"/Rotate 270 + crop box", "text_rot270_crop.pdf", "/Rotate 270 /CropBox [20 60 580 740]"},
+        };
+        for (const auto& c : cases) {
+            generateTextPdf(c.file, c.extra);
+            auto doc = pdf::createDocument();
+            if (doc->loadFromFile(c.file) != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Cannot open " << c.file << std::endl;
+                return 1;
+            }
+            auto page = doc->getPage(0);
+            const pdf::PageText text = page->extractText();
+
+            double L = 1e9, T = 1e9, R = -1e9, B = -1e9;
+            int validChars = 0;
+            for (const auto& ch : text.chars) {
+                if (!ch.isValid()) continue;
+                ++validChars;
+                L = std::min(L, ch.left); T = std::min(T, ch.top);
+                R = std::max(R, ch.right); B = std::max(B, ch.bottom);
+            }
+            // Every glyph of "HELLO WORLD", including the space, must be hit-testable
+            if (validChars != 11) {
+                std::cerr << "[FAIL] " << c.name << ": expected 11 usable character boxes, got " << validChars << std::endl;
+                return 1;
+            }
+
+            pdf::PixelBuffer px = page->renderWholePage(1.0, 1.0);
+            int minX = 1 << 30, minY = 1 << 30, maxX = -1, maxY = -1;
+            for (int y = 0; y < px.height(); ++y) {
+                const uint8_t* row = px.data() + static_cast<size_t>(y) * px.stride();
+                for (int x = 0; x < px.width(); ++x) {
+                    if (row[x * 4] < 100 && row[x * 4 + 1] < 100 && row[x * 4 + 2] < 100) {
+                        minX = std::min(minX, x); maxX = std::max(maxX, x);
+                        minY = std::min(minY, y); maxY = std::max(maxY, y);
+                    }
+                }
+            }
+            if (maxX < 0) {
+                std::cerr << "[FAIL] " << c.name << ": no text pixels in the rendered page" << std::endl;
+                return 1;
+            }
+            // Glyph boxes include side bearings/ascent, so allow a couple of points of slack
+            const double tol = 3.0;
+            if (std::abs(L - minX) > tol || std::abs(T - minY) > tol || std::abs(R - (maxX + 1)) > tol || std::abs(B - (maxY + 1)) > tol) {
+                std::cerr << "[FAIL] " << c.name << ": text boxes (" << L << "," << T << "," << R << "," << B
+                          << ") do not match rendered text (" << minX << "," << minY << "," << maxX + 1 << "," << maxY + 1 << ")" << std::endl;
+                return 1;
+            }
+        }
+        std::cout << "  -> Passed: text boxes match the rendering on plain, cropped and rotated pages." << std::endl;
+    }
+
+    std::cout << "[TEST 29] Testing goToPage discards stale queued tiles..." << std::endl;
+    {
+        const std::string path60 = "doc_60_pages.pdf";
+        generateMultiPagePdf(path60, 60);
+        if (viewer.openDocument(QString::fromStdString(path60)) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open 60 page document" << std::endl;
+            return 1;
+        }
+        viewer.resize(900, 600);
+        viewer.setZoom(1.0);
+        viewer.goToPage(0);
+        viewer.waitForRendering();
+
+        viewer.renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(100));
+        {
+            QImage frame(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+            QPainter p(&frame);
+            viewer.viewport()->render(&p);
+            p.end();
+        }
+        // Work for the first page is queued/rendering; now jump far away without repainting in between
+        const uint64_t genBefore = viewer.currentGeneration();
+        viewer.goToPage(40);
+        const size_t stale = viewer.renderWorker().pendingCount();
+        viewer.renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(0));
+        viewer.waitForRendering();
+        if (viewer.currentGeneration() == genBefore || stale != 0) {
+            std::cerr << "[FAIL] goToPage must prune queued tiles of the old position (generation advanced="
+                      << (viewer.currentGeneration() != genBefore) << ", stale queued=" << stale << ")" << std::endl;
+            return 1;
+        }
+        const uint64_t genAtTarget = viewer.currentGeneration();
+        viewer.goToPage(40); // already there: nothing moved, nothing to prune
+        if (viewer.currentGeneration() != genAtTarget) {
+            std::cerr << "[FAIL] goToPage to the current position must not advance the generation" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: stale tiles pruned on a page jump; no needless pruning when already there." << std::endl;
+    }
+
+    std::cout << "[TEST 30] Testing the extracted-text cache is bounded..." << std::endl;
+    {
+        const std::string path120 = "doc_120_pages.pdf";
+        generateMultiPagePdf(path120, 120);
+        if (viewer.openDocument(QString::fromStdString(path120)) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open 120 page document" << std::endl;
+            return 1;
+        }
+        viewer.resize(900, 600);
+        viewer.setZoom(1.0);
+        for (int i = 0; i < 120; ++i) {
+            viewer.goToPage(i);
+            QImage frame(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+            QPainter p(&frame);
+            viewer.viewport()->render(&p);
+            p.end();
+            viewer.waitForRendering();
+        }
+        const size_t cached = viewer.cachedTextPageCount();
+        if (cached > ui::PdfViewerWidget::MAX_CACHED_TEXT_PAGES) {
+            std::cerr << "[FAIL] Text cache grew to " << cached << " pages (limit "
+                      << ui::PdfViewerWidget::MAX_CACHED_TEXT_PAGES << ")" << std::endl;
+            return 1;
+        }
+        if (!viewer.getPageText(119)) {
+            std::cerr << "[FAIL] Text of the page being viewed was evicted" << std::endl;
+            return 1;
+        }
+        if (viewer.getPageText(0)) {
+            std::cerr << "[FAIL] Text of a page 119 pages away should have been evicted" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: " << cached << " pages of text kept after viewing 120 pages." << std::endl;
+    }
+
+    std::cout << "[TEST 31] Testing a text request for an unloadable page is still answered..." << std::endl;
+    {
+        std::atomic<int> answers{0};
+        std::atomic<bool> emptyAnswer{false};
+        QMetaObject::Connection c = QObject::connect(
+            &viewer.renderWorker(), &pdf::RenderWorker::pageTextReady, &viewer,
+            [&](int64_t, int, std::shared_ptr<pdf::PageText> t) { ++answers; emptyAnswer = (!t || t->empty()); },
+            Qt::DirectConnection);
+        viewer.renderWorker().requestPageText(viewer.currentDocumentId(), 99999);
+        viewer.renderWorker().waitForIdle();
+        QObject::disconnect(c);
+        if (answers.load() != 1 || !emptyAnswer.load()) {
+            std::cerr << "[FAIL] Worker did not answer a text request for a missing page (answers=" << answers.load() << ")" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: missing page answered with empty text." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 27 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 31 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

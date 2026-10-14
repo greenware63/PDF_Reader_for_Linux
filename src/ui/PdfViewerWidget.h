@@ -27,6 +27,8 @@ class PdfViewerWidget : public QAbstractScrollArea {
 
 public:
     static constexpr double DESKTOP_100_PERCENT_SCALE = 96.0 / 72.0; // 1.3333333333333333
+    static constexpr double ZOOM_STEP = 1.25;                         // one zoom button click or wheel notch
+    static constexpr size_t MAX_CACHED_TEXT_PAGES = 48;               // extracted-text pages kept in memory
 
     explicit PdfViewerWidget(QWidget* parent = nullptr);
     ~PdfViewerWidget() override;
@@ -97,6 +99,9 @@ public:
 
     /// Tiles drawn from a previous zoom level (scaled) because the current-zoom tile was not ready yet.
     size_t fallbackTilesDrawn() const noexcept { return m_fallbackTilesDrawn; }
+    /// Number of pages whose extracted text is currently held in memory (bounded by MAX_CACHED_TEXT_PAGES
+    /// plus any pages protected by the current selection).
+    size_t cachedTextPageCount() const noexcept { return m_pageTextCache.size(); }
     /// Prefetch (off-screen) tile requests handed to the worker so far.
     size_t prefetchRequestsIssued() const noexcept { return m_prefetchRequestsIssued; }
     /// Enables/disables the off-screen prefetch ring (enabled by default).
@@ -158,6 +163,7 @@ private:
     bool drawFallbackTile(QPainter& painter, const layout::VisibleTile& tile, const QRectF& tileRect, double qScale, double qDpr);
     void rememberFallbackScale(double previousScale);
     void ensurePageTextRequested(int pageIndex);
+    void trimPageTextCache();
     void drawSelection(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale);
 
     QString openErrorMessage(pdf::DocumentError error, const QString& filePath) const;
