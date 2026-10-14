@@ -151,15 +151,33 @@ struct PageText {
     }
 
     /**
-     * @brief Returns the substring corresponding to the character range [startChar, endChar].
+     * @brief Returns the UTF-16 substring corresponding to the character range [startChar, endChar].
+     * Encodes 32-bit Unicode code points directly to UTF-16, generating surrogate pairs for
+     * supplementary characters (> 0xFFFF) without character index misalignment.
      */
     std::u16string getSelectedText(int startChar, int endChar) const {
-        if (text.empty() || chars.empty()) {
+        if (chars.empty()) {
             return {};
         }
-        int first = std::clamp(std::min(startChar, endChar), 0, static_cast<int>(text.size()) - 1);
-        int last = std::clamp(std::max(startChar, endChar), 0, static_cast<int>(text.size()) - 1);
-        return text.substr(first, last - first + 1);
+        int first = std::clamp(std::min(startChar, endChar), 0, static_cast<int>(chars.size()) - 1);
+        int last = std::clamp(std::max(startChar, endChar), 0, static_cast<int>(chars.size()) - 1);
+
+        std::u16string result;
+        result.reserve((last - first + 1) * 2);
+        for (int i = first; i <= last; ++i) {
+            char32_t cp = chars[i].unicode;
+            if (cp == 0) {
+                continue;
+            }
+            if (cp <= 0xFFFF) {
+                result.push_back(static_cast<char16_t>(cp));
+            } else if (cp <= 0x10FFFF) {
+                cp -= 0x10000;
+                result.push_back(static_cast<char16_t>(0xD800 + ((cp >> 10) & 0x3FF)));
+                result.push_back(static_cast<char16_t>(0xDC00 + (cp & 0x3FF)));
+            }
+        }
+        return result;
     }
 };
 

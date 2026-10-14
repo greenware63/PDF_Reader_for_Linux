@@ -835,8 +835,82 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: 16 characters extracted, valid top-down boxes, hit-test and selection accurate." << std::endl;
     }
 
+    // Test 15: Supplementary Unicode surrogate pair extraction and selection indexing
+    std::cout << "[TEST 15] Testing Supplementary Unicode code points (>0xFFFF) and surrogate pairs..." << std::endl;
+    {
+        pdf::PageText suppPt;
+        suppPt.pageIndex = 0;
+        suppPt.widthPoints = 200.0;
+        suppPt.heightPoints = 100.0;
+
+        // Character 0: 'A' (U+0041)
+        pdf::PageCharBox b0{10.0, 10.0, 20.0, 30.0, U'A'};
+        // Character 1: ً‌„‍ Musical Symbol G Clef (U+1D11E)
+        pdf::PageCharBox b1{25.0, 10.0, 45.0, 30.0, 0x1D11E};
+        // Character 2: 'B' (U+0042)
+        pdf::PageCharBox b2{50.0, 10.0, 60.0, 30.0, U'B'};
+        // Character 3: ًںڑ€ Rocket (U+1F680)
+        pdf::PageCharBox b3{65.0, 10.0, 85.0, 30.0, 0x1F680};
+        // Character 4: 'C' (U+0043)
+        pdf::PageCharBox b4{90.0, 10.0, 100.0, 30.0, U'C'};
+
+        suppPt.chars = {b0, b1, b2, b3, b4};
+
+        // 1. Single character selections
+        // Char 0: 'A'
+        std::u16string sel0 = suppPt.getSelectedText(0, 0);
+        if (sel0 != u"A") {
+            std::cerr << "[FAIL] Expected 'A' at index 0" << std::endl;
+            return 1;
+        }
+
+        // Char 1: U+1D11E -> UTF-16 surrogate pair D834 DD1E
+        std::u16string sel1 = suppPt.getSelectedText(1, 1);
+        if (sel1.size() != 2 || sel1[0] != 0xD834 || sel1[1] != 0xDD1E) {
+            std::cerr << "[FAIL] Expected surrogate pair for U+1D11E at index 1" << std::endl;
+            return 1;
+        }
+
+        // Char 2: 'B' -> MUST NOT BE MISALIGNED by the preceding surrogate pair!
+        std::u16string sel2 = suppPt.getSelectedText(2, 2);
+        if (sel2 != u"B") {
+            std::cerr << "[FAIL] Expected 'B' at index 2 (misaligned by surrogate pair?)" << std::endl;
+            return 1;
+        }
+
+        // Char 3: U+1F680 -> UTF-16 surrogate pair D83D DE80
+        std::u16string sel3 = suppPt.getSelectedText(3, 3);
+        if (sel3.size() != 2 || sel3[0] != 0xD83D || sel3[1] != 0xDE80) {
+            std::cerr << "[FAIL] Expected surrogate pair for U+1F680 at index 3" << std::endl;
+            return 1;
+        }
+
+        // Char 4: 'C' -> MUST NOT BE MISALIGNED!
+        std::u16string sel4 = suppPt.getSelectedText(4, 4);
+        if (sel4 != u"C") {
+            std::cerr << "[FAIL] Expected 'C' at index 4" << std::endl;
+            return 1;
+        }
+
+        // 2. Multi-character sub-range spanning surrogate pairs: [0..2] -> "A" + ً‌„‍ + "B"
+        std::u16string selSpan = suppPt.getSelectedText(0, 2);
+        if (selSpan.size() != 4 || selSpan[0] != u'A' || selSpan[1] != 0xD834 || selSpan[2] != 0xDD1E || selSpan[3] != u'B') {
+            std::cerr << "[FAIL] Span [0..2] mismatch across surrogate pair" << std::endl;
+            return 1;
+        }
+
+        // Full range [0..4]
+        std::u16string fullSpan = suppPt.getSelectedText(0, 4);
+        if (fullSpan.size() != 7) {
+            std::cerr << "[FAIL] Full span length expected 7 UTF-16 code units, got " << fullSpan.size() << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Supplementary Unicode code points (>0xFFFF) produce exact surrogate pairs without index drift." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 14 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 15 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

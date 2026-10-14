@@ -1,4 +1,4 @@
-﻿#include "PdfViewerWidget.h"
+#include "PdfViewerWidget.h"
 #include "ImageUtils.h"
 #include <QPainter>
 #include <QFont>
@@ -797,12 +797,58 @@ void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
         const int64_t docY = m_docScrollY + static_cast<int64_t>(std::round(event->position().y() * dpr));
 
         int page = m_layout.getPageAt(docX, docY);
-        if (page >= 0) {
+        if (page < 0 && m_pageCount > 0) {
+            // Find closest page vertically to gracefully handle inter-page gaps and outer margins
+            for (int p = 0; p < m_pageCount; ++p) {
+                const auto& pl = m_layout.getPageLayout(p);
+                if (docY >= pl.topPixel && docY <= pl.bottomPixel()) {
+                    page = p;
+                    break;
+                }
+            }
+            if (page < 0) {
+                if (docY < m_layout.getPageLayout(0).topPixel) {
+                    page = 0;
+                } else if (docY > m_layout.getPageLayout(m_pageCount - 1).bottomPixel()) {
+                    page = m_pageCount - 1;
+                } else {
+                    for (int p = 0; p + 1 < m_pageCount; ++p) {
+                        if (docY > m_layout.getPageLayout(p).bottomPixel() &&
+                            docY < m_layout.getPageLayout(p + 1).topPixel) {
+                            page = (p >= m_selectionStart.pageIndex) ? (p + 1) : p;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (page >= 0 && page < m_pageCount) {
             double px = 0.0, py = 0.0;
             if (m_layout.documentToPagePoints(page, docX, docY, px, py)) {
                 auto it = m_pageTextCache.find(page);
-                if (it != m_pageTextCache.end() && it->second) {
+                if (it != m_pageTextCache.end() && it->second && !it->second->empty()) {
                     int ch = it->second->hitTest(px, py);
+                    if (ch < 0) {
+                        if (py < it->second->chars.front().top) {
+                            ch = 0;
+                        } else if (py > it->second->chars.back().bottom) {
+                            ch = static_cast<int>(it->second->charCount()) - 1;
+                        } else {
+                            double minDist = 1e9;
+                            int nearest = 0;
+                            for (size_t i = 0; i < it->second->charCount(); ++i) {
+                                const auto& b = it->second->chars[i];
+                                double cy = (b.top + b.bottom) * 0.5;
+                                double d = std::abs(cy - py);
+                                if (d < minDist) {
+                                    minDist = d;
+                                    nearest = static_cast<int>(i);
+                                }
+                            }
+                            ch = nearest;
+                        }
+                    }
                     if (ch >= 0) {
                         TextPosition newEnd{page, ch};
                         if (newEnd != m_selectionEnd) {

@@ -61,6 +61,52 @@ static void generateMultiPagePdf(const std::string& path, int count = 5) {
     out.write(pdf.data(), pdf.size());
 }
 
+static void generateTwoPageTextFixture(const std::string& path, const std::string& text1, const std::string& text2) {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>\nendobj\n";
+
+    // Page 0
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R >>\nendobj\n";
+
+    // Page 1
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>\nendobj\n";
+
+    // Font
+    offsets.push_back(pdf.size());
+    pdf += "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+
+    // Contents Page 0
+    std::string content0 = "BT\n/F1 24 Tf\n100 700 Td\n(" + text1 + ") Tj\nET\n";
+    offsets.push_back(pdf.size());
+    pdf += "6 0 obj\n<< /Length " + std::to_string(content0.size()) + " >>\nstream\n" + content0 + "\nendstream\nendobj\n";
+
+    // Contents Page 1
+    std::string content1 = "BT\n/F1 24 Tf\n100 700 Td\n(" + text2 + ") Tj\nET\n";
+    offsets.push_back(pdf.size());
+    pdf += "7 0 obj\n<< /Length " + std::to_string(content1.size()) + " >>\nstream\n" + content1 + "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 8\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
 static void generateTextPdfFixture(const std::string& path, const std::string& text = "Hello PDF World!") {
     std::string pdf;
     pdf += "%PDF-1.4\n";
@@ -1239,8 +1285,161 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: copySelection and Ctrl+C shortcut copy selected text to system clipboard." << std::endl;
     }
 
+    std::cout << "[TEST 26] Testing cross-page mouse drag selection and multi-page text extraction..." << std::endl;
+    {
+        std::string twoPagePath = "widget_two_page_text.pdf";
+        generateTwoPageTextFixture(twoPagePath, "Page Zero Header", "Page One Content");
+
+        err = viewer.openDocument(QString::fromStdString(twoPagePath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open two-page text fixture" << std::endl;
+            return 1;
+        }
+
+        viewer.resize(1000, 700);
+        viewer.goToPage(0);
+        viewer.setZoom(1.0);
+
+        // Render page 0 then page 1 to trigger ensurePageTextRequested for both pages
+        auto renderCurrent = [&]() {
+            QImage f(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+            QPainter p(&f);
+            viewer.viewport()->render(&p);
+            p.end();
+            viewer.waitForRendering();
+        };
+
+        renderCurrent();
+        viewer.goToPage(1);
+        renderCurrent();
+        viewer.goToPage(0);
+        renderCurrent();
+
+        auto pt0 = viewer.getPageText(0);
+        auto pt1 = viewer.getPageText(1);
+        if (!pt0 || !pt1) {
+            std::cerr << "[FAIL] PageText for both pages was not loaded (pt0=" << !(!pt0) << ", pt1=" << !(!pt1) << ")" << std::endl;
+            return 1;
+        }
+
+        const auto& pl0 = viewer.layout().getPageLayout(0);
+        const auto& pl1 = viewer.layout().getPageLayout(1);
+        const double dpr = viewer.effectiveDpr();
+        const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+        // Start drag at character 5 of page 0 ("Zero Header")
+        const auto& b0_5 = pt0->chars[5];
+        double vp0X = static_cast<double>(pl0.leftPixel + static_cast<int64_t>(std::round(((b0_5.left + b0_5.right) * 0.5) * effScale)) - viewer.currentDocScrollX()) / dpr;
+        double vp0Y = static_cast<double>(pl0.topPixel + static_cast<int64_t>(std::round(((b0_5.top + b0_5.bottom) * 0.5) * effScale)) - viewer.currentDocScrollY()) / dpr;
+
+        // End drag at character 7 of page 1 ("Page One")
+        const auto& b1_7 = pt1->chars[7];
+        double vp1X = static_cast<double>(pl1.leftPixel + static_cast<int64_t>(std::round(((b1_7.left + b1_7.right) * 0.5) * effScale)) - viewer.currentDocScrollX()) / dpr;
+        double vp1Y = static_cast<double>(pl1.topPixel + static_cast<int64_t>(std::round(((b1_7.top + b1_7.bottom) * 0.5) * effScale)) - viewer.currentDocScrollY()) / dpr;
+
+        // 1. Forward drag selection from page 0 to page 1
+        QMouseEvent press0(QEvent::MouseButtonPress, QPointF(vp0X, vp0Y), QPointF(vp0X, vp0Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press0);
+
+        QMouseEvent move1(QEvent::MouseMove, QPointF(vp1X, vp1Y), QPointF(vp1X, vp1Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move1);
+
+        QMouseEvent release1(QEvent::MouseButtonRelease, QPointF(vp1X, vp1Y), QPointF(vp1X, vp1Y), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release1);
+
+        if (!viewer.hasSelection()) {
+            std::cerr << "[FAIL] Cross-page selection not established" << std::endl;
+            return 1;
+        }
+
+        QString selForward = viewer.selectedText();
+        if (!selForward.contains("Zero Header") || !selForward.contains("Page One") || !selForward.contains("\n")) {
+            std::cerr << "[FAIL] Cross-page selected text unexpected: '" << selForward.toStdString() << "'" << std::endl;
+            return 1;
+        }
+
+        // Copy cross-page selection
+        QGuiApplication::clipboard()->clear();
+        viewer.copySelection();
+        if (QGuiApplication::clipboard()->text() != selForward) {
+            std::cerr << "[FAIL] Cross-page text not copied to clipboard correctly" << std::endl;
+            return 1;
+        }
+
+        // 2. Backward drag selection from page 1 to page 0
+        viewer.clearSelection();
+        QMouseEvent press1(QEvent::MouseButtonPress, QPointF(vp1X, vp1Y), QPointF(vp1X, vp1Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press1);
+
+        QMouseEvent move0(QEvent::MouseMove, QPointF(vp0X, vp0Y), QPointF(vp0X, vp0Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move0);
+
+        QMouseEvent release0(QEvent::MouseButtonRelease, QPointF(vp0X, vp0Y), QPointF(vp0X, vp0Y), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release0);
+
+        if (!viewer.hasSelection()) {
+            std::cerr << "[FAIL] Backward cross-page selection not established" << std::endl;
+            return 1;
+        }
+
+        QString selBackward = viewer.selectedText();
+        if (selBackward != selForward) {
+            std::cerr << "[FAIL] Backward cross-page selection differs from forward" << std::endl;
+            return 1;
+        }
+
+        viewer.clearSelection();
+        std::cout << "  -> Passed: Forward and backward cross-page selection and newline joining verified." << std::endl;
+    }
+
+    std::cout << "[TEST 27] Testing RenderWorker text extraction and PageText Unicode surrogate preservation..." << std::endl;
+    {
+        pdf::RenderWorker testWorker;
+        auto openRes = testWorker.openDocumentSync(999, textPath);
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document on testWorker" << std::endl;
+            return 1;
+        }
+
+        std::shared_ptr<pdf::PageText> deliveredText;
+        QObject::connect(&testWorker, &pdf::RenderWorker::pageTextReady, &viewer,
+                         [&](int64_t docId, int pageIdx, std::shared_ptr<pdf::PageText> text) {
+                             if (docId == 999 && pageIdx == 0) {
+                                 deliveredText = text;
+                             }
+                         }, Qt::DirectConnection);
+
+        testWorker.requestPageText(999, 0);
+        testWorker.waitForIdle();
+
+        if (!deliveredText || deliveredText->charCount() != 16) {
+            std::cerr << "[FAIL] RenderWorker failed to deliver PageText synchronously" << std::endl;
+            return 1;
+        }
+
+        // Verify PageText supplementary handling with surrogate pair directly in Qt QString conversion
+        pdf::PageText suppTest;
+        suppTest.chars = {
+            pdf::PageCharBox{0.0, 0.0, 10.0, 10.0, U'X'},
+            pdf::PageCharBox{10.0, 0.0, 20.0, 10.0, 0x1F600},
+            pdf::PageCharBox{20.0, 0.0, 30.0, 10.0, U'Y'}
+        };
+
+        QString qstr = QString::fromStdU16String(suppTest.getSelectedText(0, 2));
+        if (qstr != QString::fromUtf8("X\xF0\x9F\x98\x80Y")) {
+            std::cerr << "[FAIL] QString conversion of supplementary character failed: " << qstr.toStdString() << std::endl;
+            return 1;
+        }
+        if (QString::fromStdU16String(suppTest.getSelectedText(2, 2)) != QStringLiteral("Y")) {
+            std::cerr << "[FAIL] Character after supplementary was misaligned in QString" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: RenderWorker async delivery and Unicode surrogate preservation confirmed." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 25 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 27 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

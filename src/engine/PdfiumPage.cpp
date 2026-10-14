@@ -1,4 +1,4 @@
-﻿#include "PdfiumPage.h"
+#include "PdfiumPage.h"
 #include "PdfiumMutex.h"
 #include "layout/DocumentLayout.h"
 #include <fpdf_text.h>
@@ -197,10 +197,10 @@ PageText PdfiumPage::extractText() {
 
     result.chars.reserve(count);
 
-    std::vector<unsigned short> buffer(count + 1, 0);
+    std::vector<unsigned short> buffer(count * 2 + 1, 0);
     int extracted = FPDFText_GetText(textPage, 0, count, buffer.data());
     if (extracted > 1) {
-        result.text.assign(reinterpret_cast<const char16_t*>(buffer.data()), std::min(count, extracted - 1));
+        result.text.assign(reinterpret_cast<const char16_t*>(buffer.data()), extracted - 1);
     }
 
     for (int i = 0; i < count; ++i) {
@@ -219,9 +219,19 @@ PageText PdfiumPage::extractText() {
     }
 
     if (result.text.empty()) {
-        result.text.reserve(count);
+        result.text.reserve(count * 2);
         for (int i = 0; i < count; ++i) {
-            result.text.push_back(static_cast<char16_t>(result.chars[i].unicode));
+            char32_t cp = result.chars[i].unicode;
+            if (cp == 0) {
+                continue;
+            }
+            if (cp <= 0xFFFF) {
+                result.text.push_back(static_cast<char16_t>(cp));
+            } else if (cp <= 0x10FFFF) {
+                cp -= 0x10000;
+                result.text.push_back(static_cast<char16_t>(0xD800 + ((cp >> 10) & 0x3FF)));
+                result.text.push_back(static_cast<char16_t>(0xDC00 + (cp & 0x3FF)));
+            }
         }
     }
 
