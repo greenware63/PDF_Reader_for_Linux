@@ -9,11 +9,25 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic -Wconversion)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_compile_options(-fstack-protector-strong)
-        # _FORTIFY_SOURCE=3 requires glibc with optimization enabled (-O1, -O2, etc.)
-        add_compile_options(
-            $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-U_FORTIFY_SOURCE>
-            $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-D_FORTIFY_SOURCE=3>
-        )
+
+        # Verify glibc >= 2.33 before enabling _FORTIFY_SOURCE=3
+        include(CheckCXXSourceCompiles)
+        check_cxx_source_compiles("
+            #include <features.h>
+            #if !defined(__GLIBC__) || (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 33))
+            #error \"glibc >= 2.33 required for _FORTIFY_SOURCE=3\"
+            #endif
+            int main() { return 0; }
+        " GLIBC_SUPPORTS_FORTIFY_3)
+
+        if(GLIBC_SUPPORTS_FORTIFY_3)
+            # _FORTIFY_SOURCE requires compiler optimization enabled (-O1, -O2, -O3, -Os)
+            # Only enable in optimized Release-like configurations
+            add_compile_options(
+                $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-U_FORTIFY_SOURCE>
+                $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-D_FORTIFY_SOURCE=3>
+            )
+        endif()
     endif()
     if(UNIX AND NOT APPLE)
         add_compile_definitions(_GLIBCXX_ASSERTIONS)

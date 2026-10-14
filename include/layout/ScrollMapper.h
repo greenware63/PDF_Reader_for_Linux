@@ -16,7 +16,7 @@ public:
     static constexpr int32_t DEFAULT_MAX_SLIDER = 1000000000; // 10^9
 
     explicit constexpr ScrollMapper(int32_t maxSliderRange = DEFAULT_MAX_SLIDER) noexcept
-        : m_maxSliderRange(maxSliderRange > 0 ? maxSliderRange : DEFAULT_MAX_SLIDER) {}\
+        : m_maxSliderRange(maxSliderRange > 0 ? maxSliderRange : DEFAULT_MAX_SLIDER) {}
 
     /**
      * @brief Computes scrollbar slider parameters for given 64-bit document span and viewport size.
@@ -53,16 +53,19 @@ public:
 
     /**
      * @brief Maps 32-bit scrollbar slider value to 64-bit document offset.
+     * Clamps input slider to [0, m_maxSliderRange] before computing fraction, preventing floating-point
+     * overflow beyond INT64_MAX on enormous document ranges.
      */
     int64_t sliderToDoc(int32_t sliderVal, int64_t totalDocPixels, int64_t viewportPixels) const noexcept {
         const int64_t maxDocScroll = std::max<int64_t>(0, totalDocPixels - viewportPixels);
         if (maxDocScroll == 0 || sliderVal <= 0) {
             return 0;
         }
+        const int32_t clampedSlider = std::min(sliderVal, m_maxSliderRange);
         if (maxDocScroll <= m_maxSliderRange) {
-            return std::min<int64_t>(static_cast<int64_t>(sliderVal), maxDocScroll);
+            return std::min<int64_t>(static_cast<int64_t>(clampedSlider), maxDocScroll);
         }
-        double fraction = static_cast<double>(sliderVal) / static_cast<double>(m_maxSliderRange);
+        double fraction = static_cast<double>(clampedSlider) / static_cast<double>(m_maxSliderRange);
         int64_t doc = static_cast<int64_t>(std::round(fraction * static_cast<double>(maxDocScroll)));
         return std::clamp<int64_t>(doc, 0, maxDocScroll);
     }

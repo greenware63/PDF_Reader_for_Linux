@@ -422,6 +422,25 @@ int main() {
             return 1;
         }
 
+        // Case D: Out-of-range slider value regression test
+        // Negative slider must clamp to 0
+        if (mapper.sliderToDoc(-500, hugeDoc, hugeVp) != 0) {
+            std::cerr << "[FAIL] Negative slider did not clamp to 0" << std::endl;
+            return 1;
+        }
+        // Slider exceeding m_maxSliderRange (e.g. INT32_MAX = 2147483647) on massive trillion-pixel document span
+        // Must clamp slider to m_maxSliderRange prior to fraction multiplication, avoiding float overflow past INT64_MAX
+        int64_t clampedDocOutOfRange = mapper.sliderToDoc(std::numeric_limits<int32_t>::max(), terraDoc, 1000);
+        if (clampedDocOutOfRange != terraScroll) {
+            std::cerr << "[FAIL] Out-of-range positive slider value did not clamp safely to maxDocScroll! Got: " 
+                      << clampedDocOutOfRange << ", expected: " << terraScroll << std::endl;
+            return 1;
+        }
+        if (mapper.sliderToDoc(999999, 50000, 1000) != 49000) {
+            std::cerr << "[FAIL] Out-of-range slider on 1:1 range did not clamp to maxDocScroll" << std::endl;
+            return 1;
+        }
+
         // Property-based test over 1,000 randomized configurations
         std::mt19937 propRng(777);
         for (int iter = 0; iter < 1000; ++iter) {
