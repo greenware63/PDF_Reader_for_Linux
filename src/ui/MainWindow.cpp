@@ -24,6 +24,7 @@ void MainWindow::setupUi() {
     connect(m_viewer, &PdfViewerWidget::pageChanged, this, &MainWindow::onPageChanged);
     connect(m_viewer, &PdfViewerWidget::zoomChanged, this, &MainWindow::onZoomChanged);
     connect(m_viewer, &PdfViewerWidget::loadError, this, &MainWindow::onLoadError);
+    connect(m_viewer, &PdfViewerWidget::loadingChanged, this, &MainWindow::onLoadingChanged);
 
     statusBar()->showMessage(tr("Ready - Open a PDF to begin"));
 }
@@ -75,8 +76,22 @@ void MainWindow::setupActions() {
 }
 
 bool MainWindow::openFile(const QString& filePath) {
-    pdf::DocumentError err = m_viewer->openDocument(filePath);
-    return err == pdf::DocumentError::None;
+    if (filePath.isEmpty()) {
+        return false;
+    }
+    // Non-blocking: the window stays responsive while the file loads; results arrive via
+    // documentLoaded() / loadError().
+    m_viewer->openDocumentAsync(filePath);
+    return true;
+}
+
+void MainWindow::onLoadingChanged(bool loading, const QString& fileName) {
+    if (loading) {
+        statusBar()->showMessage(tr("Opening '%1'\u2026").arg(fileName));
+        setCursor(Qt::BusyCursor);
+    } else {
+        unsetCursor();
+    }
 }
 
 void MainWindow::openFileDialog() {

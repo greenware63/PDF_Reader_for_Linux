@@ -8,6 +8,7 @@ RenderWorker::RenderWorker(QObject* parent)
 {
     qRegisterMetaType<pdf::TileKey>("pdf::TileKey");
     qRegisterMetaType<pdf::PixelBuffer>("pdf::PixelBuffer");
+    qRegisterMetaType<pdf::OpenResult>("pdf::OpenResult");
 
     m_thread = std::thread(&RenderWorker::workerLoop, this);
 }
@@ -28,6 +29,7 @@ void RenderWorker::stop() {
         m_cv.notify_all();
         m_idleCv.notify_all();
     }
+
     if (m_thread.joinable()) {
         m_thread.join();
     }
@@ -90,6 +92,58 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
     return future.get();
 }
 
+void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& filePath, const std::string& password) {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_running.load()) {
+            OpenResult failed;
+            failed.error = DocumentError::Unknown;
+            Q_EMIT documentOpened(documentId, failed);
+            return;
+        }
+
+        m_controlQueue.push_back({[this, documentId, filePath, password]() {
+            if (const int delayMs = m_testOpenDelayMs.load(std::memory_order_relaxed); delayMs > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+            }
+
+            OpenResult result;
+            auto newDoc = createDocument();
+            const auto err = newDoc->loadFromFile(filePath, password);
+            if (err != DocumentError::None) {
+                // Failure: active document, page cache and queued requests stay exactly as they were
+                result.error = err;
+                Q_EMIT documentOpened(documentId, result);
+                return;
+            }
+
+            // Success: switch the active document. Requests queued for the old document are obsolete.
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_queue.clear();
+                m_activeDocumentId.store(documentId);
+            }
+            m_workerPageCache.clear();
+            m_workerPageLru.clear();
+            m_cachedPageCount.store(0, std::memory_order_relaxed);
+            if (m_workerDocument) {
+                m_workerDocument->close();
+            }
+            m_workerDocument = std::move(newDoc);
+
+            result.error = DocumentError::None;
+            result.pageCount = m_workerDocument->pageCount();
+            result.pageSizes.reserve(static_cast<size_t>(result.pageCount));
+            for (int i = 0; i < result.pageCount; ++i) {
+                result.pageSizes.push_back(m_workerDocument->pageSizePoints(i));
+            }
+            Q_EMIT documentOpened(documentId, result);
+        }});
+
+        m_cv.notify_one();
+    }
+}
+
 void RenderWorker::closeDocumentSync() {
     auto promise = std::make_shared<std::promise<void>>();
     auto future = promise->get_future();
@@ -129,7 +183,7 @@ void RenderWorker::setGeneration(uint64_t generation) {
         }),
         m_queue.end()
     );
-    if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering) {
+    if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering && !m_isControlRunning) {
         m_idleCv.notify_all();
     }
 }
@@ -139,6 +193,8 @@ void RenderWorker::enqueueRequest(TileRenderRequest request) {
     if (!m_running.load()) {
         return;
     }
+
+    // Drop immediately if request is for an older document or older generation
     if (request.documentId != m_activeDocumentId.load() || request.generation < m_currentGeneration.load()) {
         return;
     }
@@ -197,7 +253,7 @@ void RenderWorker::enqueueRequests(std::vector<TileRenderRequest> requests) {
 void RenderWorker::cancelAll() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_queue.clear();
-    if (m_controlQueue.empty() && !m_isRendering) {
+    if (m_controlQueue.empty() && !m_isRendering && !m_isControlRunning) {
         m_idleCv.notify_all();
     }
 }
@@ -205,7 +261,7 @@ void RenderWorker::cancelAll() {
 void RenderWorker::waitForIdle() {
     std::unique_lock<std::mutex> lock(m_mutex);
     m_idleCv.wait(lock, [&]() {
-        return m_queue.empty() && m_controlQueue.empty() && !m_isRendering;
+        return m_queue.empty() && m_controlQueue.empty() && !m_isRendering && !m_isControlRunning;
     });
 }
 
@@ -235,6 +291,7 @@ void RenderWorker::workerLoop() {
             if (!m_controlQueue.empty()) {
                 ctrlTask = std::move(m_controlQueue.front());
                 m_controlQueue.erase(m_controlQueue.begin());
+                m_isControlRunning = true;
                 hasControlTask = true;
             } else if (!m_queue.empty()) {
                 req = std::move(m_queue.front());
@@ -257,6 +314,7 @@ void RenderWorker::workerLoop() {
         if (hasControlTask) {
             ctrlTask.execute();
             std::lock_guard<std::mutex> lock(m_mutex);
+            m_isControlRunning = false;
             if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering) {
                 m_idleCv.notify_all();
             }

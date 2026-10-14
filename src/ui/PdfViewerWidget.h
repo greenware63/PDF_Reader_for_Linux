@@ -28,7 +28,25 @@ public:
     explicit PdfViewerWidget(QWidget* parent = nullptr);
     ~PdfViewerWidget() override;
 
+    /**
+     * @brief Opens a document synchronously (blocks the caller until the worker has loaded it).
+     * Cancels any pending openDocumentAsync(). Prefer openDocumentAsync() for interactive use.
+     */
     pdf::DocumentError openDocument(const QString& filePath);
+
+    /**
+     * @brief Opens a document without blocking the UI thread.
+     * The currently open document stays visible and interactive while the file loads; on success the
+     * viewer switches to the new document and emits documentLoaded(), on failure it emits loadError()
+     * and keeps the current document. Calls made while an open is in progress are coalesced:
+     * only the most recent pending path is opened after the current one finishes.
+     * loadingChanged() is emitted when loading starts and when the last queued open finishes.
+     */
+    void openDocumentAsync(const QString& filePath);
+
+    /// @return true while an asynchronous open is in progress or queued.
+    bool isLoading() const noexcept { return m_loading; }
+
     void closeDocument();
 
     bool isDocumentOpen() const noexcept { return m_hasDocument; }
@@ -77,6 +95,7 @@ public:
 Q_SIGNALS:
     void documentLoaded(const QString& title, int pages);
     void loadError(const QString& errorMessage);
+    void loadingChanged(bool loading, const QString& fileName);
     void pageChanged(int currentPage, int totalPages);
     void zoomChanged(double zoomRatio);
 
@@ -89,6 +108,7 @@ private Q_SLOTS:
     void onScrollValueChanged();
     void onTileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key, const pdf::PixelBuffer& buffer);
     void onTileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key);
+    void onDocumentOpened(int64_t documentId, pdf::OpenResult result);
 
 private:
     void updateLayoutGeometry();
@@ -98,11 +118,24 @@ private:
 
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
     void drawPendingPlaceholder(QPainter& painter, const QRectF& rect);
+    void drawLoadingOverlay(QPainter& painter);
+
+    QString openErrorMessage(pdf::DocumentError error, const QString& filePath) const;
+    void applyOpenedDocument(int64_t newDocumentId, const QString& filePath, const pdf::OpenResult& result);
+    void startAsyncOpen(const QString& filePath);
+    void cancelPendingOpen();
 
     layout::DocumentLayout m_layout;
     layout::ScrollMapper m_scrollMapper;
     pdf::TileCache m_cache;
     pdf::RenderWorker m_renderWorker;
+
+    // Asynchronous open state (UI thread only)
+    bool m_loading{false};
+    int64_t m_pendingOpenId{0};
+    QString m_pendingOpenPath;
+    bool m_hasQueuedOpen{false};
+    QString m_queuedOpenPath;
 
     bool m_hasDocument{false};
     int m_pageCount{0};

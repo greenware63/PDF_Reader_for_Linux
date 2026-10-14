@@ -61,6 +61,16 @@ public:
     OpenResult openDocumentSync(int64_t documentId, const std::string& filePath, const std::string& password = "");
 
     /**
+     * @brief Opens a PDF file on the worker thread WITHOUT blocking the caller.
+     * The result (including page count and all page sizes) is delivered via the documentOpened() signal,
+     * which fires exactly once per call. On failure the previously active document and its queued
+     * tile requests are left completely untouched. On success the active document id switches to
+     * `documentId` and queued requests for the old document are discarded.
+     * Connect with Qt::QueuedConnection from the UI thread.
+     */
+    void openDocumentAsync(int64_t documentId, const std::string& filePath, const std::string& password = "");
+
+    /**
      * @brief Closes the active document and clears all open page handles serially on the worker thread.
      */
     void closeDocumentSync();
@@ -109,6 +119,14 @@ public:
     }
 
     /**
+     * @brief Test hook: artificially delays every openDocumentAsync() by this many milliseconds
+     * before the file is loaded, to make non-blocking behaviour observable. 0 disables.
+     */
+    void setOpenDelayForTesting(std::chrono::milliseconds delay) noexcept {
+        m_testOpenDelayMs.store(static_cast<int>(delay.count()), std::memory_order_relaxed);
+    }
+
+    /**
      * @return Number of open IPage handles currently cached on the worker thread.
      */
     size_t cachedPageCount() const noexcept {
@@ -118,6 +136,8 @@ public:
 Q_SIGNALS:
     void tileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key, const pdf::PixelBuffer& buffer);
     void tileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key);
+    /// Emitted exactly once per openDocumentAsync() call, from the worker thread.
+    void documentOpened(int64_t documentId, pdf::OpenResult result);
 
 private:
     void workerLoop();
@@ -131,11 +151,15 @@ private:
     std::atomic<uint64_t> m_currentGeneration{0};
     std::atomic<size_t> m_cachedPageCount{0};
     std::atomic<int> m_testRenderDelayMs{0};
+    std::atomic<int> m_testOpenDelayMs{0};
 
     std::mutex m_mutex;
     std::condition_variable m_cv;
     std::condition_variable m_idleCv;
     bool m_isRendering{false};
+    // True while a control task (open/close) executes on the worker; included in the idle condition
+    // so waitForIdle() also waits for asynchronous document opens. Guarded by m_mutex.
+    bool m_isControlRunning{false};
     // Key of the tile currently being rendered (valid while m_isRendering); guarded by m_mutex.
     // enqueueRequest(s) deduplicates against it so a scroll that re-requests the in-flight tile is a no-op.
     TileKey m_inFlightKey;
@@ -156,5 +180,6 @@ private:
 
 } // namespace pdf
 
+Q_DECLARE_METATYPE(pdf::OpenResult)
 Q_DECLARE_METATYPE(pdf::TileKey)
 Q_DECLARE_METATYPE(pdf::PixelBuffer)

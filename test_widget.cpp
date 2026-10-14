@@ -4,6 +4,7 @@
 #include <QPainter>
 #include <QScrollBar>
 #include <QThread>
+#include <QElapsedTimer>
 #include <QCoreApplication>
 #include <atomic>
 #include <chrono>
@@ -646,8 +647,226 @@ int main(int argc, char* argv[]) {
                   << cachedPages << " <= 64 pages." << std::endl;
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Asynchronous open (Tests 16-20)
+    // ---------------------------------------------------------------------------------------------
+    // Helper: pump the event loop until the viewer is no longer loading (or timeout). Returns iterations run.
+    auto pumpUntilIdle = [&](int timeoutMs) {
+        QElapsedTimer t;
+        t.start();
+        int iterations = 0;
+        while (viewer.isLoading() && t.elapsed() < timeoutMs) {
+            QThread::msleep(10);
+            QCoreApplication::processEvents();
+            ++iterations;
+        }
+        QCoreApplication::processEvents();
+        return iterations;
+    };
+    // Helper: render the viewport once, drain the worker, and report whether the first tile of the open document is cached
+    auto firstTileRenders = [&]() {
+        const int64_t docId = viewer.currentDocumentId();
+        viewer.cache().invalidateDocument(docId);
+        QImage img(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32_Premultiplied);
+        QPainter p(&img);
+        viewer.viewport()->render(&p);
+        p.end();
+        viewer.waitForRendering();
+        auto key0 = pdf::TileKey::create(docId, 0, 0, 0, pdf::quantizeScale(viewer.currentZoom()), viewer.effectiveDpr());
+        auto buf = viewer.cache().get(key0);
+        return buf.has_value() && buf->isValid();
+    };
+
+    std::cout << "[TEST 16] Testing openDocumentAsync does not block the UI thread..." << std::endl;
+    int sampleCount = 0;
+    {
+        err = viewer.openDocument(QString::fromStdString(samplePath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Could not open sample for async test" << std::endl;
+            return 1;
+        }
+        sampleCount = viewer.pageCount();
+
+        int loadedCount = 0;
+        int loadingTrue = 0, loadingFalse = 0;
+        QMetaObject::Connection c1 = QObject::connect(&viewer, &ui::PdfViewerWidget::documentLoaded, &viewer,
+                                                      [&](const QString&, int) { ++loadedCount; });
+        QMetaObject::Connection c2 = QObject::connect(&viewer, &ui::PdfViewerWidget::loadingChanged, &viewer,
+                                                      [&](bool l, const QString&) { (l ? loadingTrue : loadingFalse)++; });
+
+        viewer.renderWorker().setOpenDelayForTesting(std::chrono::milliseconds(300));
+        const int64_t idBefore = viewer.currentDocumentId();
+
+        QElapsedTimer callTimer;
+        callTimer.start();
+        viewer.openDocumentAsync(QString::fromStdString(multiPath));
+        const qint64 callMs = callTimer.elapsed();
+
+        if (callMs > 100) {
+            std::cerr << "[FAIL] openDocumentAsync blocked the caller for " << callMs << " ms" << std::endl;
+            return 1;
+        }
+        if (!viewer.isLoading()) {
+            std::cerr << "[FAIL] isLoading() must be true right after openDocumentAsync" << std::endl;
+            return 1;
+        }
+        if (viewer.pageCount() != sampleCount || viewer.currentDocumentId() != idBefore) {
+            std::cerr << "[FAIL] The previous document must stay open while the new one loads" << std::endl;
+            return 1;
+        }
+
+        // The event loop must keep spinning while the worker loads (a blocked UI would give ~1 iteration)
+        const int iterations = pumpUntilIdle(5000);
+        viewer.renderWorker().setOpenDelayForTesting(std::chrono::milliseconds(0));
+        if (iterations < 5) {
+            std::cerr << "[FAIL] UI thread was not responsive during load (iterations=" << iterations << ")" << std::endl;
+            return 1;
+        }
+        if (viewer.isLoading() || viewer.pageCount() != 5 || loadedCount != 1 || viewer.currentDocumentId() == idBefore) {
+            std::cerr << "[FAIL] Async open did not complete correctly: loading=" << viewer.isLoading()
+                      << " pages=" << viewer.pageCount() << " loaded=" << loadedCount << std::endl;
+            return 1;
+        }
+        if (loadingTrue != 1 || loadingFalse != 1) {
+            std::cerr << "[FAIL] loadingChanged expected once true + once false, got " << loadingTrue << "/" << loadingFalse << std::endl;
+            return 1;
+        }
+        if (!firstTileRenders()) {
+            std::cerr << "[FAIL] New document does not render after async open" << std::endl;
+            return 1;
+        }
+        QObject::disconnect(c1);
+        QObject::disconnect(c2);
+        std::cout << "  -> Passed: call returned in " << callMs << " ms, UI pumped " << iterations
+                  << " iterations during the load, new document renders." << std::endl;
+    }
+
+    std::cout << "[TEST 17] Testing failed async open keeps the current document and rendering..." << std::endl;
+    {
+        int errorCount = 0, loadedCount = 0;
+        QMetaObject::Connection c1 = QObject::connect(&viewer, &ui::PdfViewerWidget::loadError, &viewer,
+                                                      [&](const QString&) { ++errorCount; });
+        QMetaObject::Connection c2 = QObject::connect(&viewer, &ui::PdfViewerWidget::documentLoaded, &viewer,
+                                                      [&](const QString&, int) { ++loadedCount; });
+        const int64_t idBefore = viewer.currentDocumentId();
+
+        viewer.openDocumentAsync("missing_async_file.pdf");
+        pumpUntilIdle(5000);
+
+        if (errorCount != 1 || loadedCount != 0 || viewer.isLoading()) {
+            std::cerr << "[FAIL] Failed async open: errors=" << errorCount << " loaded=" << loadedCount << std::endl;
+            return 1;
+        }
+        if (viewer.pageCount() != 5 || viewer.currentDocumentId() != idBefore) {
+            std::cerr << "[FAIL] Failed async open destroyed the active document" << std::endl;
+            return 1;
+        }
+        if (!firstTileRenders()) {
+            std::cerr << "[FAIL] Active document stopped rendering after a failed async open" << std::endl;
+            return 1;
+        }
+        QObject::disconnect(c1);
+        QObject::disconnect(c2);
+        std::cout << "  -> Passed: error reported, document intact, rendering still works." << std::endl;
+    }
+
+    std::cout << "[TEST 18] Testing back-to-back async opens end in a consistent state..." << std::endl;
+    {
+        int loadedCount = 0;
+        QMetaObject::Connection c1 = QObject::connect(&viewer, &ui::PdfViewerWidget::documentLoaded, &viewer,
+                                                      [&](const QString&, int) { ++loadedCount; });
+        viewer.renderWorker().setOpenDelayForTesting(std::chrono::milliseconds(80));
+        viewer.openDocumentAsync(QString::fromStdString(samplePath));      // 1-page sample (in progress)
+        viewer.openDocumentAsync("coalesced_away.pdf");                  // superseded before it ever starts
+        viewer.openDocumentAsync(QString::fromStdString(multiPath));       // latest request wins: 5 pages
+        pumpUntilIdle(8000);
+        viewer.renderWorker().setOpenDelayForTesting(std::chrono::milliseconds(0));
+
+        if (viewer.isLoading() || viewer.pageCount() != 5) {
+            std::cerr << "[FAIL] Latest request must win: loading=" << viewer.isLoading()
+                      << " pages=" << viewer.pageCount() << std::endl;
+            return 1;
+        }
+        if (loadedCount != 2) {
+            std::cerr << "[FAIL] Expected 2 completed opens (first + latest), got " << loadedCount << std::endl;
+            return 1;
+        }
+        if (!firstTileRenders()) {
+            std::cerr << "[FAIL] UI and worker disagree about the active document after back-to-back opens" << std::endl;
+            return 1;
+        }
+        QObject::disconnect(c1);
+        std::cout << "  -> Passed: superseded request dropped, latest document active and rendering." << std::endl;
+    }
+
+    std::cout << "[TEST 19] Testing closeDocument while an async open is in progress..." << std::endl;
+    {
+        int loadedCount = 0;
+        QMetaObject::Connection c1 = QObject::connect(&viewer, &ui::PdfViewerWidget::documentLoaded, &viewer,
+                                                      [&](const QString&, int) { ++loadedCount; });
+        viewer.renderWorker().setOpenDelayForTesting(std::chrono::milliseconds(150));
+        viewer.openDocumentAsync(QString::fromStdString(samplePath));
+        viewer.closeDocument(); // blocks until the worker finished the open and then closed the document
+        viewer.renderWorker().setOpenDelayForTesting(std::chrono::milliseconds(0));
+        QThread::msleep(50);
+        QCoreApplication::processEvents();
+
+        if (viewer.isLoading() || viewer.isDocumentOpen() || viewer.pageCount() != 0 || loadedCount != 0) {
+            std::cerr << "[FAIL] A load cancelled by closeDocument() must not resurrect the document: loading="
+                      << viewer.isLoading() << " open=" << viewer.isDocumentOpen() << " loaded=" << loadedCount << std::endl;
+            return 1;
+        }
+        QObject::disconnect(c1);
+        std::cout << "  -> Passed: cancelled load ignored, viewer stays closed." << std::endl;
+    }
+
+    std::cout << "[TEST 20] Testing RenderWorker::openDocumentAsync contract (success, failure, waitForIdle)..." << std::endl;
+    {
+        std::atomic<int> opened{0};
+        std::atomic<int> lastPages{0};
+        std::atomic<int> lastError{-1};
+        std::atomic<int> tilesDelivered{0};
+        pdf::RenderWorker worker;
+        QObject::connect(&worker, &pdf::RenderWorker::documentOpened, &viewer,
+                         [&](int64_t, pdf::OpenResult r) {
+                             ++opened;
+                             lastPages = r.pageCount;
+                             lastError = static_cast<int>(r.error);
+                         }, Qt::DirectConnection);
+        QObject::connect(&worker, &pdf::RenderWorker::tileReady, &viewer,
+                         [&](int64_t, uint64_t, const pdf::TileKey&, const pdf::PixelBuffer&) { ++tilesDelivered; },
+                         Qt::DirectConnection);
+
+        worker.setOpenDelayForTesting(std::chrono::milliseconds(100));
+        worker.openDocumentAsync(800, multiPath);
+        QThread::msleep(30); // the worker has now popped the open task and is inside its 100 ms delay
+        worker.waitForIdle(); // must also wait for the RUNNING open task, not just the (empty) queues
+        if (opened.load() != 1 || lastPages.load() != 5 || lastError.load() != static_cast<int>(pdf::DocumentError::None)) {
+            std::cerr << "[FAIL] waitForIdle returned before the async open finished (opened=" << opened.load() << ")" << std::endl;
+            return 1;
+        }
+        worker.setOpenDelayForTesting(std::chrono::milliseconds(0));
+
+        worker.openDocumentAsync(801, "definitely_missing_for_worker.pdf");
+        worker.waitForIdle();
+        if (opened.load() != 2 || lastError.load() == static_cast<int>(pdf::DocumentError::None)) {
+            std::cerr << "[FAIL] Failed async open must emit documentOpened with an error" << std::endl;
+            return 1;
+        }
+
+        // Document 800 must still be the active one after the failed open of 801
+        auto key = pdf::TileKey::create(800, 0, 0, 0, 1.0, 1.0);
+        worker.enqueueRequest({800, 1, 0, {0, 0, 128, 128}, 1.0, 1.0, key, 10});
+        worker.waitForIdle();
+        if (tilesDelivered.load() != 1) {
+            std::cerr << "[FAIL] Active document lost after a failed async open (tiles=" << tilesDelivered.load() << ")" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: one signal per call, failure keeps the active document, waitForIdle covers opens." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 15 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 20 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

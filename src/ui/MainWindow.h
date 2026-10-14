@@ -13,6 +13,7 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override = default;
 
+    /// Starts a non-blocking open. @return false only if the path is empty; load errors arrive via loadError().
     bool openFile(const QString& filePath);
 
 public Q_SLOTS:
@@ -23,6 +24,7 @@ private Q_SLOTS:
     void onPageChanged(int currentPage, int totalPages);
     void onZoomChanged(double zoomRatio);
     void onLoadError(const QString& errorMessage);
+    void onLoadingChanged(bool loading, const QString& fileName);
 
 private:
     void setupUi();

@@ -1,6 +1,8 @@
 #include "PdfViewerWidget.h"
 #include "ImageUtils.h"
 #include <QPainter>
+#include <QFont>
+#include <QFontMetrics>
 #include <QWheelEvent>
 #include <QFileInfo>
 #include <QScrollBar>
@@ -26,6 +28,7 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
 
     connect(&m_renderWorker, &pdf::RenderWorker::tileReady, this, &PdfViewerWidget::onTileReady, Qt::QueuedConnection);
     connect(&m_renderWorker, &pdf::RenderWorker::tileFailed, this, &PdfViewerWidget::onTileFailed, Qt::QueuedConnection);
+    connect(&m_renderWorker, &pdf::RenderWorker::documentOpened, this, &PdfViewerWidget::onDocumentOpened, Qt::QueuedConnection);
 
     setStyleSheet(QStringLiteral("QAbstractScrollArea { background-color: #323639; border: none; }"));
 }
@@ -58,38 +61,23 @@ void PdfViewerWidget::waitForRendering() {
     QCoreApplication::processEvents();
 }
 
-pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
-    if (filePath.isEmpty()) {
-        return pdf::DocumentError::FileNotFound;
+QString PdfViewerWidget::openErrorMessage(pdf::DocumentError error, const QString& filePath) const {
+    switch (error) {
+        case pdf::DocumentError::FileNotFound:
+            return tr("File not found: %1").arg(filePath);
+        case pdf::DocumentError::PasswordRequired:
+            return tr("Document is password protected.");
+        case pdf::DocumentError::BadPassword:
+            return tr("Incorrect password entered.");
+        case pdf::DocumentError::EmptyDocument:
+            return tr("Document contains no pages.");
+        case pdf::DocumentError::InvalidFormat:
+        default:
+            return tr("Corrupted or unsupported PDF format.");
     }
+}
 
-    int64_t nextDocId = m_currentDocumentId + 1;
-    // Open serially on the engine worker thread - 0 PDFium calls on UI thread!
-    auto openResult = m_renderWorker.openDocumentSync(nextDocId, filePath.toStdString());
-    if (openResult.error != pdf::DocumentError::None) {
-        QString msg;
-        switch (openResult.error) {
-            case pdf::DocumentError::FileNotFound:
-                msg = tr("File not found: %1").arg(filePath);
-                break;
-            case pdf::DocumentError::PasswordRequired:
-                msg = tr("Document is password protected.");
-                break;
-            case pdf::DocumentError::BadPassword:
-                msg = tr("Incorrect password entered.");
-                break;
-            case pdf::DocumentError::EmptyDocument:
-                msg = tr("Document contains no pages.");
-                break;
-            case pdf::DocumentError::InvalidFormat:
-            default:
-                msg = tr("Corrupted or unsupported PDF format.");
-                break;
-        }
-        Q_EMIT loadError(msg);
-        return openResult.error; // Existing document state remains intact on failure
-    }
-
+void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& filePath, const pdf::OpenResult& openResult) {
     // Success: atomically cancel worker work, flush previous cache, and advance epochs
     m_renderWorker.cancelAll();
     m_cache.invalidateDocument(m_currentDocumentId);
@@ -120,10 +108,95 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
     Q_EMIT zoomChanged(1.0);
 
     viewport()->update();
+}
+
+pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
+    if (filePath.isEmpty()) {
+        return pdf::DocumentError::FileNotFound;
+    }
+
+    // A synchronous open supersedes any asynchronous open that is pending or queued.
+    cancelPendingOpen();
+
+    const int64_t nextDocId = m_currentDocumentId + 1;
+    // Open serially on the engine worker thread - 0 PDFium calls on UI thread!
+    auto openResult = m_renderWorker.openDocumentSync(nextDocId, filePath.toStdString());
+    if (openResult.error != pdf::DocumentError::None) {
+        Q_EMIT loadError(openErrorMessage(openResult.error, filePath));
+        return openResult.error; // Existing document state remains intact on failure
+    }
+
+    applyOpenedDocument(nextDocId, filePath, openResult);
     return pdf::DocumentError::None;
 }
 
+void PdfViewerWidget::openDocumentAsync(const QString& filePath) {
+    if (filePath.isEmpty()) {
+        Q_EMIT loadError(openErrorMessage(pdf::DocumentError::FileNotFound, filePath));
+        return;
+    }
+    if (m_loading) {
+        // Coalesce: only the most recent request made during a load is opened afterwards
+        m_queuedOpenPath = filePath;
+        m_hasQueuedOpen = true;
+        return;
+    }
+    startAsyncOpen(filePath);
+}
+
+void PdfViewerWidget::startAsyncOpen(const QString& filePath) {
+    m_loading = true;
+    m_pendingOpenId = m_currentDocumentId + 1;
+    m_pendingOpenPath = filePath;
+    Q_EMIT loadingChanged(true, QFileInfo(filePath).fileName());
+    viewport()->update();
+    m_renderWorker.openDocumentAsync(m_pendingOpenId, filePath.toStdString());
+}
+
+void PdfViewerWidget::cancelPendingOpen() {
+    const bool wasLoading = m_loading;
+    const QString name = QFileInfo(m_pendingOpenPath).fileName();
+    m_loading = false;
+    m_pendingOpenId = 0; // any result still in flight is ignored by onDocumentOpened()
+    m_pendingOpenPath.clear();
+    m_hasQueuedOpen = false;
+    m_queuedOpenPath.clear();
+    if (wasLoading) {
+        Q_EMIT loadingChanged(false, name);
+        viewport()->update();
+    }
+}
+
+void PdfViewerWidget::onDocumentOpened(int64_t documentId, pdf::OpenResult result) {
+    if (!m_loading || documentId != m_pendingOpenId) {
+        return; // cancelled by closeDocument()/openDocument() while the load was running
+    }
+
+    const QString path = m_pendingOpenPath;
+    m_loading = false;
+    m_pendingOpenId = 0;
+    m_pendingOpenPath.clear();
+
+    if (result.error != pdf::DocumentError::None) {
+        Q_EMIT loadError(openErrorMessage(result.error, path));
+    } else {
+        applyOpenedDocument(documentId, path, result);
+    }
+
+    if (m_hasQueuedOpen) {
+        const QString next = m_queuedOpenPath;
+        m_hasQueuedOpen = false;
+        m_queuedOpenPath.clear();
+        startAsyncOpen(next); // stays "loading"; no intermediate loadingChanged(false)
+        return;
+    }
+
+    Q_EMIT loadingChanged(false, QFileInfo(path).fileName());
+    viewport()->update();
+}
+
 void PdfViewerWidget::closeDocument() {
+    cancelPendingOpen();
     // Close document and page cache serially on worker thread
     m_renderWorker.closeDocumentSync();
 
@@ -435,11 +508,34 @@ void PdfViewerWidget::drawPendingPlaceholder(QPainter& painter, const QRectF& re
     painter.fillRect(rect, QColor(252, 252, 252));
 }
 
+void PdfViewerWidget::drawLoadingOverlay(QPainter& painter) {
+    if (!m_loading) {
+        return;
+    }
+    const QString text = tr("Opening %1\u2026").arg(QFileInfo(m_pendingOpenPath).fileName());
+    QFont font = painter.font();
+    font.setPointSizeF(font.pointSizeF() * 1.2);
+    painter.setFont(font);
+
+    const QFontMetrics fm(font);
+    const QRect textRect = fm.boundingRect(text);
+    QRect box(0, 0, textRect.width() + 40, textRect.height() + 24);
+    box.moveCenter(viewport()->rect().center());
+
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(20, 22, 24, 220));
+    painter.drawRoundedRect(box, 8, 8);
+    painter.setPen(QColor(235, 235, 235));
+    painter.drawText(box, Qt::AlignCenter, text);
+}
+
 void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     QPainter painter(viewport());
     painter.fillRect(viewport()->rect(), QColor("#323639"));
 
     if (!isDocumentOpen()) {
+        drawLoadingOverlay(painter);
         return;
     }
 
@@ -559,6 +655,8 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     }
 
     painter.restore();
+
+    drawLoadingOverlay(painter);
 }
 
 } // namespace ui
