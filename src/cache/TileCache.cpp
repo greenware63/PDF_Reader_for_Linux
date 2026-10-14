@@ -30,10 +30,28 @@ bool TileCache::canRetry(const TileKey& key, std::chrono::milliseconds baseBacko
     if (it == m_cacheMap.end() || !it->second.entry.isFailed) {
         return false;
     }
+    if (it->second.entry.failCount >= MAX_RETRY_ATTEMPTS) {
+        return false; // Give up: deterministic failure, stop burning CPU on retries
+    }
     int shift = std::min(std::max(0, it->second.entry.failCount - 1), 5);
     auto backoff = baseBackoff * (1 << shift);
     auto elapsed = std::chrono::steady_clock::now() - it->second.entry.lastFailedTime;
     return elapsed >= backoff;
+}
+
+bool TileCache::isPermanentlyFailed(const TileKey& key) const {
+    auto it = m_cacheMap.find(key);
+    return it != m_cacheMap.end() && it->second.entry.isFailed &&
+           it->second.entry.failCount >= MAX_RETRY_ATTEMPTS;
+}
+
+void TileCache::resetFailureHistory() {
+    m_failHistory.clear();
+    for (auto& kv : m_cacheMap) {
+        if (kv.second.entry.isFailed) {
+            kv.second.entry.failCount = 1; // keep tombstone, restart backoff ladder
+        }
+    }
 }
 
 bool TileCache::clearFailed(const TileKey& key) {

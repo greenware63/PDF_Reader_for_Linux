@@ -13,6 +13,7 @@
 #include <future>
 #include <functional>
 #include <string>
+#include <chrono>
 #include <utility>
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
@@ -100,6 +101,14 @@ public:
     size_t pendingCount();
 
     /**
+     * @brief Test hook: artificially delays every completed render by this many milliseconds
+     * (the worker keeps the tile "in flight" during the delay). 0 disables. Never use in production.
+     */
+    void setRenderDelayForTesting(std::chrono::milliseconds delay) noexcept {
+        m_testRenderDelayMs.store(static_cast<int>(delay.count()), std::memory_order_relaxed);
+    }
+
+    /**
      * @return Number of open IPage handles currently cached on the worker thread.
      */
     size_t cachedPageCount() const noexcept {
@@ -121,11 +130,15 @@ private:
     std::atomic<int64_t> m_activeDocumentId{0};
     std::atomic<uint64_t> m_currentGeneration{0};
     std::atomic<size_t> m_cachedPageCount{0};
+    std::atomic<int> m_testRenderDelayMs{0};
 
     std::mutex m_mutex;
     std::condition_variable m_cv;
     std::condition_variable m_idleCv;
     bool m_isRendering{false};
+    // Key of the tile currently being rendered (valid while m_isRendering); guarded by m_mutex.
+    // enqueueRequest(s) deduplicates against it so a scroll that re-requests the in-flight tile is a no-op.
+    TileKey m_inFlightKey;
 
     std::vector<ControlTask> m_controlQueue;
     std::vector<TileRenderRequest> m_queue;

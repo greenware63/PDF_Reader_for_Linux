@@ -161,6 +161,23 @@ public:
     bool canRetry(const TileKey& key, std::chrono::milliseconds baseBackoff = std::chrono::milliseconds(1000)) const;
 
     /**
+     * @brief Number of failures after which a tile is treated as permanently failed
+     * (canRetry() returns false) until resetFailureHistory() is called.
+     */
+    static constexpr int MAX_RETRY_ATTEMPTS = 6;
+
+    /**
+     * @return true if the tile is currently a failure tombstone AND has failed MAX_RETRY_ATTEMPTS times or more.
+     */
+    bool isPermanentlyFailed(const TileKey& key) const;
+
+    /**
+     * @brief Forgets all recorded failure counts (explicit user retry). Does not remove tombstones;
+     * call clearAllFailed() as well to make failed tiles eligible for rendering again.
+     */
+    void resetFailureHistory();
+
+    /**
      * @brief Clears failure status on a specific tile to allow immediate retry.
      * Preserves failCount history across retries so exponential backoff grows on deterministic failure.
      * @return true if the tile was marked failed and was cleared; false otherwise.

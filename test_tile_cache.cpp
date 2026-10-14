@@ -11,7 +11,7 @@
 
 int main() {
     std::cout << "========================================" << std::endl;
-    std::cout << " RUNNING TILE CACHE UNIT TESTS (12 TESTS) " << std::endl;
+    std::cout << " RUNNING TILE CACHE UNIT TESTS (13 TESTS) " << std::endl;
     std::cout << "========================================" << std::endl;
 
     // Test 1: Empty cache initialization & basic properties
@@ -721,8 +721,45 @@ int main() {
         std::cout << "  -> Passed: Backoff intervals strictly grow (40ms -> 80ms -> 160ms) and reset on successful put." << std::endl;
     }
 
+    // Test 13: tiles that fail MAX_RETRY_ATTEMPTS times become permanently failed until explicit reset
+    std::cout << "[TEST 13] Testing permanent failure after MAX_RETRY_ATTEMPTS..." << std::endl;
+    {
+        pdf::TileCache cache(1024 * 1024);
+        auto key = pdf::TileKey::create(9, 0, 0, 0, 1.0, 1.0);
+        const std::chrono::milliseconds zeroBackoff(0);
+
+        for (int attempt = 1; attempt <= pdf::TileCache::MAX_RETRY_ATTEMPTS; ++attempt) {
+            cache.markFailed(key);
+            if (cache.failCount(key) != attempt) {
+                std::cerr << "[FAIL] Expected failCount " << attempt << ", got " << cache.failCount(key) << std::endl;
+                return 1;
+            }
+            const bool expectRetry = attempt < pdf::TileCache::MAX_RETRY_ATTEMPTS;
+            if (cache.canRetry(key, zeroBackoff) != expectRetry) {
+                std::cerr << "[FAIL] canRetry wrong at attempt " << attempt << std::endl;
+                return 1;
+            }
+            if (expectRetry) {
+                cache.clearFailed(key); // simulates the widget's retry
+            }
+        }
+        if (!cache.isPermanentlyFailed(key) || !cache.isFailed(key)) {
+            std::cerr << "[FAIL] Tile must be permanently failed after MAX_RETRY_ATTEMPTS" << std::endl;
+            return 1;
+        }
+
+        // Explicit user retry lifts the permanent state
+        cache.resetFailureHistory();
+        if (cache.isPermanentlyFailed(key) || !cache.canRetry(key, zeroBackoff)) {
+            std::cerr << "[FAIL] resetFailureHistory must make the tile retryable again" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Permanent failure after " << pdf::TileCache::MAX_RETRY_ATTEMPTS
+                  << " attempts, lifted by resetFailureHistory()." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 12 TILE CACHE TESTS PASSED!        " << std::endl;
+    std::cout << " ALL 13 TILE CACHE TESTS PASSED!        " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

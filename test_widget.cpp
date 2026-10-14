@@ -3,6 +3,10 @@
 #include <QImage>
 #include <QPainter>
 #include <QScrollBar>
+#include <QThread>
+#include <QCoreApplication>
+#include <atomic>
+#include <chrono>
 #include <iostream>
 #include <fstream>
 #include <cassert>
@@ -496,7 +500,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Test 13: Continuous scrolling without tile starvation (Fix 1)
-    std::cout << "[TEST 13] Testing continuous scrolling without tile starvation..." << std::endl;
+    std::cout << "[TEST 13] Testing tiles are delivered WHILE scrolling continuously (no starvation)..." << std::endl;
     {
         err = viewer.openDocument(QString::fromStdString(multiPath));
         if (err != pdf::DocumentError::None) {
@@ -508,56 +512,112 @@ int main(int argc, char* argv[]) {
         viewer.goToPage(0);
         viewer.waitForRendering();
 
-        // Perform 50 rapid scroll steps
-        int maxV = viewer.verticalScrollBar()->maximum();
+        const int maxV = viewer.verticalScrollBar()->maximum();
         if (maxV <= 50) {
             std::cerr << "[FAIL] Expected scrollbar maximum > 50 for continuous scroll test" << std::endl;
             return 1;
         }
 
-        int stepDelta = maxV / 50;
-        for (int i = 1; i <= 50; ++i) {
+        // Make every render take ~15 ms while the scroll position changes every ~5 ms.
+        // The old generation-based discard dropped EVERY finished tile in this regime (0 deliveries).
+        viewer.renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(15));
+        int deliveredDuringScroll = 0;
+        QMetaObject::Connection countConn = QObject::connect(
+            &viewer.renderWorker(), &pdf::RenderWorker::tileReady, &viewer,
+            [&](int64_t, uint64_t, const pdf::TileKey&, const pdf::PixelBuffer&) { ++deliveredDuringScroll; });
+
+        const int stepDelta = maxV / 60;
+        for (int i = 1; i <= 60; ++i) {
             viewer.verticalScrollBar()->setValue(i * stepDelta);
-            // Render to queue visible tiles at this scroll position
             QImage frame(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
             QPainter pFrame(&frame);
             viewer.viewport()->render(&pFrame);
             pFrame.end();
+            QThread::msleep(5);
             QCoreApplication::processEvents();
         }
 
-        // Wait for rendering to complete
+        // Deliveries counted BEFORE the scroll stopped and before any waitForRendering()
+        const int deliveredBeforeIdle = deliveredDuringScroll;
         viewer.waitForRendering();
+        QObject::disconnect(countConn); // lambda captures a local by reference
+        viewer.renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(0));
 
-        // Verify that tiles arrived and cache is populated for visible tiles on screen
-        if (viewer.cache().size() == 0) {
-            std::cerr << "[FAIL] Tile starvation during continuous scrolling: 0 tiles in cache!" << std::endl;
+        if (deliveredBeforeIdle < 3) {
+            std::cerr << "[FAIL] Tile starvation: only " << deliveredBeforeIdle
+                      << " tiles delivered during continuous scrolling (expected >= 3)" << std::endl;
             return 1;
         }
 
-        // Check that visible tiles at the final scroll position are present in cache
+        // Final-position tiles must be present as well
         const double dpr = viewer.effectiveDpr();
-        int64_t vpW = static_cast<int64_t>(std::round(viewer.viewport()->width() * dpr));
-        int64_t vpH = static_cast<int64_t>(std::round(viewer.viewport()->height() * dpr));
+        const int64_t vpW = static_cast<int64_t>(std::round(viewer.viewport()->width() * dpr));
+        const int64_t vpH = static_cast<int64_t>(std::round(viewer.viewport()->height() * dpr));
         auto visTiles = viewer.layout().getVisibleTiles({viewer.currentDocScrollX(), viewer.currentDocScrollY(), vpW, vpH}, 512);
-
-        bool allPresent = true;
+        // One more paint to enqueue anything still missing, then drain
+        {
+            QImage frame(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+            QPainter pFrame(&frame);
+            viewer.viewport()->render(&pFrame);
+            pFrame.end();
+        }
+        viewer.waitForRendering();
         for (const auto& t : visTiles) {
             auto k = pdf::TileKey::create(viewer.currentDocumentId(), t.pageIndex, t.col, t.row, pdf::quantizeScale(viewer.currentZoom()), dpr);
             if (!viewer.cache().get(k).has_value()) {
-                allPresent = false;
-                break;
+                std::cerr << "[FAIL] Visible tile missing after scrolling stopped" << std::endl;
+                return 1;
             }
         }
-        if (!allPresent) {
-            std::cerr << "[FAIL] Tiles starved during continuous scrolling!" << std::endl;
-            return 1;
-        }
-        std::cout << "  -> Passed: Continuous 50-step scroll rendered and populated tiles without starvation." << std::endl;
+        std::cout << "  -> Passed: " << deliveredBeforeIdle
+                  << " tiles delivered while scrolling continuously; final viewport fully rendered." << std::endl;
     }
 
-    // Test 14: 200-page document verifies worker page cache bounded at <= 16 pages (Fix 2)
-    std::cout << "[TEST 14] Testing worker page cache LRU bound on 200-page document..." << std::endl;
+    // Test 14: the tile currently being rendered is not rendered a second time when re-requested
+    std::cout << "[TEST 14] Testing in-flight tile deduplication on the worker..." << std::endl;
+    {
+        std::atomic<int> deliveries{0}; // declared before the worker so it outlives the worker thread
+        pdf::RenderWorker worker;
+        auto res = worker.openDocumentSync(700, multiPath);
+        if (res.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open multiPath on worker for dedup test" << std::endl;
+            return 1;
+        }
+        worker.setRenderDelayForTesting(std::chrono::milliseconds(150));
+
+        QObject::connect(&worker, &pdf::RenderWorker::tileReady, &viewer,
+                         [&](int64_t, uint64_t, const pdf::TileKey&, const pdf::PixelBuffer&) { ++deliveries; },
+                         Qt::DirectConnection);
+
+        auto key = pdf::TileKey::create(700, 0, 0, 0, 1.0, 1.0);
+        worker.enqueueRequest({700, 1, 0, {0, 0, 256, 256}, 1.0, 1.0, key, 10});
+        // Wait (up to 2 s) until the worker has popped the request, i.e. it is now "in flight"
+        for (int i = 0; i < 200 && worker.pendingCount() != 0; ++i) {
+            QThread::msleep(10);
+        }
+        if (worker.pendingCount() != 0) {
+            std::cerr << "[FAIL] Worker never picked up the first request" << std::endl;
+            return 1;
+        }
+
+        // Same tile re-requested under a NEWER generation (what a scroll tick does)
+        worker.setGeneration(2);
+        worker.enqueueRequest({700, 2, 0, {0, 0, 256, 256}, 1.0, 1.0, key, 10});
+        if (worker.pendingCount() != 0) {
+            std::cerr << "[FAIL] In-flight tile was queued a second time (pendingCount="
+                      << worker.pendingCount() << ")" << std::endl;
+            return 1;
+        }
+        worker.waitForIdle();
+        if (deliveries.load() != 1) {
+            std::cerr << "[FAIL] Expected exactly 1 delivery, got " << deliveries.load() << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Re-requesting the in-flight tile did not render it twice." << std::endl;
+    }
+
+    // Test 15: 200-page document verifies worker page cache bounded at <= 16 pages (Fix 2)
+    std::cout << "[TEST 15] Testing worker page cache LRU bound on 200-page document..." << std::endl;
     {
         std::string path200 = "doc_200_pages.pdf";
         generateMultiPagePdf(path200, 200);
@@ -588,7 +648,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 14 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 15 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

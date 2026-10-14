@@ -69,6 +69,7 @@ public:
      */
     void waitForRendering();
 
+    pdf::RenderWorker& renderWorker() noexcept { return m_renderWorker; }
     pdf::TileCache& cache() noexcept { return m_cache; }
     const layout::DocumentLayout& layout() const noexcept { return m_layout; }
     size_t inFlightCount() const noexcept { return m_inFlightKeys.size(); }

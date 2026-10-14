@@ -47,6 +47,7 @@ double PdfViewerWidget::effectiveDpr() const {
 }
 
 void PdfViewerWidget::retryFailedTiles() {
+    m_cache.resetFailureHistory(); // explicit user retry also lifts the permanent-failure state
     m_cache.clearAllFailed();
     m_inFlightKeys.clear();
     viewport()->update();

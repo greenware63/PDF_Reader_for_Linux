@@ -143,6 +143,11 @@ void RenderWorker::enqueueRequest(TileRenderRequest request) {
         return;
     }
 
+    // Deduplicate against the tile being rendered right now (its result is delivered regardless of generation)
+    if (m_isRendering && m_inFlightKey == request.key) {
+        return;
+    }
+
     // Deduplicate against already pending identical requests
     for (const auto& item : m_queue) {
         if (item.key == request.key && item.generation == request.generation) {
@@ -170,7 +175,7 @@ void RenderWorker::enqueueRequests(std::vector<TileRenderRequest> requests) {
         if (req.documentId != curDoc || req.generation < curGen) {
             continue;
         }
-        bool dup = false;
+        bool dup = (m_isRendering && m_inFlightKey == req.key);
         for (const auto& item : m_queue) {
             if (item.key == req.key && item.generation == req.generation) {
                 dup = true;
@@ -224,7 +229,7 @@ void RenderWorker::workerLoop() {
 
             if (!m_running.load()) {
                 break;
-            }\
+            }
 
             // Prioritize control tasks (open/close) over tile rendering
             if (!m_controlQueue.empty()) {
@@ -244,6 +249,7 @@ void RenderWorker::workerLoop() {
                 }
 
                 m_isRendering = true;
+                m_inFlightKey = req.key;
                 hasRenderRequest = true;
             }
         }
@@ -288,6 +294,11 @@ void RenderWorker::workerLoop() {
                     buffer = page->renderTile(req.rect, req.scale, req.dpr);
                     renderedSuccessfully = buffer.isValid() && (buffer.data() != nullptr);
                 }
+            }
+
+            // Test hook: keep the tile in flight for a while to make timing-dependent behaviour observable
+            if (const int delayMs = m_testRenderDelayMs.load(std::memory_order_relaxed); delayMs > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
 
             // Fix 1: Deliver completed render whenever documentId matches active document.
