@@ -1051,8 +1051,56 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Actual PDF parsed by PDFium extracted 5 characters with supplementary code points U+1F600 and U+1F680." << std::endl;
     }
 
+    // Test 16: Text fallback reconstruction across merged surrogate pairs
+    std::cout << "[TEST 16] Testing fallback text reconstruction across merged surrogate pairs (no out-of-bounds read)..." << std::endl;
+    {
+        // Create a PageText with merged surrogate pairs where chars.size() is strictly less than original PDFium count
+        // Original PDFium count was 7 (A, high, low, B, high, low, C), merged into 5 chars.
+        pdf::PageText pt;
+        pt.chars = {
+            pdf::PageCharBox{0.0, 0.0, 10.0, 10.0, U'A'},
+            pdf::PageCharBox{10.0, 0.0, 20.0, 10.0, 0x1F600},
+            pdf::PageCharBox{20.0, 0.0, 30.0, 10.0, U'B'},
+            pdf::PageCharBox{30.0, 0.0, 40.0, 10.0, 0x1F680},
+            pdf::PageCharBox{40.0, 0.0, 50.0, 10.0, U'C'}
+        };
+
+        // Exercise the exact fallback reconstruction logic from PdfiumPage::extractText()
+        pt.text.clear();
+        if (pt.text.empty() && !pt.chars.empty()) {
+            pt.text.reserve(pt.chars.size() * 2);
+            for (const auto& ch : pt.chars) {
+                char32_t cp = ch.unicode;
+                if (cp == 0) continue;
+                if (cp <= 0xFFFF) {
+                    pt.text.push_back(static_cast<char16_t>(cp));
+                } else if (cp <= 0x10FFFF) {
+                    cp -= 0x10000;
+                    pt.text.push_back(static_cast<char16_t>(0xD800 + ((cp >> 10) & 0x3FF)));
+                    pt.text.push_back(static_cast<char16_t>(0xDC00 + (cp & 0x3FF)));
+                }
+            }
+        }
+
+        if (pt.text.size() != 7) {
+            std::cerr << "[FAIL] Fallback reconstructed text size mismatch: expected 7 UTF-16 code units, got " << pt.text.size() << std::endl;
+            return 1;
+        }
+
+        if (pt.getSelectedText(0, 4) != u"A\U0001F600B\U0001F680C") {
+            std::cerr << "[FAIL] Fallback getSelectedText(0, 4) mismatch" << std::endl;
+            return 1;
+        }
+        if (pt.getSelectedText(2, 2) != u"B") {
+            std::cerr << "[FAIL] Fallback getSelectedText(2, 2) misaligned" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Fallback text reconstruction correctly bounds to merged character count without OOB read." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 15 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 16 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

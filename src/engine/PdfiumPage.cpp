@@ -237,10 +237,10 @@ PageText PdfiumPage::extractText() {
         result.chars.push_back(box);
     }
 
-    if (result.text.empty()) {
-        result.text.reserve(count * 2);
-        for (int i = 0; i < count; ++i) {
-            char32_t cp = result.chars[i].unicode;
+    if (result.text.empty() && !result.chars.empty()) {
+        result.text.reserve(result.chars.size() * 2);
+        for (const auto& ch : result.chars) {
+            char32_t cp = ch.unicode;
             if (cp == 0) {
                 continue;
             }
