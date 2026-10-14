@@ -19,6 +19,7 @@ out/
 
 # Output & test artifacts
 test_rendered_page0.png
+complex_fixture.pdf
 multi_page_fixture.pdf
 subpixel_test.pdf
 multi_page_widget.pdf
