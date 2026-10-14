@@ -61,6 +61,77 @@ static void generateMultiPagePdf(const std::string& path, int count = 5) {
     out.write(pdf.data(), pdf.size());
 }
 
+static void generateSupplementaryUnicodePdfFixture(const std::string& path) {
+    std::string cmap =
+        "/CIDInit /ProcSet findresource begin\n"
+        "12 dict begin\n"
+        "begincmap\n"
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        "/CMapName /Custom-ToUnicode def\n"
+        "/CMapType 2 def\n"
+        "1 begincodespacerange\n"
+        "<0000> <FFFF>\n"
+        "endcodespacerange\n"
+        "5 beginbfchar\n"
+        "<0001> <0041>\n"
+        "<0002> <D83DDE00>\n"
+        "<0003> <0042>\n"
+        "<0004> <D83DDE80>\n"
+        "<0005> <0043>\n"
+        "endbfchar\n"
+        "endcmap\n"
+        "CMapName currentdict /CMap defineresource pop\n"
+        "end\n"
+        "end\n";
+
+    std::string contentStream =
+        "BT\n"
+        "/F1 20 Tf\n"
+        "72 700 Td\n"
+        "<00010002000300040005> Tj\n"
+        "ET\n";
+
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 8 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Helvetica-Custom /Encoding /Identity-H /DescendantFonts [5 0 R] /ToUnicode 7 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "5 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Helvetica-Custom /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 6 0 R /DW 1000 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "6 0 obj\n<< /Type /FontDescriptor /FontName /Helvetica-Custom /Flags 4 /FontBBox [-500 -500 2000 2000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "7 0 obj\n<< /Length " + std::to_string(cmap.size()) + " >>\nstream\n" + cmap + "\nendstream\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "8 0 obj\n<< /Length " + std::to_string(contentStream.size()) + " >>\nstream\n" + contentStream + "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 9\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
 static void generateTwoPageTextFixture(const std::string& path, const std::string& text1, const std::string& text2) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
@@ -1392,50 +1463,82 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Forward and backward cross-page selection and newline joining verified." << std::endl;
     }
 
-    std::cout << "[TEST 27] Testing RenderWorker text extraction and PageText Unicode surrogate preservation..." << std::endl;
+    std::cout << "[TEST 27] Testing RenderWorker and widget selection on actual PDF with supplementary Unicode (U+1F600, U+1F680)..." << std::endl;
     {
-        pdf::RenderWorker testWorker;
-        auto openRes = testWorker.openDocumentSync(999, textPath);
-        if (openRes.error != pdf::DocumentError::None) {
-            std::cerr << "[FAIL] Failed to open document on testWorker" << std::endl;
+        std::string suppPath = "widget_actual_supp_unicode.pdf";
+        generateSupplementaryUnicodePdfFixture(suppPath);
+
+        err = viewer.openDocument(QString::fromStdString(suppPath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open actual supplementary Unicode PDF in viewer" << std::endl;
             return 1;
         }
 
-        std::shared_ptr<pdf::PageText> deliveredText;
-        QObject::connect(&testWorker, &pdf::RenderWorker::pageTextReady, &viewer,
-                         [&](int64_t docId, int pageIdx, std::shared_ptr<pdf::PageText> text) {
-                             if (docId == 999 && pageIdx == 0) {
-                                 deliveredText = text;
-                             }
-                         }, Qt::DirectConnection);
+        viewer.resize(1000, 700);
+        viewer.goToPage(0);
+        viewer.setZoom(1.0);
 
-        testWorker.requestPageText(999, 0);
-        testWorker.waitForIdle();
+        QImage f(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+        QPainter p(&f);
+        viewer.viewport()->render(&p);
+        p.end();
+        viewer.waitForRendering();
 
-        if (!deliveredText || deliveredText->charCount() != 16) {
-            std::cerr << "[FAIL] RenderWorker failed to deliver PageText synchronously" << std::endl;
+        auto pt = viewer.getPageText(0);
+        if (!pt || pt->charCount() != 5) {
+            std::cerr << "[FAIL] PageText expected 5 characters from actual PDF, got " << (pt ? pt->charCount() : 0) << std::endl;
             return 1;
         }
 
-        // Verify PageText supplementary handling with surrogate pair directly in Qt QString conversion
-        pdf::PageText suppTest;
-        suppTest.chars = {
-            pdf::PageCharBox{0.0, 0.0, 10.0, 10.0, U'X'},
-            pdf::PageCharBox{10.0, 0.0, 20.0, 10.0, 0x1F600},
-            pdf::PageCharBox{20.0, 0.0, 30.0, 10.0, U'Y'}
-        };
-
-        QString qstr = QString::fromStdU16String(suppTest.getSelectedText(0, 2));
-        if (qstr != QString::fromUtf8("X\xF0\x9F\x98\x80Y")) {
-            std::cerr << "[FAIL] QString conversion of supplementary character failed: " << qstr.toStdString() << std::endl;
-            return 1;
-        }
-        if (QString::fromStdU16String(suppTest.getSelectedText(2, 2)) != QStringLiteral("Y")) {
-            std::cerr << "[FAIL] Character after supplementary was misaligned in QString" << std::endl;
+        if (pt->chars[1].unicode != 0x1F600 || pt->chars[3].unicode != 0x1F680) {
+            std::cerr << "[FAIL] Supplementary characters not decoded properly by PDFium in widget" << std::endl;
             return 1;
         }
 
-        std::cout << "  -> Passed: RenderWorker async delivery and Unicode surrogate preservation confirmed." << std::endl;
+        // Mouse drag select across all 5 characters in widget
+        const auto& pl = viewer.layout().getPageLayout(0);
+        const double dpr = viewer.effectiveDpr();
+        const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+        const auto& b0 = pt->chars[0];
+        double vp0X = static_cast<double>(pl.leftPixel + static_cast<int64_t>(std::round(((b0.left + b0.right) * 0.5) * effScale)) - viewer.currentDocScrollX()) / dpr;
+        double vp0Y = static_cast<double>(pl.topPixel + static_cast<int64_t>(std::round(((b0.top + b0.bottom) * 0.5) * effScale)) - viewer.currentDocScrollY()) / dpr;
+
+        const auto& b4 = pt->chars[4];
+        double vp4X = static_cast<double>(pl.leftPixel + static_cast<int64_t>(std::round(((b4.left + b4.right) * 0.5) * effScale)) - viewer.currentDocScrollX()) / dpr;
+        double vp4Y = static_cast<double>(pl.topPixel + static_cast<int64_t>(std::round(((b4.top + b4.bottom) * 0.5) * effScale)) - viewer.currentDocScrollY()) / dpr;
+
+        QMouseEvent press0(QEvent::MouseButtonPress, QPointF(vp0X, vp0Y), QPointF(vp0X, vp0Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press0);
+
+        QMouseEvent move4(QEvent::MouseMove, QPointF(vp4X, vp4Y), QPointF(vp4X, vp4Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move4);
+
+        QMouseEvent release4(QEvent::MouseButtonRelease, QPointF(vp4X, vp4Y), QPointF(vp4X, vp4Y), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release4);
+
+        if (!viewer.hasSelection()) {
+            std::cerr << "[FAIL] Failed to establish selection on supplementary Unicode PDF" << std::endl;
+            return 1;
+        }
+
+        QString expectedFull = QString::fromUtf8("A\xF0\x9F\x98\x80\x42\xF0\x9F\x9A\x80\x43");
+        if (viewer.selectedText() != expectedFull) {
+            std::cerr << "[FAIL] Full supplementary text mismatch in viewer: expected '"
+                      << expectedFull.toStdString() << "', got '" << viewer.selectedText().toStdString() << "'" << std::endl;
+            return 1;
+        }
+
+        // Test clipboard copy of actual supplementary Unicode text
+        QGuiApplication::clipboard()->clear();
+        viewer.copySelection();
+        if (QGuiApplication::clipboard()->text() != expectedFull) {
+            std::cerr << "[FAIL] Clipboard copy of supplementary Unicode mismatch" << std::endl;
+            return 1;
+        }
+
+        viewer.clearSelection();
+        std::cout << "  -> Passed: Actual PDF with supplementary Unicode loaded in widget, selected with mouse, and copied to clipboard." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

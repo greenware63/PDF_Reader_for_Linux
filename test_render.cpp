@@ -172,6 +172,77 @@ static void generateSubpixelPdfFixture(const std::string& path) {
     out.write(pdf.data(), pdf.size());
 }
 
+static void generateSupplementaryUnicodePdfFixture(const std::string& path) {
+    std::string cmap =
+        "/CIDInit /ProcSet findresource begin\n"
+        "12 dict begin\n"
+        "begincmap\n"
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        "/CMapName /Custom-ToUnicode def\n"
+        "/CMapType 2 def\n"
+        "1 begincodespacerange\n"
+        "<0000> <FFFF>\n"
+        "endcodespacerange\n"
+        "5 beginbfchar\n"
+        "<0001> <0041>\n"
+        "<0002> <D83DDE00>\n"
+        "<0003> <0042>\n"
+        "<0004> <D83DDE80>\n"
+        "<0005> <0043>\n"
+        "endbfchar\n"
+        "endcmap\n"
+        "CMapName currentdict /CMap defineresource pop\n"
+        "end\n"
+        "end\n";
+
+    std::string contentStream =
+        "BT\n"
+        "/F1 20 Tf\n"
+        "72 700 Td\n"
+        "<00010002000300040005> Tj\n"
+        "ET\n";
+
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 8 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Helvetica-Custom /Encoding /Identity-H /DescendantFonts [5 0 R] /ToUnicode 7 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "5 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Helvetica-Custom /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 6 0 R /DW 1000 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "6 0 obj\n<< /Type /FontDescriptor /FontName /Helvetica-Custom /Flags 4 /FontBBox [-500 -500 2000 2000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "7 0 obj\n<< /Length " + std::to_string(cmap.size()) + " >>\nstream\n" + cmap + "\nendstream\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "8 0 obj\n<< /Length " + std::to_string(contentStream.size()) + " >>\nstream\n" + contentStream + "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 9\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
 static void generateTextPdfFixture(const std::string& path, const std::string& text = "Hello PDF World!") {
     std::string pdf;
     pdf += "%PDF-1.4\n";
@@ -906,7 +977,78 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::cout << "  -> Passed: Supplementary Unicode code points (>0xFFFF) produce exact surrogate pairs without index drift." << std::endl;
+        std::cout << "  -> Passed: Synthetic Supplementary Unicode code points produce exact surrogate pairs without index drift." << std::endl;
+
+        // 3. Extraction from an actual PDF document through PDFium
+        std::string suppPdfPath = "actual_supp_unicode.pdf";
+        generateSupplementaryUnicodePdfFixture(suppPdfPath);
+
+        auto suppDoc = pdf::createDocument();
+        if (suppDoc->loadFromFile(suppPdfPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to load actual supplementary Unicode PDF" << std::endl;
+            return 1;
+        }
+
+        auto suppPage = suppDoc->getPage(0);
+        if (!suppPage) {
+            std::cerr << "[FAIL] Failed to open page from actual supplementary Unicode PDF" << std::endl;
+            return 1;
+        }
+
+        pdf::PageText extractedPt = suppPage->extractText();
+        std::cout << "  [DEBUG] Extracted charCount=" << extractedPt.charCount() << std::endl;
+        for (size_t i = 0; i < extractedPt.charCount(); ++i) {
+            std::cout << "     char[" << i << "]: unicode=0x" << std::hex << static_cast<uint32_t>(extractedPt.chars[i].unicode)
+                      << " box=[" << extractedPt.chars[i].left << ", " << extractedPt.chars[i].top
+                      << ", " << extractedPt.chars[i].right << ", " << extractedPt.chars[i].bottom << "]"
+                      << std::dec << std::endl;
+        }
+
+        // Validate characters decoded by PDFium from ToUnicode CMap
+        if (extractedPt.chars[0].unicode != U'A') {
+            std::cerr << "[FAIL] PDFium char 0 expected 'A', got U+" << std::hex << static_cast<uint32_t>(extractedPt.chars[0].unicode) << std::dec << std::endl;
+            return 1;
+        }
+        if (extractedPt.chars[1].unicode != 0x1F600) {
+            std::cerr << "[FAIL] PDFium char 1 expected U+1F600, got U+" << std::hex << static_cast<uint32_t>(extractedPt.chars[1].unicode) << std::dec << std::endl;
+            return 1;
+        }
+        if (extractedPt.chars[2].unicode != U'B') {
+            std::cerr << "[FAIL] PDFium char 2 expected 'B', got U+" << std::hex << static_cast<uint32_t>(extractedPt.chars[2].unicode) << std::dec << std::endl;
+            return 1;
+        }
+        if (extractedPt.chars[3].unicode != 0x1F680) {
+            std::cerr << "[FAIL] PDFium char 3 expected U+1F680, got U+" << std::hex << static_cast<uint32_t>(extractedPt.chars[3].unicode) << std::dec << std::endl;
+            return 1;
+        }
+        if (extractedPt.chars[4].unicode != U'C') {
+            std::cerr << "[FAIL] PDFium char 4 expected 'C', got U+" << std::hex << static_cast<uint32_t>(extractedPt.chars[4].unicode) << std::dec << std::endl;
+            return 1;
+        }
+
+        // Substring extraction on real PDFium-extracted data
+        std::u16string extSel0 = extractedPt.getSelectedText(0, 0);
+        if (extSel0 != u"A") {
+            std::cerr << "[FAIL] PDFium extracted getSelectedText(0, 0) mismatch" << std::endl;
+            return 1;
+        }
+        std::u16string extSel1 = extractedPt.getSelectedText(1, 1);
+        if (extSel1.size() != 2 || extSel1[0] != 0xD83D || extSel1[1] != 0xDE00) {
+            std::cerr << "[FAIL] PDFium extracted getSelectedText(1, 1) surrogate mismatch" << std::endl;
+            return 1;
+        }
+        std::u16string extSel2 = extractedPt.getSelectedText(2, 2);
+        if (extSel2 != u"B") {
+            std::cerr << "[FAIL] PDFium extracted getSelectedText(2, 2) misaligned by preceding surrogate pair" << std::endl;
+            return 1;
+        }
+        std::u16string extSelFull = extractedPt.getSelectedText(0, 4);
+        if (extSelFull.size() != 7) {
+            std::cerr << "[FAIL] PDFium extracted full span expected 7 UTF-16 code units, got " << extSelFull.size() << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Actual PDF parsed by PDFium extracted 5 characters with supplementary code points U+1F600 and U+1F680." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

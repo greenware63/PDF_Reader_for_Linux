@@ -204,8 +204,9 @@ PageText PdfiumPage::extractText() {
     }
 
     for (int i = 0; i < count; ++i) {
+        unsigned int u = FPDFText_GetUnicode(textPage, i);
         PageCharBox box;
-        box.unicode = FPDFText_GetUnicode(textPage, i);
+        box.unicode = u;
         double left = 0.0, right = 0.0, bottom = 0.0, top = 0.0;
         if (FPDFText_GetCharBox(textPage, i, &left, &right, &bottom, &top)) {
             box.left = std::min(left, right);
@@ -215,6 +216,24 @@ PageText PdfiumPage::extractText() {
             box.top = m_height - std::max(top, bottom);
             box.bottom = m_height - std::min(top, bottom);
         }
+
+        // If this character is a high surrogate and the following character is a low surrogate,
+        // merge them into a single 32-bit Unicode code point so that selection indexes match glyphs.
+        if (u >= 0xD800 && u <= 0xDBFF && (i + 1) < count) {
+            unsigned int nextU = FPDFText_GetUnicode(textPage, i + 1);
+            if (nextU >= 0xDC00 && nextU <= 0xDFFF) {
+                box.unicode = 0x10000 + ((u - 0xD800) << 10) + (nextU - 0xDC00);
+                double l2 = 0.0, r2 = 0.0, b2 = 0.0, t2 = 0.0;
+                if (FPDFText_GetCharBox(textPage, i + 1, &l2, &r2, &b2, &t2)) {
+                    box.left = std::min({box.left, l2, r2});
+                    box.right = std::max({box.right, l2, r2});
+                    box.top = std::min({box.top, m_height - std::max(t2, b2)});
+                    box.bottom = std::max({box.bottom, m_height - std::min(t2, b2)});
+                }
+                ++i; // consume low surrogate
+            }
+        }
+
         result.chars.push_back(box);
     }
 
