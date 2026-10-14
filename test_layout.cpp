@@ -306,8 +306,8 @@ int main() {
     int64_t docY2 = scrollY2 + cursorVpY;
 
     const auto& pAfter = layout.getPageLayout(testPageIdx);
-    double reconstructedPtX = (docX2 - pAfter.leftPixel) / totalFactor;
-    double reconstructedPtY = (docY2 - pAfter.topPixel) / totalFactor;
+    double reconstructedPtX = static_cast<double>(docX2 - pAfter.leftPixel) / totalFactor;
+    double reconstructedPtY = static_cast<double>(docY2 - pAfter.topPixel) / totalFactor;
 
     // Strict tolerance: <= 1.5 device pixels expressed in PDF points
     const double maxAllowedPointDrift = 1.5 / totalFactor; // ~0.36 pt

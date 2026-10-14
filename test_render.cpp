@@ -71,10 +71,10 @@ static void generateComplexPdfFixture(const std::string& path) {
 
     // 2. Diagonal crossing lines (kept below y=700)
     for (int i = 0; i < 25; ++i) {
-        float r = ((i * 37) % 255) / 255.0f;
-        float g = ((i * 73) % 255) / 255.0f;
-        float b = ((i * 109) % 255) / 255.0f;
-        float lineWidth = 1.0f + (i % 5);
+        float r = static_cast<float>((i * 37) % 255) / 255.0f;
+        float g = static_cast<float>((i * 73) % 255) / 255.0f;
+        float b = static_cast<float>((i * 109) % 255) / 255.0f;
+        float lineWidth = 1.0f + static_cast<float>(i % 5);
         contentStream += std::to_string(lineWidth) + " w " + std::to_string(r) + " " + std::to_string(g) + " " + std::to_string(b) + " RG\n";
         contentStream += "0 " + std::to_string(i * 25) + " m 595 " + std::to_string(700 - i * 25) + " l S\n";
         contentStream += std::to_string(i * 19) + " 0 m " + std::to_string(595 - i * 19) + " 700 l S\n";

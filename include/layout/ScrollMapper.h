@@ -16,7 +16,7 @@ public:
     static constexpr int32_t DEFAULT_MAX_SLIDER = 1000000000; // 10^9
 
     explicit constexpr ScrollMapper(int32_t maxSliderRange = DEFAULT_MAX_SLIDER) noexcept
-        : m_maxSliderRange(maxSliderRange > 0 ? maxSliderRange : DEFAULT_MAX_SLIDER) {}
+        : m_maxSliderRange(maxSliderRange > 0 ? maxSliderRange : DEFAULT_MAX_SLIDER) {}\
 
     /**
      * @brief Computes scrollbar slider parameters for given 64-bit document span and viewport size.
@@ -46,8 +46,8 @@ public:
             // Compressed ratio mapping for enormous 64-bit documents
             outMaxSlider = m_maxSliderRange;
             double ratio = static_cast<double>(m_maxSliderRange) / static_cast<double>(maxDocScroll);
-            outPageStep = std::max<int32_t>(1, static_cast<int32_t>(std::round(viewportPixels * ratio)));
-            outSingleStep = std::max<int32_t>(1, static_cast<int32_t>(std::round(singleStepPixels * ratio)));
+            outPageStep = std::max<int32_t>(1, static_cast<int32_t>(std::round(static_cast<double>(viewportPixels) * ratio)));
+            outSingleStep = std::max<int32_t>(1, static_cast<int32_t>(std::round(static_cast<double>(singleStepPixels) * ratio)));
         }
     }
 
@@ -60,22 +60,22 @@ public:
             return 0;
         }
         if (maxDocScroll <= m_maxSliderRange) {
-            return std::min<int64_t>(sliderVal, maxDocScroll);
+            return std::min<int64_t>(static_cast<int64_t>(sliderVal), maxDocScroll);
         }
-        int32_t clampedSlider = std::clamp<int32_t>(sliderVal, 0, m_maxSliderRange);
-        double fraction = static_cast<double>(clampedSlider) / static_cast<double>(m_maxSliderRange);
-        return static_cast<int64_t>(std::round(fraction * static_cast<double>(maxDocScroll)));
+        double fraction = static_cast<double>(sliderVal) / static_cast<double>(m_maxSliderRange);
+        int64_t doc = static_cast<int64_t>(std::round(fraction * static_cast<double>(maxDocScroll)));
+        return std::clamp<int64_t>(doc, 0, maxDocScroll);
     }
 
     /**
      * @brief Maps 64-bit document offset to 32-bit scrollbar slider value.
      */
-    int32_t docToSlider(int64_t docPixel, int64_t totalDocPixels, int64_t viewportPixels) const noexcept {
+    int32_t docToSlider(int64_t docScrollPixels, int64_t totalDocPixels, int64_t viewportPixels) const noexcept {
         const int64_t maxDocScroll = std::max<int64_t>(0, totalDocPixels - viewportPixels);
-        if (maxDocScroll == 0 || docPixel <= 0) {
+        if (maxDocScroll == 0 || docScrollPixels <= 0) {
             return 0;
         }
-        int64_t clampedDoc = std::clamp<int64_t>(docPixel, 0, maxDocScroll);
+        const int64_t clampedDoc = std::min<int64_t>(docScrollPixels, maxDocScroll);
         if (maxDocScroll <= m_maxSliderRange) {
             return static_cast<int32_t>(clampedDoc);
         }

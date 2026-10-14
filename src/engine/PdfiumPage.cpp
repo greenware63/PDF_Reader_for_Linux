@@ -120,9 +120,9 @@ PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio) {
     // Apply safety caps ONLY to single-buffer whole-page renders
     int64_t totalPixels = static_cast<int64_t>(pixelW) * pixelH;
     if (pixelW > MAX_WHOLE_PAGE_DIM || pixelH > MAX_WHOLE_PAGE_DIM || totalPixels > MAX_WHOLE_PAGE_PIXELS) {
-        double factorW = (pixelW > MAX_WHOLE_PAGE_DIM) ? static_cast<double>(MAX_WHOLE_PAGE_DIM) / pixelW : 1.0;
-        double factorH = (pixelH > MAX_WHOLE_PAGE_DIM) ? static_cast<double>(MAX_WHOLE_PAGE_DIM) / pixelH : 1.0;
-        double factorTotal = (totalPixels > MAX_WHOLE_PAGE_PIXELS) ? std::sqrt(static_cast<double>(MAX_WHOLE_PAGE_PIXELS) / totalPixels) : 1.0;
+        double factorW = (pixelW > MAX_WHOLE_PAGE_DIM) ? static_cast<double>(MAX_WHOLE_PAGE_DIM) / static_cast<double>(pixelW) : 1.0;
+        double factorH = (pixelH > MAX_WHOLE_PAGE_DIM) ? static_cast<double>(MAX_WHOLE_PAGE_DIM) / static_cast<double>(pixelH) : 1.0;
+        double factorTotal = (totalPixels > MAX_WHOLE_PAGE_PIXELS) ? std::sqrt(static_cast<double>(MAX_WHOLE_PAGE_PIXELS) / static_cast<double>(totalPixels)) : 1.0;
         double factor = std::min({factorW, factorH, factorTotal});
 
         pixelW = std::max(1, static_cast<int>(std::floor(pixelW * factor)));

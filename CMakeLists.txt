@@ -6,7 +6,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Compiler warnings and security hardening flags
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-Wall -Wextra -Wpedantic)
+    add_compile_options(-Wall -Wextra -Wpedantic -Wconversion)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_compile_options(-fstack-protector-strong)
+        # _FORTIFY_SOURCE=3 requires glibc with optimization enabled (-O1, -O2, etc.)
+        add_compile_options(
+            $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-U_FORTIFY_SOURCE>
+            $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-D_FORTIFY_SOURCE=3>
+        )
+    endif()
     if(UNIX AND NOT APPLE)
         add_compile_definitions(_GLIBCXX_ASSERTIONS)
     endif()

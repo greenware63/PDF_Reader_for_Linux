@@ -215,11 +215,11 @@ ScrollAnchor DocumentLayout::createAnchor(int64_t docX, int64_t docY) const {
 
     if (it->widthPixel > 0) {
         int64_t offX = docX - it->leftPixel;
-        normX = std::clamp(static_cast<double>(offX) / it->widthPixel, 0.0, 1.0);
+        normX = std::clamp(static_cast<double>(offX) / static_cast<double>(it->widthPixel), 0.0, 1.0);
     }
     if (it->heightPixel > 0) {
         int64_t offY = docY - it->topPixel;
-        normY = std::clamp(static_cast<double>(offY) / it->heightPixel, 0.0, 1.0);
+        normY = std::clamp(static_cast<double>(offY) / static_cast<double>(it->heightPixel), 0.0, 1.0);
     }
 
     return {it->pageIndex, normX, normY};
@@ -237,8 +237,8 @@ void DocumentLayout::resolveAnchor(const ScrollAnchor& anchor, int64_t viewportO
     int idx = std::clamp(anchor.pageIndex, 0, static_cast<int>(m_pages.size()) - 1);
     const auto& page = m_pages[idx];
 
-    int64_t targetX = page.leftPixel + static_cast<int64_t>(std::round(anchor.normalizedX * page.widthPixel));
-    int64_t targetY = page.topPixel + static_cast<int64_t>(std::round(anchor.normalizedY * page.heightPixel));
+    int64_t targetX = page.leftPixel + static_cast<int64_t>(std::round(anchor.normalizedX * static_cast<double>(page.widthPixel)));
+    int64_t targetY = page.topPixel + static_cast<int64_t>(std::round(anchor.normalizedY * static_cast<double>(page.heightPixel)));
 
     outScrollX = targetX - viewportOffsetX;
     outScrollY = targetY - viewportOffsetY;

@@ -198,10 +198,10 @@ int main(int argc, char* argv[]) {
         // 2. Scan across horizontal tile boundary on page 0 across column seam (512 px)
         const auto& p0Layout = viewer.layout().getPageLayout(0);
         int64_t tileSeamDocX = p0Layout.leftPixel + 512 - viewer.currentDocScrollX();
-        int logicalSeamX = static_cast<int>(std::round(tileSeamDocX / testDpr));
+        int logicalSeamX = static_cast<int>(std::round(static_cast<double>(tileSeamDocX) / testDpr));
 
         int64_t scanDocY = p0Layout.topPixel + 200 - viewer.currentDocScrollY();
-        int scanY = static_cast<int>(std::round(scanDocY / testDpr));
+        int scanY = static_cast<int>(std::round(static_cast<double>(scanDocY) / testDpr));
 
         if (logicalSeamX > 20 && logicalSeamX < imgW - 20 && scanY > 0 && scanY < imgH) {
             // Scan across the seam: 10 pixels to the left and 10 pixels to the right
@@ -232,8 +232,8 @@ int main(int argc, char* argv[]) {
 
     int64_t beforeDocX = (viewer.horizontalScrollBar()->value()) + static_cast<int64_t>(std::round(cursorWidgetPos.x() * dpr));
     int64_t beforeDocY = (viewer.verticalScrollBar()->value()) + static_cast<int64_t>(std::round(cursorWidgetPos.y() * dpr));
-    double ptX = (beforeDocX - p0Layout.leftPixel) / (initialScale * dpr);
-    double ptY = (beforeDocY - p0Layout.topPixel) / (initialScale * dpr);
+    double ptX = static_cast<double>(beforeDocX - p0Layout.leftPixel) / (initialScale * dpr);
+    double ptY = static_cast<double>(beforeDocY - p0Layout.topPixel) / (initialScale * dpr);
 
     viewer.setZoom(initialScale * 2.0, &cursorWidgetPos);
     double newScale = viewer.currentZoom();
@@ -241,8 +241,8 @@ int main(int argc, char* argv[]) {
     const auto& p0After = viewer.layout().getPageLayout(0);
     int64_t afterDocX = (viewer.horizontalScrollBar()->value()) + static_cast<int64_t>(std::round(cursorWidgetPos.x() * dpr));
     int64_t afterDocY = (viewer.verticalScrollBar()->value()) + static_cast<int64_t>(std::round(cursorWidgetPos.y() * dpr));
-    double reconstructedPtX = (afterDocX - p0After.leftPixel) / (newScale * dpr);
-    double reconstructedPtY = (afterDocY - p0After.topPixel) / (newScale * dpr);
+    double reconstructedPtX = static_cast<double>(afterDocX - p0After.leftPixel) / (newScale * dpr);
+    double reconstructedPtY = static_cast<double>(afterDocY - p0After.topPixel) / (newScale * dpr);
 
     double driftX = std::abs(reconstructedPtX - ptX) * newScale * dpr;
     double driftY = std::abs(reconstructedPtY - ptY) * newScale * dpr;
