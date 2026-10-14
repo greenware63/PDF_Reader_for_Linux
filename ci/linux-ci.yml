@@ -61,5 +61,5 @@ jobs:
           QT_QPA_PLATFORM: "offscreen"
           ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
-          TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1:suppressions=ci/tsan_suppressions.txt"
+          TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1:suppressions=${{ github.workspace }}/ci/tsan_suppressions.txt"
         run: ctest --test-dir build --output-on-failure
