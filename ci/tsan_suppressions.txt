@@ -1,8 +1,4 @@
-# ThreadSanitizer suppressions for uninstrumented external system libraries (Qt 6, system glibc, X11/xcb)
+# ThreadSanitizer suppressions for uninstrumented external system libraries
 race:libQt6Core.so*
 race:libQt6Gui.so*
 race:libQt6Widgets.so*
-race:libpdfium.so*
-race:QCoreApplication*
-race:QObject*
-race:QThread*

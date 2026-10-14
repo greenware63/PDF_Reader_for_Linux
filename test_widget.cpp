@@ -57,10 +57,9 @@ static void generateMultiPagePdf(const std::string& path, int count = 5) {
 }
 
 int main(int argc, char* argv[]) {
-#if defined(_WIN32)
-    qputenv("QT_QPA_PLATFORM_PLUGIN_PATH", "C:/Qt/6.7.2/mingw_64/plugins");
-#endif
-    qputenv("QT_QPA_PLATFORM", "offscreen");
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+    }
     QApplication app(argc, argv);
 
     std::cout << "========================================" << std::endl;
