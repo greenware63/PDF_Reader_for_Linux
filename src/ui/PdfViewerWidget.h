@@ -134,6 +134,8 @@ Q_SIGNALS:
     void zoomChanged(double zoomRatio);
     void selectionChanged();
     void searchResultsChanged(int currentMatch, int totalMatches);
+    void searchProgressChanged(int pagesSearched, int totalPages);
+    void searchFinished(bool truncated);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -152,7 +154,7 @@ private Q_SLOTS:
     void onPageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
     void onSearchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
     void onSearchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);
-    void onSearchCompleted(int64_t documentId, int64_t searchId, int totalMatches);
+    void onSearchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated);
 
 private:
     struct TextPosition {

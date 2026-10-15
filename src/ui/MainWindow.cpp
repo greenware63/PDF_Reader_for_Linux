@@ -82,6 +82,8 @@ void MainWindow::setupUi() {
         m_viewer->setFocus();
     });
     connect(m_viewer, &PdfViewerWidget::searchResultsChanged, m_findBar, &FindBar::setMatchCount);
+    connect(m_viewer, &PdfViewerWidget::searchProgressChanged, m_findBar, &FindBar::setSearchingProgress);
+    connect(m_viewer, &PdfViewerWidget::searchFinished, m_findBar, &FindBar::finishSearch);
 
     statusBar()->showMessage(tr("Ready - Open a PDF to begin"));
 }
@@ -109,6 +111,10 @@ void MainWindow::setupActions() {
 
     QAction* findAction = editMenu->addAction(tr("&Find..."), this, &MainWindow::showFindBar);
     findAction->setShortcut(QKeySequence::Find);
+    QAction* findNextAction = editMenu->addAction(tr("Find &Next"), m_viewer, &PdfViewerWidget::findNext);
+    findNextAction->setShortcut(QKeySequence(Qt::Key_F3));
+    QAction* findPreviousAction = editMenu->addAction(tr("Find &Previous"), m_viewer, &PdfViewerWidget::findPrevious);
+    findPreviousAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F3));
 
     // Toolbar
     QToolBar* toolbar = addToolBar(tr("Main Toolbar"));

@@ -1,5 +1,6 @@
 #include "PdfViewerWidget.h"
 #include "ImageUtils.h"
+#include "engine/SearchText.h"
 #include <QPainter>
 #include <QFont>
 #include <QFontMetrics>
@@ -847,25 +848,42 @@ void PdfViewerWidget::scrollToMatch(const pdf::SearchMatch& match) {
     const auto& pl = m_layout.getPageLayout(match.pageIndex);
     const double dpr = effectiveDpr();
     const double effScale = pdf::quantizeScale(m_scale) * dpr;
+    const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
     const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
 
     double matchTopPt = match.rects.empty() ? 0.0 : match.rects[0].top;
     double matchHeightPt = match.rects.empty() ? 20.0 : match.rects[0].height();
+    double matchLeftPt = match.rects.empty() ? 0.0 : match.rects[0].left;
+    double matchRightPt = match.rects.empty() ? 20.0 : match.rects[0].right;
+    for (const auto& rect : match.rects) {
+        matchLeftPt = std::min(matchLeftPt, rect.left);
+        matchRightPt = std::max(matchRightPt, rect.right);
+    }
+    const int64_t matchDocX = pl.leftPixel + static_cast<int64_t>(std::round(matchLeftPt * effScale));
+    const int64_t matchDocW = static_cast<int64_t>(std::round((matchRightPt - matchLeftPt) * effScale));
     int64_t matchDocY = pl.topPixel + static_cast<int64_t>(std::round(matchTopPt * effScale));
     int64_t matchDocH = static_cast<int64_t>(std::round(matchHeightPt * effScale));
 
     constexpr int64_t margin = 40;
+    bool visibleX = (matchDocX >= m_docScrollX + margin) &&
+                    (matchDocX + matchDocW <= m_docScrollX + vpW - margin);
     bool visibleY = (matchDocY >= m_docScrollY + margin) &&
                     (matchDocY + matchDocH <= m_docScrollY + vpH - margin);
 
-    if (!visibleY) {
+    if (!visibleX || !visibleY) {
+        int64_t targetX = m_docScrollX;
+        if (!visibleX) {
+            targetX = matchDocX - margin;
+            targetX = std::clamp<int64_t>(targetX, 0, std::max<int64_t>(0, m_layout.maxDocumentWidth() - vpW));
+        }
         int64_t targetY = matchDocY - (vpH / 3);
         targetY = std::clamp<int64_t>(targetY, 0, std::max<int64_t>(0, m_layout.totalDocumentHeight() - vpH));
+        const int64_t oldScrollX = m_docScrollX;
         const int64_t oldScrollY = m_docScrollY;
         m_navigating = true;
-        setDocScrollPosition(m_docScrollX, targetY);
+        setDocScrollPosition(targetX, targetY);
         m_navigating = false;
-        if (m_docScrollY != oldScrollY) {
+        if (m_docScrollX != oldScrollX || m_docScrollY != oldScrollY) {
             ++m_currentGeneration;
             m_inFlightKeys.clear();
             m_renderWorker.setGeneration(m_currentGeneration);
@@ -879,6 +897,7 @@ void PdfViewerWidget::scrollToMatch(const pdf::SearchMatch& match) {
 }
 
 void PdfViewerWidget::findText(const QString& query, bool matchCase) {
+    const int64_t searchId = ++m_currentSearchId;
     m_searchQuery = query;
     m_searchMatchCase = matchCase;
     m_searchMatches.clear();
@@ -887,12 +906,14 @@ void PdfViewerWidget::findText(const QString& query, bool matchCase) {
 
     if (query.trimmed().isEmpty() || !isDocumentOpen() || pageCount() <= 0) {
         Q_EMIT searchResultsChanged(0, 0);
+        Q_EMIT searchProgressChanged(0, 0);
+        Q_EMIT searchFinished(false);
         viewport()->update();
         return;
     }
 
-    int64_t searchId = ++m_currentSearchId;
-    m_renderWorker.startSearch(m_currentDocumentId, searchId, query, matchCase, pageCount());
+    Q_EMIT searchProgressChanged(0, pageCount());
+    m_renderWorker.startSearch(m_currentDocumentId, searchId, query, matchCase, pageCount(), m_currentPage);
     Q_EMIT searchResultsChanged(0, 0);
     viewport()->update();
 }
@@ -918,11 +939,14 @@ void PdfViewerWidget::findPrevious() {
 }
 
 void PdfViewerWidget::clearSearch() {
+    ++m_currentSearchId;
     m_searchQuery.clear();
     m_searchMatches.clear();
     m_currentMatchIndex = -1;
     m_renderWorker.cancelSearch();
     Q_EMIT searchResultsChanged(0, 0);
+    Q_EMIT searchProgressChanged(0, 0);
+    Q_EMIT searchFinished(false);
     viewport()->update();
 }
 
@@ -932,7 +956,9 @@ void PdfViewerWidget::onSearchMatchesFound(int64_t documentId, int64_t searchId,
     }
 
     bool wasEmpty = m_searchMatches.empty();
-    m_searchMatches.insert(m_searchMatches.end(), matches.begin(), matches.end());
+    const size_t remaining = static_cast<size_t>(std::max(0, pdf::MAX_SEARCH_MATCHES - static_cast<int>(m_searchMatches.size())));
+    const size_t count = std::min(remaining, matches.size());
+    m_searchMatches.insert(m_searchMatches.end(), matches.begin(), matches.begin() + static_cast<std::ptrdiff_t>(count));
 
     if (wasEmpty && !m_searchMatches.empty()) {
         m_currentMatchIndex = 0;
@@ -943,21 +969,20 @@ void PdfViewerWidget::onSearchMatchesFound(int64_t documentId, int64_t searchId,
     viewport()->update();
 }
 
-void PdfViewerWidget::onSearchProgress(int64_t documentId, int64_t searchId, int /*pagesSearched*/, int /*totalPages*/) {
+void PdfViewerWidget::onSearchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages) {
     if (documentId != m_currentDocumentId || searchId != m_currentSearchId) {
         return;
     }
-    if (m_searchMatches.empty()) {
-        Q_EMIT searchResultsChanged(0, 0);
-    }
+    Q_EMIT searchProgressChanged(pagesSearched, totalPages);
 }
 
-void PdfViewerWidget::onSearchCompleted(int64_t documentId, int64_t searchId, int totalMatches) {
+void PdfViewerWidget::onSearchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated) {
     if (documentId != m_currentDocumentId || searchId != m_currentSearchId) {
         return;
     }
-    int cur = (m_currentMatchIndex >= 0) ? (m_currentMatchIndex + 1) : 0;
-    Q_EMIT searchResultsChanged(cur, totalMatches);
+    const int cur = (m_currentMatchIndex >= 0) ? (m_currentMatchIndex + 1) : 0;
+    Q_EMIT searchResultsChanged(cur, std::min(totalMatches, pdf::MAX_SEARCH_MATCHES));
+    Q_EMIT searchFinished(truncated);
     viewport()->update();
 }
 
@@ -1273,7 +1298,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     }
 
     // 6. Draw selection highlights over rendered pages
-    if (visPages.isValid() && hasSelection()) {
+    if (visPages.isValid() && (hasSelection() || !m_searchMatches.empty())) {
         const double effScale = qScale * qDpr;
         for (int p = visPages.firstVisiblePage; p <= visPages.lastVisiblePage; ++p) {
             const auto& pl = m_layout.getPageLayout(p);

@@ -10,6 +10,8 @@
 #include <QClipboard>
 #include <QMouseEvent>
 #include <QKeyEvent>
+#include <QLabel>
+#include <QLineEdit>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -179,7 +181,7 @@ static void generateTwoPageTextFixture(const std::string& path, const std::strin
     std::ofstream out(path, std::ios::binary);
     out.write(pdf.data(), pdf.size());
 }
-static void generateTextPdfFixture(const std::string& path, const std::string& text = "Hello PDF World!") {
+static void generateTextPdfFixture(const std::string& path, const std::string& text = "Hello PDF World!", int textX = 100) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
     std::vector<size_t> offsets;
@@ -196,7 +198,7 @@ static void generateTextPdfFixture(const std::string& path, const std::string& t
     offsets.push_back(pdf.size());
     pdf += "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
 
-    std::string content = "BT\n/F1 24 Tf\n100 700 Td\n(" + text + ") Tj\nET\n";
+    std::string content = "BT\n/F1 24 Tf\n" + std::to_string(textX) + " 700 Td\n(" + text + ") Tj\nET\n";
     offsets.push_back(pdf.size());
     pdf += "5 0 obj\n<< /Length " + std::to_string(content.size()) + " >>\nstream\n" + content + "\nendstream\nendobj\n";
 
@@ -1774,6 +1776,33 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        // Searches begin on the current page and wrap through the document.
+        viewer.goToPage(1);
+        viewer.findText("page", false);
+        viewer.renderWorker().waitForIdle();
+        QCoreApplication::processEvents();
+        if (viewer.searchMatchCount() != 2 ||
+            viewer.searchMatches()[0].pageIndex != 1 ||
+            viewer.searchMatches()[1].pageIndex != 0) {
+            std::cerr << "[FAIL] Search from page 1 did not return its nearest-page match first." << std::endl;
+            return 1;
+        }
+
+        // Queued results from a cleared search must not repopulate highlights.
+        viewer.findText("page", false);
+        viewer.clearSearch();
+        viewer.renderWorker().waitForIdle();
+        QCoreApplication::processEvents();
+        if (viewer.searchMatchCount() != 0 || viewer.currentSearchMatchIndex() != -1) {
+            std::cerr << "[FAIL] Results from a cleared search repopulated the viewer." << std::endl;
+            return 1;
+        }
+
+        viewer.goToPage(0);
+        viewer.findText("page", false);
+        viewer.renderWorker().waitForIdle();
+        QCoreApplication::processEvents();
+
         // Cycle next
         viewer.findNext();
         if (viewer.currentSearchMatchIndex() != 1) {
@@ -1849,11 +1878,53 @@ int main(int argc, char* argv[]) {
         QObject::connect(&findBar, &ui::FindBar::closed, [&]() { ++closedCount; });
 
         findBar.setMatchCount(3, 17);
+        auto* searchEdit = findBar.findChild<QLineEdit*>();
+        auto* countLabel = findBar.findChild<QLabel*>();
+        if (!searchEdit || !countLabel) {
+            std::cerr << "[FAIL] FindBar search input or status label not found." << std::endl;
+            return 1;
+        }
+        searchEdit->setText(QStringLiteral("query"));
+        findBar.setMatchCount(0, 0);
+        findBar.finishSearch(false);
+        if (countLabel->text() != QStringLiteral("No matches")) {
+            std::cerr << "[FAIL] FindBar did not distinguish a completed empty search." << std::endl;
+            return 1;
+        }
+        findBar.setMatchCount(3, 10000);
+        findBar.setSearchingProgress(2, 5);
+        if (!countLabel->text().contains(QStringLiteral("Searching")) ||
+            !countLabel->text().contains(QStringLiteral("40%"))) {
+            std::cerr << "[FAIL] FindBar did not show search progress." << std::endl;
+            return 1;
+        }
+        findBar.finishSearch(true);
+        if (!countLabel->text().contains(QStringLiteral("10000+"))) {
+            std::cerr << "[FAIL] FindBar did not display the truncated match count." << std::endl;
+            return 1;
+        }
         // FindBar handles Esc key -> emits closed()
         QKeyEvent escKey(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
         QApplication::sendEvent(&findBar, &escKey);
         if (closedCount != 1) {
             std::cerr << "[FAIL] FindBar Esc key expected to emit closed(), got count=" << closedCount << std::endl;
+            return 1;
+        }
+
+        std::string farTextPath = "widget_far_right_text.pdf";
+        generateTextPdfFixture(farTextPath, "FarRight", 450);
+        err = viewer.openDocument(QString::fromStdString(farTextPath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open far-right text fixture." << std::endl;
+            return 1;
+        }
+        viewer.resize(1000, 700);
+        viewer.setZoom(3.0);
+        viewer.findText("FarRight", true);
+        viewer.renderWorker().waitForIdle();
+        QCoreApplication::processEvents();
+        if (viewer.searchMatchCount() != 1 || viewer.currentDocScrollX() <= 0) {
+            std::cerr << "[FAIL] Navigating to an off-screen horizontal search match did not scroll." << std::endl;
             return 1;
         }
 

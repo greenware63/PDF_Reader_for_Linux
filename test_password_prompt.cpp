@@ -1,11 +1,14 @@
 #include "ui/MainWindow.h"
 #include <QApplication>
+#include <QAction>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QElapsedTimer>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QPushButton>
 #include <QStatusBar>
 #include <QThread>
@@ -37,6 +40,19 @@ int main(int argc, char* argv[]) {
 
     ui::MainWindow window;
     window.show();
+    bool hasFindNextShortcut = false;
+    bool hasFindPreviousShortcut = false;
+    for (const auto* menu : window.findChildren<QMenu*>()) {
+        for (const auto* action : menu->actions()) {
+            hasFindNextShortcut |= action->shortcut() == QKeySequence(Qt::Key_F3);
+            hasFindPreviousShortcut |= action->shortcut() == QKeySequence(Qt::SHIFT | Qt::Key_F3);
+        }
+    }
+    if (!hasFindNextShortcut || !hasFindPreviousShortcut) {
+        std::cerr << "[FAIL] Find Next/Previous F3 shortcuts are not installed." << std::endl;
+        return 1;
+    }
+
     auto* viewer = window.findChild<ui::PdfViewerWidget*>();
     if (!viewer || !window.openFile(samplePath) ||
         !waitFor([&]() { return !viewer->isLoading(); }, 5000) || !viewer->isDocumentOpen()) {

@@ -120,6 +120,8 @@ add_library(pdf_engine STATIC
     include/engine/PageText.h
     include/engine/SearchTypes.h
     include/engine/RenderWorker.h
+    src/engine/SearchText.h
+    src/engine/SearchText.cpp
     src/engine/PdfiumDocument.h
     src/engine/PdfiumDocument.cpp
     src/engine/PdfiumPage.h

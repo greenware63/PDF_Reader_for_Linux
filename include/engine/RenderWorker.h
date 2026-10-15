@@ -108,7 +108,7 @@ public:
      * @brief Starts an asynchronous page-by-page background text search.
      * Cancels any ongoing search. Results arrive incrementally via searchMatchesFound() and searchProgress().
      */
-    void startSearch(int64_t documentId, int64_t searchId, const QString& query, bool matchCase, int totalPages);
+    void startSearch(int64_t documentId, int64_t searchId, const QString& query, bool matchCase, int totalPages, int startPage = 0);
 
     /**
      * @brief Immediately cancels any running or pending background search.
@@ -170,12 +170,11 @@ Q_SIGNALS:
     /// Emitted as search progresses page-by-page.
     void searchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);
     /// Emitted when a search across all pages completes.
-    void searchCompleted(int64_t documentId, int64_t searchId, int totalMatches);
+    void searchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated);
 
 private:
     void workerLoop();
     IPage* getOrLoadWorkerPage(int pageIndex);
-    static std::vector<SearchMatch> findTextInPage(const PageText& pt, const QString& query, bool matchCase);
 
     struct ControlTask {
         std::function<void()> execute;
@@ -187,6 +186,7 @@ private:
         QString query;
         bool matchCase{false};
         int totalPages{0};
+        int startPage{0};
         int nextPageToSearch{0};
         int totalMatchesFound{0};
     };

@@ -13,6 +13,7 @@
 #include "engine/PdfiumPage.h"
 #include "engine/RenderWorker.h"
 #include "engine/SearchTypes.h"
+#include "engine/SearchText.h"
 #include <QCoreApplication>
 #include <QString>
 
@@ -1259,7 +1260,7 @@ int main(int argc, char* argv[]) {
             matchCount += static_cast<int>(matches.size());
             deliveredMatches.insert(deliveredMatches.end(), matches.begin(), matches.end());
         });
-        QObject::connect(&worker, &pdf::RenderWorker::searchCompleted, [&](int64_t, int64_t, int) {
+        QObject::connect(&worker, &pdf::RenderWorker::searchCompleted, [&](int64_t, int64_t, int, bool) {
             searchDone = true;
         });
 
@@ -1330,6 +1331,50 @@ int main(int argc, char* argv[]) {
         worker.startSearch(102, 5, QStringLiteral("a"), false, 1);
         worker.cancelSearch();
         worker.waitForIdle();
+
+        std::cout << "[TEST 18] Testing Persian/Arabic normalization, whitespace folding, and bounded results..." << std::endl;
+        pdf::PageText normalizedPage;
+        normalizedPage.pageIndex = 4;
+        const std::u32string normalizedSource = U"ك ي می\u200cخواهم\n۱۲۳";
+        for (size_t i = 0; i < normalizedSource.size(); ++i) {
+            const double left = static_cast<double>(i * 10);
+            normalizedPage.chars.push_back({left, 0.0, left + 8.0, 12.0, normalizedSource[i]});
+        }
+        bool normalizedTruncated = false;
+        const auto normalizedMatches = pdf::findTextInPage(
+            normalizedPage, QString::fromUtf8("ک ی میخواهم 123"), false, 10, &normalizedTruncated);
+        if (normalizedMatches.size() != 1 || normalizedTruncated ||
+            normalizedMatches[0].charStartIndex != 0 ||
+            normalizedMatches[0].charCount != static_cast<int>(normalizedSource.size())) {
+            std::cerr << "[FAIL] Persian/Arabic variants, ZWNJ, line break, and digit normalization did not match." << std::endl;
+            return 1;
+        }
+        for (auto& ch : normalizedPage.chars) {
+            if (ch.unicode >= 0x06F0 && ch.unicode <= 0x06F9) {
+                ch.unicode = 0x0660 + (ch.unicode - 0x06F0);
+            }
+        }
+        const auto arabicDigitMatches = pdf::findTextInPage(
+            normalizedPage, QString::fromUtf8("ک ی میخواهم 123"), false, 10);
+        if (arabicDigitMatches.size() != 1) {
+            std::cerr << "[FAIL] Arabic-Indic digits were not normalized to ASCII digits." << std::endl;
+            return 1;
+        }
+
+        pdf::PageText repeatedPage;
+        repeatedPage.pageIndex = 5;
+        repeatedPage.chars.reserve(static_cast<size_t>(pdf::MAX_SEARCH_MATCHES + 2));
+        for (int i = 0; i < pdf::MAX_SEARCH_MATCHES + 2; ++i) {
+            const double left = static_cast<double>(i);
+            repeatedPage.chars.push_back({left, 0.0, left + 0.8, 12.0, U'a'});
+        }
+        bool capped = false;
+        const auto cappedMatches = pdf::findTextInPage(repeatedPage, QStringLiteral("a"), false, 3, &capped);
+        if (cappedMatches.size() != 3 || !capped ||
+            cappedMatches[0].charStartIndex != 0 || cappedMatches[2].charStartIndex != 2) {
+            std::cerr << "[FAIL] Search match limit did not return exactly the configured cap and mark truncation." << std::endl;
+            return 1;
+        }
 
         std::cout << "  -> Passed: Persian text extracted with accurate code points, RTL highlight boxes merged, and case-sensitive/case-insensitive search verified." << std::endl;
     }

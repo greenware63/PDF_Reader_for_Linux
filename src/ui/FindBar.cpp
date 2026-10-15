@@ -5,6 +5,7 @@
 #include <QToolButton>
 #include <QCheckBox>
 #include <QKeyEvent>
+#include <algorithm>
 
 namespace ui {
 
@@ -70,26 +71,61 @@ void FindBar::focusSearch() {
 }
 
 void FindBar::setMatchCount(int currentMatch, int totalMatches) {
+    m_currentMatch = currentMatch;
+    m_totalMatches = totalMatches;
+    updateStatusLabel();
+}
+
+void FindBar::setSearchingProgress(int pagesSearched, int totalPages) {
+    m_isSearching = totalPages > 0;
+    m_pagesSearched = pagesSearched;
+    m_totalPages = totalPages;
+    m_matchLimitReached = false;
+    updateStatusLabel();
+}
+
+void FindBar::finishSearch(bool truncated) {
+    m_isSearching = false;
+    m_matchLimitReached = truncated;
+    updateStatusLabel();
+}
+
+void FindBar::updateStatusLabel() {
     if (m_searchEdit->text().trimmed().isEmpty()) {
-        m_matchCountLabel->setText(QString());
+        m_matchCountLabel->clear();
         m_prevButton->setEnabled(false);
         m_nextButton->setEnabled(false);
         return;
     }
 
-    if (totalMatches <= 0) {
-        m_matchCountLabel->setText(tr("0 of 0"));
-        m_prevButton->setEnabled(false);
-        m_nextButton->setEnabled(false);
-    } else {
-        m_matchCountLabel->setText(tr("%1 of %2").arg(currentMatch).arg(totalMatches));
-        m_prevButton->setEnabled(true);
-        m_nextButton->setEnabled(true);
+    QString countText;
+    if (m_totalMatches > 0) {
+        const QString total = m_matchLimitReached ? tr("%1+").arg(m_totalMatches) : QString::number(m_totalMatches);
+        countText = tr("%1 of %2").arg(m_currentMatch).arg(total);
+    } else if (!m_isSearching) {
+        countText = tr("No matches");
     }
+
+    if (m_isSearching) {
+        const int percent = (m_totalPages > 0)
+            ? std::clamp((m_pagesSearched * 100) / m_totalPages, 0, 100)
+            : 0;
+        const QString progress = tr("Searching\u2026 %1%").arg(percent);
+        countText = countText.isEmpty() ? progress : tr("%1 \u00b7 %2").arg(countText, progress);
+    }
+    m_matchCountLabel->setText(countText);
+    m_prevButton->setEnabled(m_totalMatches > 0);
+    m_nextButton->setEnabled(m_totalMatches > 0);
 }
 
 void FindBar::clear() {
     m_searchEdit->clear();
+    m_currentMatch = 0;
+    m_totalMatches = 0;
+    m_pagesSearched = 0;
+    m_totalPages = 0;
+    m_isSearching = false;
+    m_matchLimitReached = false;
     m_matchCountLabel->clear();
     m_prevButton->setEnabled(false);
     m_nextButton->setEnabled(false);
@@ -105,6 +141,10 @@ bool FindBar::matchCase() const {
 
 void FindBar::onSearchTextChanged(const QString& text) {
     if (text.trimmed().isEmpty()) {
+        m_currentMatch = 0;
+        m_totalMatches = 0;
+        m_isSearching = false;
+        m_matchLimitReached = false;
         m_matchCountLabel->clear();
         m_prevButton->setEnabled(false);
         m_nextButton->setEnabled(false);

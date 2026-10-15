@@ -1,4 +1,5 @@
 #include "engine/RenderWorker.h"
+#include "engine/SearchText.h"
 #include <algorithm>
 
 namespace pdf {
@@ -315,7 +316,7 @@ std::shared_ptr<const PageText> RenderWorker::getPageTextSync(int64_t documentId
     return future.get();
 }
 
-void RenderWorker::startSearch(int64_t documentId, int64_t searchId, const QString& query, bool matchCase, int totalPages) {
+void RenderWorker::startSearch(int64_t documentId, int64_t searchId, const QString& query, bool matchCase, int totalPages, int startPage) {
     m_currentSearchId.store(searchId);
 
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -329,6 +330,7 @@ void RenderWorker::startSearch(int64_t documentId, int64_t searchId, const QStri
     m_activeSearch.query = query;
     m_activeSearch.matchCase = matchCase;
     m_activeSearch.totalPages = totalPages;
+    m_activeSearch.startPage = std::clamp(startPage, 0, totalPages - 1);
     m_activeSearch.nextPageToSearch = 0;
     m_activeSearch.totalMatchesFound = 0;
 
@@ -391,66 +393,6 @@ IPage* RenderWorker::getOrLoadWorkerPage(int pageIndex) {
     return insIt->second.first.get();
 }
 
-std::vector<SearchMatch> RenderWorker::findTextInPage(const PageText& pt, const QString& query, bool matchCase) {
-    std::vector<SearchMatch> matches;
-    if (query.isEmpty() || pt.chars.empty()) {
-        return matches;
-    }
-
-    QString pageTextStr;
-    pageTextStr.reserve(static_cast<qsizetype>(pt.chars.size() * 2));
-    std::vector<int> qCharToBoxIndex;
-    qCharToBoxIndex.reserve(pt.chars.size() * 2);
-
-    for (size_t i = 0; i < pt.chars.size(); ++i) {
-        char32_t cp = pt.chars[i].unicode;
-        if (cp == 0) {
-            continue;
-        }
-        if (cp <= 0xFFFF) {
-            pageTextStr.append(QChar(static_cast<ushort>(cp)));
-            qCharToBoxIndex.push_back(static_cast<int>(i));
-        } else if (cp <= 0x10FFFF) {
-            cp -= 0x10000;
-            pageTextStr.append(QChar(static_cast<ushort>(0xD800 + ((cp >> 10) & 0x3FF))));
-            qCharToBoxIndex.push_back(static_cast<int>(i));
-            pageTextStr.append(QChar(static_cast<ushort>(0xDC00 + (cp & 0x3FF))));
-            qCharToBoxIndex.push_back(static_cast<int>(i));
-        }
-    }
-
-    if (pageTextStr.isEmpty() || qCharToBoxIndex.empty()) {
-        return matches;
-    }
-
-    const Qt::CaseSensitivity cs = matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
-    qsizetype pos = 0;
-
-    while (pos < pageTextStr.size()) {
-        qsizetype found = pageTextStr.indexOf(query, pos, cs);
-        if (found < 0) {
-            break;
-        }
-
-        qsizetype matchEndQ = found + query.size() - 1;
-        if (matchEndQ < static_cast<qsizetype>(qCharToBoxIndex.size())) {
-            int startBox = qCharToBoxIndex[static_cast<size_t>(found)];
-            int endBox = qCharToBoxIndex[static_cast<size_t>(matchEndQ)];
-
-            SearchMatch m;
-            m.pageIndex = pt.pageIndex;
-            m.charStartIndex = startBox;
-            m.charCount = endBox - startBox + 1;
-            m.rects = pt.getSelectionRects(startBox, endBox);
-            matches.push_back(std::move(m));
-        }
-
-        pos = found + std::max<qsizetype>(1, query.size());
-    }
-
-    return matches;
-}
-
 void RenderWorker::workerLoop() {
     int tilesRenderedSinceSearch = 0;
 
@@ -467,6 +409,8 @@ void RenderWorker::workerLoop() {
         QString searchQuery;
         bool searchMatchCase = false;
         int searchTotalPages = 0;
+        int searchPagesSearched = 0;
+        int searchMatchBudget = 0;
         bool isLastSearchPage = false;
 
         {
@@ -509,12 +453,15 @@ void RenderWorker::workerLoop() {
                 tilesRenderedSinceSearch++;
             } else if (hasSearch) {
                 hasSearchTask = true;
-                searchPageIndex = m_activeSearch.nextPageToSearch++;
+                searchPageIndex = (m_activeSearch.startPage + m_activeSearch.nextPageToSearch) % m_activeSearch.totalPages;
+                ++m_activeSearch.nextPageToSearch;
                 searchDocId = m_activeSearch.documentId;
                 searchId = m_activeSearch.searchId;
                 searchQuery = m_activeSearch.query;
                 searchMatchCase = m_activeSearch.matchCase;
                 searchTotalPages = m_activeSearch.totalPages;
+                searchPagesSearched = m_activeSearch.nextPageToSearch;
+                searchMatchBudget = std::max(0, MAX_SEARCH_MATCHES - m_activeSearch.totalMatchesFound);
                 isLastSearchPage = (m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages);
                 tilesRenderedSinceSearch = 0;
             }
@@ -574,33 +521,36 @@ void RenderWorker::workerLoop() {
             }
 
             std::vector<SearchMatch> pageMatches;
+            bool limitReached = false;
             if (m_workerDocument && m_running.load()) {
                 IPage* page = getOrLoadWorkerPage(searchPageIndex);
                 if (page) {
                     PageText pt = page->extractText();
                     pt.pageIndex = searchPageIndex;
-                    pageMatches = findTextInPage(pt, searchQuery, searchMatchCase);
+                    pageMatches = pdf::findTextInPage(pt, searchQuery, searchMatchCase, searchMatchBudget, &limitReached);
                 }
             }
 
             // Deliver matches if search is still current
             if (m_running.load() && searchId == m_currentSearchId.load() && searchDocId == m_activeDocumentId.load()) {
                 int totalSoFar = 0;
+                bool searchTruncated = false;
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     if (m_activeSearch.searchId == searchId) {
                         m_activeSearch.totalMatchesFound += static_cast<int>(pageMatches.size());
                         totalSoFar = m_activeSearch.totalMatchesFound;
+                        searchTruncated = limitReached;
                     }
                 }
 
                 if (!pageMatches.empty()) {
                     Q_EMIT searchMatchesFound(searchDocId, searchId, searchPageIndex, pageMatches);
                 }
-                Q_EMIT searchProgress(searchDocId, searchId, searchPageIndex + 1, searchTotalPages);
+                Q_EMIT searchProgress(searchDocId, searchId, searchPagesSearched, searchTotalPages);
 
-                if (isLastSearchPage) {
-                    Q_EMIT searchCompleted(searchDocId, searchId, totalSoFar);
+                if (isLastSearchPage || limitReached) {
+                    Q_EMIT searchCompleted(searchDocId, searchId, totalSoFar, searchTruncated);
                     std::lock_guard<std::mutex> lock(m_mutex);
                     if (m_activeSearch.searchId == searchId) {
                         m_activeSearch.searchId = 0;

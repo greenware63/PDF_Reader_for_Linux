@@ -24,8 +24,10 @@ public:
     /// Gives keyboard focus to search input and selects all current text.
     void focusSearch();
 
-    /// Updates match counter label (e.g. "3 of 17" or "0 of 0").
+    /// Updates match counter label (e.g. "3 of 17").
     void setMatchCount(int currentMatch, int totalMatches);
+    void setSearchingProgress(int pagesSearched, int totalPages);
+    void finishSearch(bool truncated);
 
     /// Clears query and resets counter.
     void clear();
@@ -48,12 +50,20 @@ private Q_SLOTS:
     void onCaseSensitivityToggled(bool checked);
 
 private:
+    void updateStatusLabel();
+
     QLineEdit* m_searchEdit{nullptr};
     QLabel* m_matchCountLabel{nullptr};
     QToolButton* m_prevButton{nullptr};
     QToolButton* m_nextButton{nullptr};
     QCheckBox* m_caseSensitiveCheckBox{nullptr};
     QToolButton* m_closeButton{nullptr};
+    int m_currentMatch{0};
+    int m_totalMatches{0};
+    int m_pagesSearched{0};
+    int m_totalPages{0};
+    bool m_isSearching{false};
+    bool m_matchLimitReached{false};
 };
 
 } // namespace ui
