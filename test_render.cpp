@@ -64,7 +64,6 @@ static void generateOutlinePdfFixture(const std::string& path, bool cyclicSiblin
     addObj(10, cyclicSibling
                    ? "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R /Next 7 0 R >>"
                    : "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R >>");
-
     addObj(11, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
     addObj(12, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
 
