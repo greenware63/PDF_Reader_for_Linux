@@ -12,7 +12,7 @@ namespace pdf {
 struct OutlineItem {
     QString title;
     int pageIndex{-1};          // 0-based page destination, or -1 if no destination
-    double targetYPoints{0.0};  // Target vertical position in PDF points, measured from the page bottom
+    double targetYFraction{0.0}; // Target vertical position in displayed page coordinates [0, 1]
     bool hasTargetY{false};
     std::vector<OutlineItem> children;
 
@@ -23,7 +23,7 @@ struct OutlineItem {
     bool operator==(const OutlineItem& o) const noexcept {
         return pageIndex == o.pageIndex &&
                title == o.title &&
-               targetYPoints == o.targetYPoints &&
+               targetYFraction == o.targetYFraction &&
                hasTargetY == o.hasTargetY &&
                children == o.children;
     }

@@ -25,7 +25,8 @@
 #include <cmath>
 #include <vector>
 
-static void generateOutlinePdfFixture(const std::string& path, bool cyclicSibling = false) {
+static void generateOutlinePdfFixture(const std::string& path, bool cyclicSibling = false,
+                                      bool cyclicChildToParent = false) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
     std::vector<size_t> offsets;
@@ -39,11 +40,13 @@ static void generateOutlinePdfFixture(const std::string& path, bool cyclicSiblin
     addObj(2, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>");
     addObj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
     addObj(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
-    addObj(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    addObj(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /CropBox [40 80 540 780] /Rotate 90 >>");
     addObj(6, "<< /Type /Outlines /First 7 0 R /Last 10 0 R /Count 4 >>");
     addObj(7, "<< /Title (Chapter 1) /Parent 6 0 R /Next 8 0 R /First 9 0 R /Last 9 0 R /Count 1 /Dest [3 0 R /Fit] >>");
-    addObj(8, "<< /Title (Chapter 2) /Parent 6 0 R /Prev 7 0 R /Next 10 0 R /Dest [5 0 R /XYZ 0 700 1] >>");
-    addObj(9, "<< /Title (Section 1.1) /Parent 7 0 R /Dest [3 0 R /Fit] >>");
+    addObj(8, "<< /Title (Chapter 2) /Parent 6 0 R /Prev 7 0 R /Next 10 0 R /Dest [5 0 R /XYZ 100 700 1] >>");
+    addObj(9, cyclicChildToParent
+                   ? "<< /Title (Section 1.1) /Parent 7 0 R /Next 7 0 R /Dest [3 0 R /Fit] >>"
+                   : "<< /Title (Section 1.1) /Parent 7 0 R /Dest [3 0 R /Fit] >>");
     addObj(10, cyclicSibling
                    ? "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R /Next 7 0 R >>"
                    : "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R >>");
@@ -2067,6 +2070,10 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Unexpected title/page for Chapter 2" << std::endl;
             return 1;
         }
+        if (!outline[1].hasTargetY || std::abs(outline[1].targetYFraction - 0.12) > 0.01) {
+            std::cerr << "[FAIL] Rotated CropBox bookmark target was not transformed correctly." << std::endl;
+            return 1;
+        }
 
         if (outline[2].title != "Preface" || outline[2].pageIndex != -1) {
             std::cerr << "[FAIL] Bookmark without a destination was not preserved as non-navigable." << std::endl;
@@ -2102,7 +2109,7 @@ int main(int argc, char* argv[]) {
         const int64_t bookmarkScrollY = viewer->currentDocScrollY();
         viewer->goToPage(2);
         if (bookmarkScrollY <= viewer->currentDocScrollY()) {
-            std::cerr << "[FAIL] Bookmark destination Y was not applied in PDF bottom-up coordinates." << std::endl;
+            std::cerr << "[FAIL] Bookmark destination was not applied in displayed page coordinates." << std::endl;
             return 1;
         }
 
@@ -2172,6 +2179,62 @@ int main(int argc, char* argv[]) {
         }
         if (viewer->outline().size() != 3) {
             std::cerr << "[FAIL] Cyclic bookmark links did not terminate with the unique outline nodes." << std::endl;
+            return 1;
+        }
+
+        ui::MainWindow autoOpenWindow;
+        autoOpenWindow.resize(1024, 768);
+        autoOpenWindow.show();
+        QCoreApplication::processEvents();
+        auto* autoViewer = autoOpenWindow.findChild<ui::PdfViewerWidget*>();
+        auto* autoDock = autoOpenWindow.sidebarDock();
+        auto* outlineStatus = autoOpenWindow.findChild<QLabel*>(QStringLiteral("OutlineEmptyLabel"));
+        if (!autoViewer || !autoDock || !outlineStatus) {
+            std::cerr << "[FAIL] Could not inspect outline loading/sidebar states." << std::endl;
+            return 1;
+        }
+        autoViewer->renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(250));
+        autoViewer->setPrefetchEnabled(false);
+        std::string noOutlinePath = "widget_test_no_outline.pdf";
+        generateMultiPagePdf(noOutlinePath, 2);
+        int emptyOutlineEvents = 0;
+        QObject::connect(autoViewer, &ui::PdfViewerWidget::outlineReady, &autoOpenWindow,
+                         [&emptyOutlineEvents](const std::vector<pdf::OutlineItem>& items) {
+                             if (items.empty()) {
+                                 ++emptyOutlineEvents;
+                             }
+                         });
+        if (!autoOpenWindow.openFile(QString::fromStdString(noOutlinePath))) {
+            std::cerr << "[FAIL] Could not open the no-outline fixture." << std::endl;
+            return 1;
+        }
+        QElapsedTimer emptyOutlineTimer;
+        emptyOutlineTimer.start();
+        bool observedLoadingState = false;
+        while (emptyOutlineTimer.elapsed() < 3000 && emptyOutlineEvents == 0) {
+            QCoreApplication::processEvents();
+            observedLoadingState = observedLoadingState ||
+                                   outlineStatus->text() == QStringLiteral("Loading bookmarks\u2026");
+            QThread::msleep(5);
+        }
+        if (emptyOutlineEvents == 0 || !observedLoadingState ||
+            outlineStatus->text() != QStringLiteral("No bookmarks in document")) {
+            std::cerr << "[FAIL] Empty outline displayed a false no-bookmarks state while extraction was pending." << std::endl;
+            return 1;
+        }
+
+        if (!autoOpenWindow.openFile(QString::fromStdString(outlinePath))) {
+            std::cerr << "[FAIL] Could not open the outline fixture in the automatic-sidebar window." << std::endl;
+            return 1;
+        }
+        QElapsedTimer autoOutlineTimer;
+        autoOutlineTimer.start();
+        while (autoOutlineTimer.elapsed() < 3000 && autoViewer->outline().empty()) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (autoViewer->outline().empty() || !autoDock->isVisible()) {
+            std::cerr << "[FAIL] Sidebar did not open automatically for bookmarks before the user hid it." << std::endl;
             return 1;
         }
 

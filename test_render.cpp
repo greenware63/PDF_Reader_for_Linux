@@ -22,7 +22,8 @@
 // Page 1: Landscape A4 (842 x 595 pt)
 // Page 2: Rotated 90 degrees (/Rotate 90)
 // Page 3: Cropped page (MediaBox [0 0 612 792], CropBox [50 50 550 700])
-static void generateOutlinePdfFixture(const std::string& path, bool cyclicSibling = false) {
+static void generateOutlinePdfFixture(const std::string& path, bool cyclicSibling = false,
+                                      bool cyclicChildToParent = false) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
     std::vector<size_t> offsets;
@@ -45,7 +46,7 @@ static void generateOutlinePdfFixture(const std::string& path, bool cyclicSiblin
     addObj(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
 
     // 5: Page 2
-    addObj(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    addObj(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /CropBox [40 80 540 780] /Rotate 90 >>");
 
     // 6: Outlines root
     addObj(6, "<< /Type /Outlines /First 7 0 R /Last 10 0 R /Count 4 >>");
@@ -54,10 +55,12 @@ static void generateOutlinePdfFixture(const std::string& path, bool cyclicSiblin
     addObj(7, "<< /Title (Chapter 1) /Parent 6 0 R /Next 8 0 R /First 9 0 R /Last 9 0 R /Count 1 /Dest [3 0 R /Fit] >>");
 
     // 8: Bookmark Chapter 2
-    addObj(8, "<< /Title (Chapter 2) /Parent 6 0 R /Prev 7 0 R /Next 10 0 R /Dest [5 0 R /XYZ 0 700 1] >>");
+    addObj(8, "<< /Title (Chapter 2) /Parent 6 0 R /Prev 7 0 R /Next 10 0 R /Dest [5 0 R /XYZ 100 700 1] >>");
 
     // 9: Bookmark Section 1.1 (child of 7)
-    addObj(9, "<< /Title (Section 1.1) /Parent 7 0 R /Dest [3 0 R /Fit] >>");
+    addObj(9, cyclicChildToParent
+                   ? "<< /Title (Section 1.1) /Parent 7 0 R /Next 7 0 R /Dest [3 0 R /Fit] >>"
+                   : "<< /Title (Section 1.1) /Parent 7 0 R /Dest [3 0 R /Fit] >>");
     addObj(10, cyclicSibling
                    ? "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R /Next 7 0 R >>"
                    : "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R >>");
@@ -1502,6 +1505,11 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Expected pageIndex 2 for Chapter 2, got: " << outline[1].pageIndex << std::endl;
             return 1;
         }
+        if (!outline[1].hasTargetY || std::abs(outline[1].targetYFraction - 0.12) > 0.01) {
+            std::cerr << "[FAIL] Rotated CropBox destination did not map to displayed page coordinates: "
+                      << outline[1].targetYFraction << std::endl;
+            return 1;
+        }
 
         if (outline[2].title != "Preface" || outline[2].pageIndex != -1) {
             std::cerr << "[FAIL] Bookmark without a destination was not represented correctly." << std::endl;
@@ -1514,6 +1522,18 @@ int main(int argc, char* argv[]) {
         if (cyclicDoc->loadFromFile(cyclicOutlinePdf) != pdf::DocumentError::None ||
             cyclicDoc->getOutline().size() != 3) {
             std::cerr << "[FAIL] Cyclic outline links were not bounded during extraction." << std::endl;
+            return 1;
+        }
+        const std::string cyclicChildPdf = "render_test_cyclic_child_outline.pdf";
+        generateOutlinePdfFixture(cyclicChildPdf, false, true);
+        auto cyclicChildDoc = pdf::createDocument();
+        if (cyclicChildDoc->loadFromFile(cyclicChildPdf) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Could not open cyclic child-to-parent outline fixture." << std::endl;
+            return 1;
+        }
+        const auto cyclicChildOutline = cyclicChildDoc->getOutline();
+        if (cyclicChildOutline.size() != 3 || cyclicChildOutline[0].children.size() != 1) {
+            std::cerr << "[FAIL] Child-to-parent bookmark cycle was not bounded during extraction." << std::endl;
             return 1;
         }
 

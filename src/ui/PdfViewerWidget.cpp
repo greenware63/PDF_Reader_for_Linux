@@ -267,11 +267,11 @@ void PdfViewerWidget::goToPage(int pageIndex) {
     goToPageImpl(pageIndex, std::nullopt);
 }
 
-void PdfViewerWidget::goToPage(int pageIndex, double targetYPoints) {
-    goToPageImpl(pageIndex, targetYPoints);
+void PdfViewerWidget::goToPage(int pageIndex, double targetYFraction) {
+    goToPageImpl(pageIndex, targetYFraction);
 }
 
-void PdfViewerWidget::goToPageImpl(int pageIndex, std::optional<double> targetYPoints) {
+void PdfViewerWidget::goToPageImpl(int pageIndex, std::optional<double> targetYFraction) {
     if (!isDocumentOpen()) {
         return;
     }
@@ -285,10 +285,9 @@ void PdfViewerWidget::goToPageImpl(int pageIndex, std::optional<double> targetYP
     const int64_t oldScrollY = m_docScrollY;
 
     int64_t targetDocY = pl.topPixel;
-    if (targetYPoints && std::isfinite(*targetYPoints) && pl.heightPoints > 0.0) {
-        const double topDownPoints = std::clamp(pl.heightPoints - *targetYPoints, 0.0, pl.heightPoints);
-        targetDocY += static_cast<int64_t>(std::llround(
-            topDownPoints * static_cast<double>(pl.heightPixel) / pl.heightPoints));
+    if (targetYFraction && std::isfinite(*targetYFraction)) {
+        const double topDownFraction = std::clamp(*targetYFraction, 0.0, 1.0);
+        targetDocY += static_cast<int64_t>(std::llround(topDownFraction * static_cast<double>(pl.heightPixel)));
     }
 
     m_navigating = true;
