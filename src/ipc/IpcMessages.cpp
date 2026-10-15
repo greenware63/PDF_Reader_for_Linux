@@ -1,0 +1,566 @@
+#include "ipc/IpcMessages.h"
+
+namespace pdf {
+
+// DocumentError
+QDataStream& operator<<(QDataStream& out, const DocumentError& err) {
+    out << static_cast<quint32>(err);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, DocumentError& err) {
+    quint32 val = 0;
+    in >> val;
+    err = static_cast<DocumentError>(val);
+    return in;
+}
+
+// OpenResult
+QDataStream& operator<<(QDataStream& out, const OpenResult& res) {
+    out << res.error;
+    out << static_cast<qint32>(res.pageCount);
+    out << static_cast<quint32>(res.pageSizes.size());
+    for (const auto& size : res.pageSizes) {
+        out << size.first << size.second;
+    }
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, OpenResult& res) {
+    in >> res.error;
+    qint32 count = 0;
+    in >> count;
+    res.pageCount = count;
+    quint32 sizeCount = 0;
+    in >> sizeCount;
+    res.pageSizes.clear();
+    res.pageSizes.reserve(sizeCount);
+    for (quint32 i = 0; i < sizeCount; ++i) {
+        double w = 0.0, h = 0.0;
+        in >> w >> h;
+        res.pageSizes.emplace_back(w, h);
+    }
+    return in;
+}
+
+// TileKey
+QDataStream& operator<<(QDataStream& out, const TileKey& key) {
+    out << static_cast<qint64>(key.documentId);
+    out << static_cast<qint32>(key.pageIndex);
+    out << static_cast<qint32>(key.col);
+    out << static_cast<qint32>(key.row);
+    out << static_cast<qint32>(key.scaleMilli);
+    out << static_cast<qint32>(key.dprMilli);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, TileKey& key) {
+    qint64 docId = 0;
+    qint32 page = 0, col = 0, row = 0, sm = 0, dm = 0;
+    in >> docId >> page >> col >> row >> sm >> dm;
+    key.documentId = docId;
+    key.pageIndex = page;
+    key.col = col;
+    key.row = row;
+    key.scaleMilli = sm;
+    key.dprMilli = dm;
+    return in;
+}
+
+// PixelRect
+QDataStream& operator<<(QDataStream& out, const PixelRect& rect) {
+    out << static_cast<qint32>(rect.x);
+    out << static_cast<qint32>(rect.y);
+    out << static_cast<qint32>(rect.width);
+    out << static_cast<qint32>(rect.height);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, PixelRect& rect) {
+    qint32 x = 0, y = 0, w = 0, h = 0;
+    in >> x >> y >> w >> h;
+    rect.x = x;
+    rect.y = y;
+    rect.width = w;
+    rect.height = h;
+    return in;
+}
+
+// TileRenderRequest
+QDataStream& operator<<(QDataStream& out, const TileRenderRequest& req) {
+    out << static_cast<qint64>(req.documentId);
+    out << static_cast<quint64>(req.generation);
+    out << static_cast<qint32>(req.pageIndex);
+    out << req.rect;
+    out << req.scale;
+    out << req.dpr;
+    out << req.key;
+    out << static_cast<qint32>(req.priority);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, TileRenderRequest& req) {
+    qint64 docId = 0;
+    quint64 gen = 0;
+    qint32 page = 0, prio = 0;
+    in >> docId >> gen >> page >> req.rect >> req.scale >> req.dpr >> req.key >> prio;
+    req.documentId = docId;
+    req.generation = gen;
+    req.pageIndex = page;
+    req.priority = prio;
+    return in;
+}
+
+// OutlineItem
+QDataStream& operator<<(QDataStream& out, const OutlineItem& item) {
+    out << item.title;
+    out << static_cast<qint32>(item.pageIndex);
+    out << item.targetYFraction;
+    out << item.hasTargetY;
+    out << static_cast<quint32>(item.children.size());
+    for (const auto& child : item.children) {
+        out << child;
+    }
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, OutlineItem& item) {
+    in >> item.title;
+    qint32 page = 0;
+    in >> page;
+    item.pageIndex = page;
+    in >> item.targetYFraction;
+    in >> item.hasTargetY;
+    quint32 childCount = 0;
+    in >> childCount;
+    item.children.clear();
+    item.children.reserve(childCount);
+    for (quint32 i = 0; i < childCount; ++i) {
+        OutlineItem child;
+        in >> child;
+        item.children.push_back(std::move(child));
+    }
+    return in;
+}
+
+// PageCharBox
+QDataStream& operator<<(QDataStream& out, const PageCharBox& box) {
+    out << box.left << box.top << box.right << box.bottom;
+    out << static_cast<quint32>(box.unicode);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, PageCharBox& box) {
+    quint32 u = 0;
+    in >> box.left >> box.top >> box.right >> box.bottom >> u;
+    box.unicode = static_cast<char32_t>(u);
+    return in;
+}
+
+// PageText
+QDataStream& operator<<(QDataStream& out, const PageText& text) {
+    out << static_cast<qint32>(text.pageIndex);
+    out << text.widthPoints << text.heightPoints;
+    QString qstr = QString::fromStdU16String(text.text);
+    out << qstr;
+    out << static_cast<quint32>(text.chars.size());
+    for (const auto& box : text.chars) {
+        out << box;
+    }
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, PageText& text) {
+    qint32 p = 0;
+    in >> p >> text.widthPoints >> text.heightPoints;
+    text.pageIndex = p;
+    QString qstr;
+    in >> qstr;
+    text.text = qstr.toStdU16String();
+    quint32 count = 0;
+    in >> count;
+    text.chars.clear();
+    text.chars.reserve(count);
+    for (quint32 i = 0; i < count; ++i) {
+        PageCharBox box;
+        in >> box;
+        text.chars.push_back(box);
+    }
+    return in;
+}
+
+// SearchMatch
+QDataStream& operator<<(QDataStream& out, const SearchMatch& match) {
+    out << static_cast<qint32>(match.pageIndex);
+    out << static_cast<qint32>(match.charStartIndex);
+    out << static_cast<qint32>(match.charCount);
+    out << static_cast<quint32>(match.rects.size());
+    for (const auto& r : match.rects) {
+        out << r;
+    }
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, SearchMatch& match) {
+    qint32 p = 0, start = 0, len = 0;
+    in >> p >> start >> len;
+    match.pageIndex = p;
+    match.charStartIndex = start;
+    match.charCount = len;
+    quint32 count = 0;
+    in >> count;
+    match.rects.clear();
+    match.rects.reserve(count);
+    for (quint32 i = 0; i < count; ++i) {
+        PageCharBox box;
+        in >> box;
+        match.rects.push_back(box);
+    }
+    return in;
+}
+
+} // namespace pdf
+
+namespace pdf::ipc {
+
+// OpenDocumentRequest
+QDataStream& operator<<(QDataStream& out, const OpenDocumentRequest& req) {
+    out << static_cast<qint64>(req.documentId) << req.filePath << req.password;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, OpenDocumentRequest& req) {
+    qint64 id = 0;
+    in >> id >> req.filePath >> req.password;
+    req.documentId = id;
+    return in;
+}
+
+// OpenDocumentResponse
+QDataStream& operator<<(QDataStream& out, const OpenDocumentResponse& res) {
+    out << static_cast<qint64>(res.documentId) << res.result;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, OpenDocumentResponse& res) {
+    qint64 id = 0;
+    in >> id >> res.result;
+    res.documentId = id;
+    return in;
+}
+
+// CloseDocumentRequest
+QDataStream& operator<<(QDataStream& out, const CloseDocumentRequest& req) {
+    out << static_cast<qint64>(req.documentId);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, CloseDocumentRequest& req) {
+    qint64 id = 0;
+    in >> id;
+    req.documentId = id;
+    return in;
+}
+
+// GetOutlineRequest
+QDataStream& operator<<(QDataStream& out, const GetOutlineRequest& req) {
+    out << static_cast<qint64>(req.documentId);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, GetOutlineRequest& req) {
+    qint64 id = 0;
+    in >> id;
+    req.documentId = id;
+    return in;
+}
+
+// GetOutlineResponse
+QDataStream& operator<<(QDataStream& out, const GetOutlineResponse& res) {
+    out << static_cast<qint64>(res.documentId);
+    out << static_cast<quint32>(res.outline.size());
+    for (const auto& item : res.outline) {
+        out << item;
+    }
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, GetOutlineResponse& res) {
+    qint64 id = 0;
+    in >> id;
+    res.documentId = id;
+    quint32 count = 0;
+    in >> count;
+    res.outline.clear();
+    res.outline.reserve(count);
+    for (quint32 i = 0; i < count; ++i) {
+        OutlineItem item;
+        in >> item;
+        res.outline.push_back(std::move(item));
+    }
+    return in;
+}
+
+// RenderTileRequest
+QDataStream& operator<<(QDataStream& out, const RenderTileRequest& req) {
+    out << req.request;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, RenderTileRequest& req) {
+    in >> req.request;
+    return in;
+}
+
+// TileRenderedResponse
+QDataStream& operator<<(QDataStream& out, const TileRenderedResponse& res) {
+    out << static_cast<qint64>(res.documentId);
+    out << static_cast<quint64>(res.generation);
+    out << res.key;
+    out << static_cast<qint32>(res.width);
+    out << static_cast<qint32>(res.height);
+    out << static_cast<qint32>(res.stride);
+    out << static_cast<quint32>(res.format);
+    out << res.isShm;
+    out << res.shmKey;
+    out << res.pixelData;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, TileRenderedResponse& res) {
+    qint64 docId = 0;
+    quint64 gen = 0;
+    qint32 w = 0, h = 0, stride = 0;
+    quint32 fmt = 0;
+    in >> docId >> gen >> res.key >> w >> h >> stride >> fmt >> res.isShm >> res.shmKey >> res.pixelData;
+    res.documentId = docId;
+    res.generation = gen;
+    res.width = w;
+    res.height = h;
+    res.stride = stride;
+    res.format = fmt;
+    return in;
+}
+
+// TileFailedResponse
+QDataStream& operator<<(QDataStream& out, const TileFailedResponse& res) {
+    out << static_cast<qint64>(res.documentId);
+    out << static_cast<quint64>(res.generation);
+    out << res.key;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, TileFailedResponse& res) {
+    qint64 docId = 0;
+    quint64 gen = 0;
+    in >> docId >> gen >> res.key;
+    res.documentId = docId;
+    res.generation = gen;
+    return in;
+}
+
+// CancelRenderRequest
+QDataStream& operator<<(QDataStream& out, const CancelRenderRequest& req) {
+    out << static_cast<qint64>(req.documentId);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, CancelRenderRequest& req) {
+    qint64 id = 0;
+    in >> id;
+    req.documentId = id;
+    return in;
+}
+
+// SetGenerationRequest
+QDataStream& operator<<(QDataStream& out, const SetGenerationRequest& req) {
+    out << static_cast<quint64>(req.generation);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, SetGenerationRequest& req) {
+    quint64 gen = 0;
+    in >> gen;
+    req.generation = gen;
+    return in;
+}
+
+// PageTextRequest
+QDataStream& operator<<(QDataStream& out, const PageTextRequest& req) {
+    out << static_cast<qint64>(req.documentId);
+    out << static_cast<qint32>(req.pageIndex);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, PageTextRequest& req) {
+    qint64 id = 0;
+    qint32 p = 0;
+    in >> id >> p;
+    req.documentId = id;
+    req.pageIndex = p;
+    return in;
+}
+
+// PageTextResponse
+QDataStream& operator<<(QDataStream& out, const PageTextResponse& res) {
+    out << static_cast<qint64>(res.documentId);
+    out << static_cast<qint32>(res.pageIndex);
+    out << res.success;
+    out << res.pageText;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, PageTextResponse& res) {
+    qint64 id = 0;
+    qint32 p = 0;
+    in >> id >> p >> res.success >> res.pageText;
+    res.documentId = id;
+    res.pageIndex = p;
+    return in;
+}
+
+// StartSearchRequest
+QDataStream& operator<<(QDataStream& out, const StartSearchRequest& req) {
+    out << static_cast<qint64>(req.documentId);
+    out << static_cast<qint64>(req.searchId);
+    out << req.query;
+    out << req.matchCase;
+    out << static_cast<qint32>(req.totalPages);
+    out << static_cast<qint32>(req.startPage);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, StartSearchRequest& req) {
+    qint64 docId = 0, sId = 0;
+    qint32 total = 0, start = 0;
+    in >> docId >> sId >> req.query >> req.matchCase >> total >> start;
+    req.documentId = docId;
+    req.searchId = sId;
+    req.totalPages = total;
+    req.startPage = start;
+    return in;
+}
+
+// CancelSearchRequest
+QDataStream& operator<<(QDataStream& out, const CancelSearchRequest& req) {
+    out << static_cast<qint64>(req.searchId);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, CancelSearchRequest& req) {
+    qint64 id = 0;
+    in >> id;
+    req.searchId = id;
+    return in;
+}
+
+// SearchMatchesFoundResponse
+QDataStream& operator<<(QDataStream& out, const SearchMatchesFoundResponse& res) {
+    out << static_cast<qint64>(res.documentId);
+    out << static_cast<qint64>(res.searchId);
+    out << static_cast<qint32>(res.pageIndex);
+    out << static_cast<quint32>(res.matches.size());
+    for (const auto& m : res.matches) {
+        out << m;
+    }
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, SearchMatchesFoundResponse& res) {
+    qint64 docId = 0, sId = 0;
+    qint32 p = 0;
+    in >> docId >> sId >> p;
+    res.documentId = docId;
+    res.searchId = sId;
+    res.pageIndex = p;
+    quint32 count = 0;
+    in >> count;
+    res.matches.clear();
+    res.matches.reserve(count);
+    for (quint32 i = 0; i < count; ++i) {
+        SearchMatch m;
+        in >> m;
+        res.matches.push_back(std::move(m));
+    }
+    return in;
+}
+
+// SearchProgressResponse
+QDataStream& operator<<(QDataStream& out, const SearchProgressResponse& res) {
+    out << static_cast<qint64>(res.documentId);
+    out << static_cast<qint64>(res.searchId);
+    out << static_cast<qint32>(res.pagesSearched);
+    out << static_cast<qint32>(res.totalPages);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, SearchProgressResponse& res) {
+    qint64 docId = 0, sId = 0;
+    qint32 searched = 0, total = 0;
+    in >> docId >> sId >> searched >> total;
+    res.documentId = docId;
+    res.searchId = sId;
+    res.pagesSearched = searched;
+    res.totalPages = total;
+    return in;
+}
+
+// SearchCompletedResponse
+QDataStream& operator<<(QDataStream& out, const SearchCompletedResponse& res) {
+    out << static_cast<qint64>(res.documentId);
+    out << static_cast<qint64>(res.searchId);
+    out << static_cast<qint32>(res.totalMatches);
+    out << res.truncated;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, SearchCompletedResponse& res) {
+    qint64 docId = 0, sId = 0;
+    qint32 matches = 0;
+    in >> docId >> sId >> matches >> res.truncated;
+    res.documentId = docId;
+    res.searchId = sId;
+    res.totalMatches = matches;
+    return in;
+}
+
+// PingRequest
+QDataStream& operator<<(QDataStream& out, const PingRequest& req) {
+    out << static_cast<quint64>(req.seq);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, PingRequest& req) {
+    quint64 s = 0;
+    in >> s;
+    req.seq = s;
+    return in;
+}
+
+// PongResponse
+QDataStream& operator<<(QDataStream& out, const PongResponse& res) {
+    out << static_cast<quint64>(res.seq);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, PongResponse& res) {
+    quint64 s = 0;
+    in >> s;
+    res.seq = s;
+    return in;
+}
+
+// WorkerErrorResponse
+QDataStream& operator<<(QDataStream& out, const WorkerErrorResponse& res) {
+    out << static_cast<qint64>(res.documentId) << res.errorMessage;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, WorkerErrorResponse& res) {
+    qint64 id = 0;
+    in >> id >> res.errorMessage;
+    res.documentId = id;
+    return in;
+}
+
+} // namespace pdf::ipc

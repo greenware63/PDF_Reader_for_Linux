@@ -1,0 +1,53 @@
+#pragma once
+
+#include <QObject>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QByteArray>
+#include <memory>
+#include "ipc/IpcProtocol.h"
+#include "ipc/IpcMessages.h"
+#include "engine/RenderWorker.h"
+
+namespace pdf::worker {
+
+class WorkerServer : public QObject {
+    Q_OBJECT
+
+public:
+    explicit WorkerServer(const QString& serverName, QObject* parent = nullptr);
+    ~WorkerServer() override;
+
+    bool start();
+
+Q_SIGNALS:
+    void clientDisconnected();
+
+private Q_SLOTS:
+    void onNewConnection();
+    void onReadyRead();
+    void onSocketDisconnected();
+
+    // RenderWorker forwarders
+    void onDocumentOpened(int64_t documentId, pdf::OpenResult result);
+    void onTileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key, const pdf::PixelBuffer& buffer);
+    void onTileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key);
+    void onDocumentOutlineReady(int64_t documentId, const std::vector<pdf::OutlineItem>& outline);
+    void onPageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
+    void onSearchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
+    void onSearchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);
+    void onSearchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated);
+
+private:
+    void dispatchMessage(ipc::MessageType type, const QByteArray& payload);
+    void sendPacket(ipc::MessageType type, const QByteArray& payload);
+
+    QString m_serverName;
+    QLocalServer* m_server{nullptr};
+    QLocalSocket* m_clientSocket{nullptr};
+    QByteArray m_incomingBuffer;
+
+    pdf::RenderWorker m_engineWorker;
+};
+
+} // namespace pdf::worker

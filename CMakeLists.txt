@@ -46,7 +46,7 @@ if(WIN32 AND NOT DEFINED CMAKE_PREFIX_PATH AND NOT DEFINED ENV{CMAKE_PREFIX_PATH
     endif()
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 
 # Fetch prebuilt PDFium binaries with cryptographic SHA256 hash verification
 include(FetchContent)
@@ -143,6 +143,44 @@ target_link_libraries(pdf_engine PUBLIC
     pdfium
 )
 
+# Standalone IPC library for protocol messages and serialization
+add_library(pdf_ipc STATIC
+    include/ipc/IpcProtocol.h
+    include/ipc/IpcMessages.h
+    src/ipc/IpcMessages.cpp
+)
+
+target_include_directories(pdf_ipc PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(pdf_ipc PUBLIC
+    pdf_layout
+    pdf_cache
+    Qt6::Core
+    Qt6::Network
+)
+
+# Sandboxed PDFium rendering engine worker process
+add_executable(pdf_worker
+    src/worker/main.cpp
+    src/worker/WorkerServer.h
+    src/worker/WorkerServer.cpp
+)
+
+target_include_directories(pdf_worker PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(pdf_worker PRIVATE
+    pdf_ipc
+    pdf_engine
+    Qt6::Core
+    Qt6::Network
+)
+
 # Main desktop application executable
 add_executable(pdf-reader
     main.cpp
@@ -235,6 +273,22 @@ target_link_libraries(test_password_prompt PRIVATE
     pdf_engine
 )
 
+# Unit test for sandboxed worker IPC, lifecycle, and crash isolation
+add_executable(test_worker_ipc
+    test_worker_ipc.cpp
+)
+
+target_include_directories(test_worker_ipc PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(test_worker_ipc PRIVATE
+    pdf_ipc
+    Qt6::Core
+    Qt6::Network
+)
+
 # CTest registration
 enable_testing()
 add_test(
@@ -264,6 +318,11 @@ add_test(
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/encrypted.pdf"
 )
 
+add_test(
+    NAME WorkerIpcTestSuite
+    COMMAND test_worker_ipc "$<TARGET_FILE:pdf_worker>" "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
+)
+
 if(WIN32)
     get_filename_component(COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     get_filename_component(QT_BIN_DIR "${Qt6Core_DIR}/../../../bin" ABSOLUTE)
@@ -284,6 +343,9 @@ if(WIN32)
     set_tests_properties(PasswordPromptTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
     )
+    set_tests_properties(WorkerIpcTestSuite PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
+    )
 endif()
 
 # Scoped workaround specifically for Windows MinGW GCC >= 15 toolchain (CWG 2387 bug in Qt 6.7.2 qcomparehelpers.h)
@@ -292,6 +354,8 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION
     target_link_options(test_render PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_widget PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_password_prompt PRIVATE -Wl,--allow-multiple-definition)
+    target_link_options(pdf_worker PRIVATE -Wl,--allow-multiple-definition)
+    target_link_options(test_worker_ipc PRIVATE -Wl,--allow-multiple-definition)
 endif()
 
 # Deployment & RPATH handling
@@ -320,6 +384,12 @@ if(WIN32)
             "$<TARGET_FILE_DIR:test_password_prompt>"
         COMMENT "Deploying pdfium.dll next to test_password_prompt"
     )
+    add_custom_command(TARGET pdf_worker POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${pdfium_binaries_SOURCE_DIR}/bin/pdfium.dll"
+            "$<TARGET_FILE_DIR:pdf_worker>"
+        COMMENT "Deploying pdfium.dll next to pdf_worker"
+    )
 elseif(UNIX AND NOT APPLE)
     set_target_properties(pdf-reader PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
@@ -334,6 +404,10 @@ elseif(UNIX AND NOT APPLE)
         INSTALL_RPATH "$ORIGIN/../lib"
     )
     set_target_properties(test_password_prompt PROPERTIES
+        BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../lib"
+    )
+    set_target_properties(pdf_worker PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../lib"
     )
