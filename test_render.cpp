@@ -37,7 +37,7 @@ static void generateOutlinePdfFixture(const std::string& path, bool cyclicSiblin
     addObj(1, "<< /Type /Catalog /Pages 2 0 R /Outlines 6 0 R >>");
 
     // 2: Pages
-    addObj(2, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>");
+    addObj(2, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 11 0 R 12 0 R] /Count 5 >>");
 
     // 3: Page 0
     addObj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
@@ -64,6 +64,9 @@ static void generateOutlinePdfFixture(const std::string& path, bool cyclicSiblin
     addObj(10, cyclicSibling
                    ? "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R /Next 7 0 R >>"
                    : "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R >>");
+
+    addObj(11, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    addObj(12, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
 
     size_t xrefOffset = pdf.size();
     pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";

@@ -107,7 +107,6 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_layout.setPageSizes(openResult.pageSizes);
     m_outline.clear();
     m_outlineRequestPending = true;
-    Q_EMIT outlineReady(m_outline);
 
     m_currentPage = 0;
     m_docScrollX = 0;
