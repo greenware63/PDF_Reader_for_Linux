@@ -52,6 +52,9 @@ int main(int argc, char* argv[]) {
     }
 
     QLocalSocket client;
+#ifdef Q_OS_LINUX
+    client.setSocketOptions(QLocalSocket::AbstractNamespaceOption);
+#endif
     bool connected = waitFor([&]() {
         if (client.state() != QLocalSocket::ConnectedState && client.state() != QLocalSocket::ConnectingState) {
             client.connectToServer(socketName);
@@ -285,6 +288,9 @@ int main(int argc, char* argv[]) {
     }
 
     QLocalSocket crashClient;
+#ifdef Q_OS_LINUX
+    crashClient.setSocketOptions(QLocalSocket::AbstractNamespaceOption);
+#endif
     bool crashConnected = waitFor([&]() {
         if (crashClient.state() != QLocalSocket::ConnectedState) {
             crashClient.connectToServer(crashSocketName);

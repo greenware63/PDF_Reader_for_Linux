@@ -61,13 +61,20 @@ WorkerServer::~WorkerServer() {
     }
     if (m_server) {
         m_server->close();
+#ifndef Q_OS_LINUX
         QLocalServer::removeServer(m_serverName);
+#endif
     }
 }
 
 bool WorkerServer::start() {
+#ifndef Q_OS_LINUX
     QLocalServer::removeServer(m_serverName);
+#endif
     m_server = new QLocalServer(this);
+#ifdef Q_OS_LINUX
+    m_server->setSocketOptions(QLocalServer::AbstractNamespaceOption);
+#endif
     connect(m_server, &QLocalServer::newConnection, this, &WorkerServer::onNewConnection);
     return m_server->listen(m_serverName);
 }

@@ -93,6 +93,9 @@ void WorkerClient::tryConnect() {
         m_process.state() == QProcess::NotRunning) {
         return;
     }
+#ifdef Q_OS_LINUX
+    m_socket.setSocketOptions(QLocalSocket::AbstractNamespaceOption);
+#endif
     m_socket.connectToServer(m_serverName);
 }
 

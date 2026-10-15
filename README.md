@@ -16,7 +16,7 @@ A high-performance, native PDF workstation for Linux designed with an Adobe Pro-
 - **In-Memory Lifetime Safety**: In-memory byte buffers are tied to the document handle's custom deleter, ensuring zero dangling pointer access during lifetime overlaps.
 - **Non-Destructive Loading & Restoration**: Failed document opens (corrupt file, wrong password, missing file) preserve any currently active document and its render queue intact.
 
-The worker process boundary is not an OS sandbox: Linux currently uses parent-death signaling, but seccomp and Landlock confinement are not implemented.
+On Linux, the worker enables `PR_SET_PDEATHSIG` and requires `PR_SET_NO_NEW_PRIVS` plus Landlock. Reads remain unrestricted so the worker can open PDFs selected from arbitrary locations. Filesystem writes and creation/removal operations are denied by default, with a scoped `/dev/shm` allowance for the shared-memory tile transport. The IPC socket uses Linux's abstract namespace, so it does not need a filesystem-write exception. This is filesystem write confinement, not a complete sandbox; seccomp and read-path confinement are not implemented. If required setup fails or the kernel lacks Landlock, the worker exits instead of running with weaker isolation.
 
 ## Security Hardening & Compiler Diagnostics
 
