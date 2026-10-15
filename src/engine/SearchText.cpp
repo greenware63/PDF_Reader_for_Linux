@@ -11,15 +11,24 @@ struct NormalizedText {
     std::vector<int> charToBox;
 };
 
-bool isIgnoredJoiner(char32_t cp) {
-    return cp == 0x200C || cp == 0x200D || cp == 0x0640;
+bool isIgnoredCodePoint(char32_t cp) {
+    return cp == 0x200C || cp == 0x200D || cp == 0x0640 ||
+           (cp >= 0x064B && cp <= 0x065F) || cp == 0x0670;
 }
 
 char32_t normalizePersianCharacter(char32_t cp) {
     switch (cp) {
         case 0x0643: return 0x06A9; // Arabic kaf -> Persian keheh
+        case 0x06AA: return 0x06A9; // Swash kaf -> Persian keheh
         case 0x064A: // Arabic yeh
-        case 0x0649: return 0x06CC; // alef maksura -> Persian yeh
+        case 0x0649: // Alef maksura
+        case 0x06CD: return 0x06CC; // Yeh with tail -> Persian yeh
+        case 0x0622: // Alef with madda above
+        case 0x0623: // Alef with hamza above
+        case 0x0625: // Alef with hamza below
+        case 0x0671: return 0x0627; // Alef wasla -> bare alef
+        case 0x0629: // Teh marbuta
+        case 0x06C0: return 0x0647; // Heh with yeh above -> heh
         default:
             if (cp >= 0x0660 && cp <= 0x0669) {
                 return U'0' + (cp - 0x0660);
@@ -53,7 +62,7 @@ NormalizedText normalizeText(qsizetype length, CodePointAt codePointAt, bool map
     for (qsizetype i = 0; i < length;) {
         const char32_t cp = codePointAt(i);
         const qsizetype units = (cp > 0xFFFF) ? 2 : 1;
-        if (isIgnoredJoiner(cp)) {
+        if (isIgnoredCodePoint(cp)) {
             i += units;
             continue;
         }
@@ -128,7 +137,7 @@ std::vector<SearchMatch> findTextInPage(
     bool previousWasSpace = false;
     for (size_t i = 0; i < pageText.chars.size(); ++i) {
         const char32_t cp = pageText.chars[i].unicode;
-        if (cp == 0 || isIgnoredJoiner(cp)) {
+        if (cp == 0 || isIgnoredCodePoint(cp)) {
             continue;
         }
         const QString codePoint = QString::fromUcs4(&cp, 1);

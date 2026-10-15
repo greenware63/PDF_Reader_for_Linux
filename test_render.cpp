@@ -1361,6 +1361,23 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        pdf::PageText orthographicPage;
+        orthographicPage.pageIndex = 6;
+        const std::u32string orthographicSource = U"آموزش أَ إِ ٱ ة ۀ ڪ ى ي";
+        for (size_t i = 0; i < orthographicSource.size(); ++i) {
+            const double left = static_cast<double>(i * 10);
+            orthographicPage.chars.push_back({left, 0.0, left + 8.0, 12.0, orthographicSource[i]});
+        }
+        const std::u32string orthographicQuery = U"اموزش ا ا ا ه ه ک ی ی";
+        const QString orthographicQueryString = QString::fromUcs4(
+            orthographicQuery.data(), static_cast<qsizetype>(orthographicQuery.size()));
+        const auto orthographicMatches = pdf::findTextInPage(
+            orthographicPage, orthographicQueryString, false, 10);
+        if (orthographicMatches.size() != 1) {
+            std::cerr << "[FAIL] Alef, teh marbuta, harakat, swash kaf, or yeh variants failed normalization." << std::endl;
+            return 1;
+        }
+
         pdf::PageText repeatedPage;
         repeatedPage.pageIndex = 5;
         repeatedPage.chars.reserve(static_cast<size_t>(pdf::MAX_SEARCH_MATCHES + 2));

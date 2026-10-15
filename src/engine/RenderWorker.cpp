@@ -523,7 +523,7 @@ void RenderWorker::workerLoop() {
             std::vector<SearchMatch> pageMatches;
             bool limitReached = false;
             if (m_workerDocument && m_running.load()) {
-                IPage* page = getOrLoadWorkerPage(searchPageIndex);
+                auto page = m_workerDocument->getPage(searchPageIndex);
                 if (page) {
                     PageText pt = page->extractText();
                     pt.pageIndex = searchPageIndex;

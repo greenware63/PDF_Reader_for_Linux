@@ -900,6 +900,7 @@ void PdfViewerWidget::findText(const QString& query, bool matchCase) {
     const int64_t searchId = ++m_currentSearchId;
     m_searchQuery = query;
     m_searchMatchCase = matchCase;
+    m_searchStartPage = m_currentPage;
     m_searchMatches.clear();
     m_currentMatchIndex = -1;
     m_renderWorker.cancelSearch();
@@ -955,14 +956,41 @@ void PdfViewerWidget::onSearchMatchesFound(int64_t documentId, int64_t searchId,
         return;
     }
 
-    bool wasEmpty = m_searchMatches.empty();
+    const bool hadSelection = m_currentMatchIndex >= 0 &&
+        m_currentMatchIndex < static_cast<int>(m_searchMatches.size());
+    const pdf::SearchMatch selectedMatch = hadSelection
+        ? m_searchMatches[static_cast<size_t>(m_currentMatchIndex)]
+        : pdf::SearchMatch{};
     const size_t remaining = static_cast<size_t>(std::max(0, pdf::MAX_SEARCH_MATCHES - static_cast<int>(m_searchMatches.size())));
     const size_t count = std::min(remaining, matches.size());
     m_searchMatches.insert(m_searchMatches.end(), matches.begin(), matches.begin() + static_cast<std::ptrdiff_t>(count));
+    std::sort(m_searchMatches.begin(), m_searchMatches.end(), [](const pdf::SearchMatch& lhs, const pdf::SearchMatch& rhs) {
+        if (lhs.pageIndex != rhs.pageIndex) {
+            return lhs.pageIndex < rhs.pageIndex;
+        }
+        return lhs.charStartIndex < rhs.charStartIndex;
+    });
 
-    if (wasEmpty && !m_searchMatches.empty()) {
-        m_currentMatchIndex = 0;
-        scrollToMatch(m_searchMatches[0]);
+    if (hadSelection) {
+        const auto selectedIt = std::find(m_searchMatches.begin(), m_searchMatches.end(), selectedMatch);
+        m_currentMatchIndex = selectedIt == m_searchMatches.end()
+            ? -1
+            : static_cast<int>(std::distance(m_searchMatches.begin(), selectedIt));
+    } else if (!m_searchMatches.empty()) {
+        const auto circularDistance = [this](int pageIndex) {
+            return (pageIndex - m_searchStartPage + pageCount()) % pageCount();
+        };
+        const auto nearestIt = std::min_element(m_searchMatches.begin(), m_searchMatches.end(),
+            [&circularDistance](const pdf::SearchMatch& lhs, const pdf::SearchMatch& rhs) {
+                const int lhsDistance = circularDistance(lhs.pageIndex);
+                const int rhsDistance = circularDistance(rhs.pageIndex);
+                if (lhsDistance != rhsDistance) {
+                    return lhsDistance < rhsDistance;
+                }
+                return lhs.charStartIndex < rhs.charStartIndex;
+            });
+        m_currentMatchIndex = static_cast<int>(std::distance(m_searchMatches.begin(), nearestIt));
+        scrollToMatch(*nearestIt);
     }
 
     Q_EMIT searchResultsChanged(m_currentMatchIndex + 1, static_cast<int>(m_searchMatches.size()));

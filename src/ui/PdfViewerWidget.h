@@ -244,6 +244,7 @@ private:
     int64_t m_currentSearchId{0};
     QString m_searchQuery;
     bool m_searchMatchCase{false};
+    int m_searchStartPage{0};
     std::vector<pdf::SearchMatch> m_searchMatches;
     int m_currentMatchIndex{-1};
 };

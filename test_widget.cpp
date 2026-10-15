@@ -834,8 +834,15 @@ int main(int argc, char* argv[]) {
                       << ", expected in range [1, 16]" << std::endl;
             return 1;
         }
+        worker.startSearch(500, 1, QStringLiteral("a"), false, 200);
+        worker.waitForIdle();
+        if (worker.cachedPageCount() != cachedPages) {
+            std::cerr << "[FAIL] Background search changed the render worker page cache from "
+                      << cachedPages << " to " << worker.cachedPageCount() << std::endl;
+            return 1;
+        }
         std::cout << "  -> Passed: 200-page document load kept worker page cache strictly bounded at " 
-                  << cachedPages << " <= 64 pages." << std::endl;
+                  << cachedPages << " <= 64 pages, unchanged by background search." << std::endl;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1782,9 +1789,16 @@ int main(int argc, char* argv[]) {
         viewer.renderWorker().waitForIdle();
         QCoreApplication::processEvents();
         if (viewer.searchMatchCount() != 2 ||
-            viewer.searchMatches()[0].pageIndex != 1 ||
-            viewer.searchMatches()[1].pageIndex != 0) {
-            std::cerr << "[FAIL] Search from page 1 did not return its nearest-page match first." << std::endl;
+            viewer.searchMatches()[0].pageIndex != 0 ||
+            viewer.searchMatches()[1].pageIndex != 1 ||
+            viewer.currentSearchMatchIndex() != 1) {
+            std::cerr << "[FAIL] Search results were not in document order with the nearest match selected." << std::endl;
+            return 1;
+        }
+        viewer.findNext();
+        if (viewer.currentSearchMatchIndex() != 0 ||
+            viewer.searchMatches()[static_cast<size_t>(viewer.currentSearchMatchIndex())].pageIndex != 0) {
+            std::cerr << "[FAIL] Find Next did not continue in document order from the nearest match." << std::endl;
             return 1;
         }
 
