@@ -2,6 +2,7 @@
 #include "ThumbnailListWidget.h"
 #include <QDockWidget>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QTreeView>
 #include <QStandardItemModel>
 #include <QStandardItem>
@@ -18,6 +19,8 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <QSettings>
+#include <QDir>
 #include <cmath>
 
 namespace ui {
@@ -90,15 +93,19 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
     setupUi();
     setupActions();
+    loadRecentFiles();
+    connect(m_docTabs, &QTabWidget::currentChanged, this, &MainWindow::onCurrentTabChanged);
     setWindowTitle(tr("PDF Reader - Linux Prototype"));
     resize(1024, 768);
 }
 
 MainWindow::~MainWindow() {
-    // The dock is destroyed by ~QMainWindow, after this object's own destructor has finished. Without this,
-    // its visibilityChanged lambda would run on a half-destroyed MainWindow (UBSan: vptr check).
+    // The dock and tabs are destroyed by ~QMainWindow, after this object's own destructor has finished.
     if (m_sidebarDock) {
         QObject::disconnect(m_sidebarDock, nullptr, this, nullptr);
+    }
+    if (m_docTabs) {
+        QObject::disconnect(m_docTabs, nullptr, this, nullptr);
     }
 }
 
@@ -112,28 +119,58 @@ void MainWindow::setupUi() {
     m_findBar->hide();
     layout->addWidget(m_findBar);
 
-    m_viewer = new PdfViewerWidget(central);
-    layout->addWidget(m_viewer, 1);
-
-    setCentralWidget(central);
-
-    connect(m_viewer, &PdfViewerWidget::documentLoaded, this, &MainWindow::onDocumentLoaded);
-    connect(m_viewer, &PdfViewerWidget::pageChanged, this, &MainWindow::onPageChanged);
-    connect(m_viewer, &PdfViewerWidget::zoomChanged, this, &MainWindow::onZoomChanged);
-    connect(m_viewer, &PdfViewerWidget::loadError, this, &MainWindow::onLoadError);
-    connect(m_viewer, &PdfViewerWidget::documentOpenFailed, this, &MainWindow::onDocumentOpenFailed);
-    connect(m_viewer, &PdfViewerWidget::loadingChanged, this, &MainWindow::onLoadingChanged);
-
-    connect(m_findBar, &FindBar::searchRequested, m_viewer, &PdfViewerWidget::findText);
-    connect(m_findBar, &FindBar::findNextRequested, m_viewer, &PdfViewerWidget::findNext);
-    connect(m_findBar, &FindBar::findPreviousRequested, m_viewer, &PdfViewerWidget::findPrevious);
-    connect(m_findBar, &FindBar::closed, this, [this]() {
-        m_viewer->clearSearch();
-        m_viewer->setFocus();
+    connect(m_findBar, &FindBar::searchRequested, this, [this](const QString& q, bool mc) {
+        if (auto* v = currentViewer()) v->findText(q, mc);
     });
-    connect(m_viewer, &PdfViewerWidget::searchResultsChanged, m_findBar, &FindBar::setMatchCount);
-    connect(m_viewer, &PdfViewerWidget::searchProgressChanged, m_findBar, &FindBar::setSearchingProgress);
-    connect(m_viewer, &PdfViewerWidget::searchFinished, m_findBar, &FindBar::finishSearch);
+    connect(m_findBar, &FindBar::findNextRequested, this, [this]() {
+        if (auto* v = currentViewer()) v->findNext();
+    });
+    connect(m_findBar, &FindBar::findPreviousRequested, this, [this]() {
+        if (auto* v = currentViewer()) v->findPrevious();
+    });
+    connect(m_findBar, &FindBar::closed, this, [this]() {
+        if (auto* v = currentViewer()) {
+            v->clearSearch();
+            v->setFocus();
+        }
+    });
+
+    // Multi-document tab widget in central area
+    m_docTabs = new QTabWidget(central);
+    m_docTabs->setObjectName(QStringLiteral("DocumentTabs"));
+    m_docTabs->setTabsClosable(true);
+    m_docTabs->setMovable(true);
+    m_docTabs->setDocumentMode(true);
+    m_docTabs->setStyleSheet(QStringLiteral(
+        "QTabWidget::pane {"
+        "    border: none;"
+        "    background-color: #323639;"
+        "}"
+        "QTabBar::tab {"
+        "    background: #25282a;"
+        "    color: #a0a0a0;"
+        "    padding: 6px 14px;"
+        "    border-top-left-radius: 4px;"
+        "    border-top-right-radius: 4px;"
+        "    margin-right: 2px;"
+        "}"
+        "QTabBar::tab:selected {"
+        "    background: #323639;"
+        "    color: #ffffff;"
+        "    font-weight: bold;"
+        "}"
+        "QTabBar::tab:hover:!selected {"
+        "    background: #2b2e31;"
+        "    color: #d0d0d0;"
+        "}"
+    ));
+
+    connect(m_docTabs, &QTabWidget::tabCloseRequested, this, &MainWindow::closeTab);
+
+    // Initial default viewer tab
+    m_viewer = createViewerTab(tr("Untitled"));
+    layout->addWidget(m_docTabs, 1);
+    setCentralWidget(central);
 
     // Sidebar dock with tabs: Thumbnails & Document Outline / Bookmarks
     m_sidebarDock = new QDockWidget(tr("Bookmarks"), this);
@@ -186,18 +223,77 @@ void MainWindow::setupUi() {
         }
     });
 
-    connect(m_viewer, &PdfViewerWidget::outlineReady, this, &MainWindow::onOutlineReady);
-
     statusBar()->showMessage(tr("Ready - Open a PDF to begin"));
+}
+
+PdfViewerWidget* MainWindow::createViewerTab(const QString& title) {
+    auto* viewer = new PdfViewerWidget(m_docTabs);
+    connectViewer(viewer);
+    const QString tabTitle = title.isEmpty() ? tr("Untitled") : title;
+    m_docTabs->addTab(viewer, tabTitle);
+    return viewer;
+}
+
+void MainWindow::connectViewer(PdfViewerWidget* viewer) {
+    connect(viewer, &PdfViewerWidget::documentLoaded, this, &MainWindow::onDocumentLoaded);
+    connect(viewer, &PdfViewerWidget::pageChanged, this, [this, viewer](int currentPage, int totalPages) {
+        if (viewer == currentViewer()) {
+            onPageChanged(currentPage, totalPages);
+        }
+    });
+    connect(viewer, &PdfViewerWidget::zoomChanged, this, [this, viewer](double zoomRatio) {
+        if (viewer == currentViewer()) {
+            onZoomChanged(zoomRatio);
+        }
+    });
+    connect(viewer, &PdfViewerWidget::loadError, this, [this, viewer](const QString& errorMessage) {
+        if (viewer == currentViewer()) {
+            onLoadError(errorMessage);
+        }
+    });
+    connect(viewer, &PdfViewerWidget::documentOpenFailed, this, &MainWindow::onDocumentOpenFailed);
+    connect(viewer, &PdfViewerWidget::loadingChanged, this, [this, viewer](bool loading, const QString& fileName) {
+        if (viewer == currentViewer()) {
+            onLoadingChanged(loading, fileName);
+        }
+    });
+    connect(viewer, &PdfViewerWidget::outlineReady, this, [this, viewer](const std::vector<pdf::OutlineItem>& outline) {
+        if (viewer == currentViewer()) {
+            onOutlineReady(outline);
+        }
+    });
+    connect(viewer, &PdfViewerWidget::searchResultsChanged, this, [this, viewer](int cur, int tot) {
+        if (viewer == currentViewer()) {
+            if (m_findBar) m_findBar->setMatchCount(cur, tot);
+        }
+    });
+    connect(viewer, &PdfViewerWidget::searchProgressChanged, this, [this, viewer](int searched, int total) {
+        if (viewer == currentViewer()) {
+            if (m_findBar) m_findBar->setSearchingProgress(searched, total);
+        }
+    });
+    connect(viewer, &PdfViewerWidget::searchFinished, this, [this, viewer](bool trunc) {
+        if (viewer == currentViewer()) {
+            if (m_findBar) m_findBar->finishSearch(trunc);
+        }
+    });
 }
 
 void MainWindow::setupActions() {
     // Menu Bar
     QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
+    QAction* newTabAction = fileMenu->addAction(tr("&New Tab"), this, &MainWindow::addNewTab);
+    newTabAction->setShortcut(QKeySequence::AddTab);
+
     QAction* openAction = fileMenu->addAction(tr("&Open PDF..."), this, &MainWindow::openFileDialog);
     openAction->setShortcut(QKeySequence::Open);
 
-    QAction* closeAction = fileMenu->addAction(tr("&Close PDF"), m_viewer, &PdfViewerWidget::closeDocument);
+    QAction* openNewTabAction = fileMenu->addAction(tr("Open in &New Tab..."), this, &MainWindow::openFileInNewTabDialog);
+    openNewTabAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O));
+
+    m_recentFilesMenu = fileMenu->addMenu(tr("Open &Recent"));
+
+    QAction* closeAction = fileMenu->addAction(tr("&Close Tab"), this, &MainWindow::closeCurrentTab);
     closeAction->setShortcut(QKeySequence::Close);
 
     fileMenu->addSeparator();
@@ -205,25 +301,41 @@ void MainWindow::setupActions() {
     exitAction->setShortcut(QKeySequence::Quit);
 
     QMenu* editMenu = menuBar()->addMenu(tr("&Edit"));
-    QAction* copyAction = editMenu->addAction(tr("&Copy"), m_viewer, &PdfViewerWidget::copySelection);
+    QAction* copyAction = editMenu->addAction(tr("&Copy"), this, [this]() {
+        if (auto* v = currentViewer()) {
+            v->copySelection();
+        }
+    });
     copyAction->setShortcut(QKeySequence::Copy);
     copyAction->setEnabled(false);
-    connect(m_viewer, &PdfViewerWidget::selectionChanged, copyAction, [this, copyAction]() {
-        copyAction->setEnabled(m_viewer->hasSelection());
-    });
 
     QAction* findAction = editMenu->addAction(tr("&Find..."), this, &MainWindow::showFindBar);
     findAction->setShortcut(QKeySequence::Find);
-    QAction* findNextAction = editMenu->addAction(tr("Find &Next"), m_viewer, &PdfViewerWidget::findNext);
+    QAction* findNextAction = editMenu->addAction(tr("Find &Next"), this, [this]() {
+        if (auto* v = currentViewer()) v->findNext();
+    });
     findNextAction->setShortcut(QKeySequence(Qt::Key_F3));
-    QAction* findPreviousAction = editMenu->addAction(tr("Find &Previous"), m_viewer, &PdfViewerWidget::findPrevious);
+    QAction* findPreviousAction = editMenu->addAction(tr("Find &Previous"), this, [this]() {
+        if (auto* v = currentViewer()) v->findPrevious();
+    });
     findPreviousAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F3));
 
     QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
     m_toggleSidebarAction = viewMenu->addAction(tr("&Sidebar"), this, [this]() {
-        m_sidebarDock->setVisible(!m_sidebarDock->isVisible());
+        if (m_sidebarDock) m_sidebarDock->setVisible(!m_sidebarDock->isVisible());
     });
     m_toggleSidebarAction->setShortcut(QKeySequence(Qt::Key_F4));
+
+    // Tab navigation shortcuts
+    auto* nextTabAction = new QAction(this);
+    nextTabAction->setShortcut(QKeySequence::NextChild);
+    connect(nextTabAction, &QAction::triggered, this, &MainWindow::selectNextTab);
+    addAction(nextTabAction);
+
+    auto* prevTabAction = new QAction(this);
+    prevTabAction->setShortcut(QKeySequence::PreviousChild);
+    connect(prevTabAction, &QAction::triggered, this, &MainWindow::selectPreviousTab);
+    addAction(prevTabAction);
 
     // Toolbar
     QToolBar* toolbar = addToolBar(tr("Main Toolbar"));
@@ -233,45 +345,261 @@ void MainWindow::setupActions() {
     toolbar->addSeparator();
 
     // Page navigation controls
-    QAction* prevAction = toolbar->addAction(tr("\u25c0 Prev"), m_viewer, &PdfViewerWidget::previousPage);
+    QAction* prevAction = toolbar->addAction(tr("\u25c0 Prev"), this, [this]() {
+        if (auto* v = currentViewer()) v->previousPage();
+    });
     prevAction->setShortcut(QKeySequence(Qt::Key_PageUp));
 
     m_pageStatusLabel = new QLabel(tr(" Page 0 / 0 "), this);
     toolbar->addWidget(m_pageStatusLabel);
 
-    QAction* nextAction = toolbar->addAction(tr("Next \u25b6"), m_viewer, &PdfViewerWidget::nextPage);
+    QAction* nextAction = toolbar->addAction(tr("Next \u25b6"), this, [this]() {
+        if (auto* v = currentViewer()) v->nextPage();
+    });
     nextAction->setShortcut(QKeySequence(Qt::Key_PageDown));
 
     toolbar->addSeparator();
 
     // Zoom controls
-    QAction* zoomOutAction = toolbar->addAction(tr("Zoom -"), m_viewer, &PdfViewerWidget::zoomOut);
+    QAction* zoomOutAction = toolbar->addAction(tr("Zoom -"), this, [this]() {
+        if (auto* v = currentViewer()) v->zoomOut();
+    });
     zoomOutAction->setShortcut(QKeySequence::ZoomOut);
 
     m_zoomStatusLabel = new QLabel(tr(" 100% "), this);
     toolbar->addWidget(m_zoomStatusLabel);
 
-    QAction* zoomInAction = toolbar->addAction(tr("Zoom +"), m_viewer, &PdfViewerWidget::zoomIn);
+    QAction* zoomInAction = toolbar->addAction(tr("Zoom +"), this, [this]() {
+        if (auto* v = currentViewer()) v->zoomIn();
+    });
     zoomInAction->setShortcut(QKeySequence::ZoomIn);
 
-    toolbar->addAction(tr("Fit Width"), m_viewer, &PdfViewerWidget::zoomFitWidth);
-    toolbar->addAction(tr("100%"), m_viewer, &PdfViewerWidget::zoomReset);
+    toolbar->addAction(tr("Fit Width"), this, [this]() {
+        if (auto* v = currentViewer()) v->zoomFitWidth();
+    });
+    toolbar->addAction(tr("100%"), this, [this]() {
+        if (auto* v = currentViewer()) v->zoomReset();
+    });
+}
+
+PdfViewerWidget* MainWindow::currentViewer() const {
+    if (m_docTabs && m_docTabs->currentIndex() >= 0) {
+        if (auto* v = qobject_cast<PdfViewerWidget*>(m_docTabs->currentWidget())) {
+            return v;
+        }
+    }
+    return m_viewer;
+}
+
+PdfViewerWidget* MainWindow::viewerAt(int index) const {
+    if (m_docTabs && index >= 0 && index < m_docTabs->count()) {
+        return qobject_cast<PdfViewerWidget*>(m_docTabs->widget(index));
+    }
+    return nullptr;
+}
+
+int MainWindow::tabCount() const noexcept {
+    return m_docTabs ? m_docTabs->count() : 0;
 }
 
 void MainWindow::showFindBar() {
-    if (m_viewer->isDocumentOpen()) {
-        m_findBar->focusSearch();
+    if (auto* v = currentViewer()) {
+        if (v->isDocumentOpen() && m_findBar) {
+            m_findBar->focusSearch();
+        }
     }
 }
 
-bool MainWindow::openFile(const QString& filePath) {
+bool MainWindow::openFile(const QString& filePath, bool inNewTab) {
     if (filePath.isEmpty()) {
         return false;
     }
-    // Non-blocking: the window stays responsive while the file loads; results arrive via
-    // documentLoaded() / loadError().
-    m_viewer->openDocumentAsync(filePath);
+    if (inNewTab) {
+        openFileInNewTab(filePath);
+        return true;
+    }
+    auto* viewer = currentViewer();
+    if (!viewer) {
+        viewer = createViewerTab();
+    }
+    viewer->openDocumentAsync(filePath);
     return true;
+}
+
+int MainWindow::openFileInNewTab(const QString& filePath) {
+    if (filePath.isEmpty()) {
+        return -1;
+    }
+    const QString title = QFileInfo(filePath).fileName();
+    auto* viewer = createViewerTab(title);
+    const int newIndex = m_docTabs->indexOf(viewer);
+    m_docTabs->setCurrentIndex(newIndex);
+    viewer->openDocumentAsync(filePath);
+    return newIndex;
+}
+
+int MainWindow::addNewTab() {
+    auto* viewer = createViewerTab(tr("Untitled"));
+    const int newIndex = m_docTabs->indexOf(viewer);
+    m_docTabs->setCurrentIndex(newIndex);
+    return newIndex;
+}
+
+void MainWindow::closeCurrentTab() {
+    if (m_docTabs) {
+        closeTab(m_docTabs->currentIndex());
+    }
+}
+
+void MainWindow::closeTab(int index) {
+    if (!m_docTabs || index < 0 || index >= m_docTabs->count()) {
+        return;
+    }
+    auto* viewer = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(index));
+    if (m_docTabs->count() > 1) {
+        if (viewer) {
+            viewer->closeDocument();
+        }
+        m_docTabs->removeTab(index);
+        if (viewer) {
+            viewer->deleteLater();
+        }
+    } else {
+        // Last remaining tab: keep it as empty/untitled
+        m_docTabs->setTabText(0, tr("Untitled"));
+        m_docTabs->setTabToolTip(0, QString());
+        if (viewer) {
+            viewer->closeDocument();
+        }
+        onCurrentTabChanged(0);
+    }
+}
+
+void MainWindow::selectNextTab() {
+    if (m_docTabs && m_docTabs->count() > 1) {
+        m_docTabs->setCurrentIndex((m_docTabs->currentIndex() + 1) % m_docTabs->count());
+    }
+}
+
+void MainWindow::selectPreviousTab() {
+    if (m_docTabs && m_docTabs->count() > 1) {
+        m_docTabs->setCurrentIndex((m_docTabs->currentIndex() - 1 + m_docTabs->count()) % m_docTabs->count());
+    }
+}
+
+void MainWindow::onCurrentTabChanged(int index) {
+    if (index < 0 || !m_docTabs) {
+        return;
+    }
+    m_viewer = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(index));
+    if (!m_viewer) {
+        return;
+    }
+
+    if (m_thumbnailWidget) {
+        m_thumbnailWidget->setViewer(m_viewer);
+    }
+
+    if (m_viewer->isDocumentOpen()) {
+        const QString fileName = QFileInfo(m_viewer->currentFilePath()).fileName();
+        setWindowTitle(tr("%1 - PDF Reader").arg(fileName.isEmpty() ? m_docTabs->tabText(index) : fileName));
+        if (m_pageStatusLabel) {
+            onPageChanged(m_viewer->currentPage() + 1, m_viewer->pageCount());
+        }
+        if (m_zoomStatusLabel) {
+            onZoomChanged(m_viewer->currentZoom());
+        }
+        if (m_thumbnailWidget) {
+            m_thumbnailWidget->setDocument(m_viewer->pageCount(), m_viewer->pageLabels());
+            m_thumbnailWidget->setCurrentPage(m_viewer->currentPage());
+        }
+        onOutlineReady(m_viewer->outline());
+    } else {
+        setWindowTitle(tr("PDF Reader - Linux Prototype"));
+        if (m_pageStatusLabel) {
+            m_pageStatusLabel->setText(tr(" Page 0 / 0 "));
+        }
+        if (m_zoomStatusLabel) {
+            m_zoomStatusLabel->setText(tr(" 100% "));
+        }
+        if (m_thumbnailWidget) {
+            m_thumbnailWidget->clearDocument();
+        }
+        if (m_outlineModel) {
+            m_outlineModel->clear();
+        }
+        if (m_outlineEmptyLabel) {
+            m_outlineEmptyLabel->setText(tr("No bookmarks in document"));
+        }
+        if (m_sidebarStack && m_outlineEmptyLabel) {
+            m_sidebarStack->setCurrentWidget(m_outlineEmptyLabel);
+        }
+    }
+
+    if (m_findBar && m_findBar->isVisible()) {
+        m_findBar->clear();
+        m_viewer->clearSearch();
+    }
+}
+
+void MainWindow::loadRecentFiles() {
+    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    m_recentFiles = settings.value(QStringLiteral("recentFiles")).toStringList();
+    m_recentFiles.erase(std::remove_if(m_recentFiles.begin(), m_recentFiles.end(),
+        [](const QString& path) {
+            return path.isEmpty() || !QFileInfo::exists(path);
+        }), m_recentFiles.end());
+    updateRecentFilesMenu();
+}
+
+void MainWindow::addRecentFile(const QString& filePath) {
+    if (filePath.isEmpty() || !QFileInfo::exists(filePath)) {
+        return;
+    }
+    QString canonical = QFileInfo(filePath).canonicalFilePath();
+    if (canonical.isEmpty()) {
+        canonical = QDir::cleanPath(filePath);
+    }
+    m_recentFiles.removeAll(canonical);
+    m_recentFiles.prepend(canonical);
+    while (m_recentFiles.size() > MAX_RECENT_FILES) {
+        m_recentFiles.removeLast();
+    }
+    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    settings.setValue(QStringLiteral("recentFiles"), m_recentFiles);
+    updateRecentFilesMenu();
+}
+
+void MainWindow::clearRecentFiles() {
+    m_recentFiles.clear();
+    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    settings.setValue(QStringLiteral("recentFiles"), m_recentFiles);
+    updateRecentFilesMenu();
+}
+
+void MainWindow::updateRecentFilesMenu() {
+    if (!m_recentFilesMenu) {
+        return;
+    }
+    m_recentFilesMenu->clear();
+    if (m_recentFiles.isEmpty()) {
+        auto* emptyAction = m_recentFilesMenu->addAction(tr("No Recent Files"));
+        emptyAction->setEnabled(false);
+        return;
+    }
+
+    for (int i = 0; i < m_recentFiles.size(); ++i) {
+        const QString& path = m_recentFiles[i];
+        QString text = tr("&%1 %2").arg(i + 1).arg(QFileInfo(path).fileName());
+        auto* action = m_recentFilesMenu->addAction(text, this, [this, path]() {
+            openFile(path);
+        });
+        action->setToolTip(path);
+        action->setData(path);
+    }
+
+    m_recentFilesMenu->addSeparator();
+    m_recentFilesMenu->addAction(tr("&Clear Recent Files"), this, &MainWindow::clearRecentFiles);
 }
 
 void MainWindow::onLoadingChanged(bool loading, const QString& fileName) {
@@ -311,24 +639,72 @@ void MainWindow::openFileDialog() {
     }
 }
 
+void MainWindow::openFileInNewTabDialog() {
+    QString file = QFileDialog::getOpenFileName(
+        this,
+        tr("Open PDF in New Tab"),
+        QString(),
+        tr("PDF Files (*.pdf)")
+    );
+
+    if (!file.isEmpty()) {
+        openFile(file, true);
+    }
+}
+
 void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
-    closePasswordDialog();
-    m_findBar->clear();
-    m_findBar->hide();
-    m_outlineModel->clear();
-    m_outlineEmptyLabel->setText(tr("Loading bookmarks…"));
-    m_sidebarStack->setCurrentWidget(m_outlineEmptyLabel);
-    m_thumbnailWidget->setDocument(totalPages, m_viewer->pageLabels());
-    setWindowTitle(tr("%1 - PDF Reader").arg(title));
-    statusBar()->showMessage(tr("Loaded '%1' (%2 pages)").arg(title).arg(totalPages));
+    auto* senderViewer = qobject_cast<PdfViewerWidget*>(sender());
+    if (!senderViewer) {
+        senderViewer = currentViewer();
+    }
+
+    // Update tab title and tooltip for this viewer
+    if (m_docTabs && senderViewer) {
+        int idx = m_docTabs->indexOf(senderViewer);
+        if (idx >= 0) {
+            m_docTabs->setTabText(idx, title);
+            m_docTabs->setTabToolTip(idx, senderViewer->currentFilePath());
+        }
+    }
+
+    // Record into recent files
+    if (senderViewer && !senderViewer->currentFilePath().isEmpty()) {
+        addRecentFile(senderViewer->currentFilePath());
+    }
+
+    if (senderViewer == currentViewer()) {
+        closePasswordDialog();
+        if (m_findBar) {
+            m_findBar->clear();
+            m_findBar->hide();
+        }
+        if (m_outlineModel) {
+            m_outlineModel->clear();
+        }
+        if (m_outlineEmptyLabel) {
+            m_outlineEmptyLabel->setText(tr("Loading bookmarks…"));
+        }
+        if (m_sidebarStack && m_outlineEmptyLabel) {
+            m_sidebarStack->setCurrentWidget(m_outlineEmptyLabel);
+        }
+        if (m_thumbnailWidget) {
+            m_thumbnailWidget->setDocument(totalPages, senderViewer->pageLabels());
+        }
+        setWindowTitle(tr("%1 - PDF Reader").arg(title));
+        statusBar()->showMessage(tr("Loaded '%1' (%2 pages)").arg(title).arg(totalPages));
+    }
 }
 
 void MainWindow::onPageChanged(int currentPage, int totalPages) {
     if (totalPages > 0) {
-        m_pageStatusLabel->setText(tr(" Page %1 / %2 ").arg(currentPage).arg(totalPages));
+        if (m_pageStatusLabel) {
+            m_pageStatusLabel->setText(tr(" Page %1 / %2 ").arg(currentPage).arg(totalPages));
+        }
         const int zeroBasedPage = currentPage - 1;
-        m_thumbnailWidget->setCurrentPage(zeroBasedPage);
-        if (m_outlineModel && m_outlineModel->rowCount() > 0) {
+        if (m_thumbnailWidget) {
+            m_thumbnailWidget->setCurrentPage(zeroBasedPage);
+        }
+        if (m_outlineModel && m_outlineModel->rowCount() > 0 && m_outlineView) {
             auto* item = findBestOutlineItem(m_outlineModel->invisibleRootItem(), zeroBasedPage);
             if (item) {
                 m_outlineView->blockSignals(true);
@@ -337,15 +713,21 @@ void MainWindow::onPageChanged(int currentPage, int totalPages) {
             }
         }
     } else {
-        m_pageStatusLabel->setText(tr(" Page 0 / 0 "));
+        if (m_pageStatusLabel) {
+            m_pageStatusLabel->setText(tr(" Page 0 / 0 "));
+        }
         setWindowTitle(tr("PDF Reader - Linux Prototype"));
-        m_thumbnailWidget->clearDocument();
+        if (m_thumbnailWidget) {
+            m_thumbnailWidget->clearDocument();
+        }
     }
 }
 
 void MainWindow::onZoomChanged(double zoomRatio) {
-    int percentage = static_cast<int>(std::round(zoomRatio * 100.0));
-    m_zoomStatusLabel->setText(tr(" %1% ").arg(percentage));
+    if (m_zoomStatusLabel) {
+        int percentage = static_cast<int>(std::round(zoomRatio * 100.0));
+        m_zoomStatusLabel->setText(tr(" %1% ").arg(percentage));
+    }
 }
 
 void MainWindow::onLoadError(const QString& errorMessage) {
@@ -394,7 +776,9 @@ void MainWindow::showPasswordDialog(const QString& filePath, bool incorrectPassw
             m_passwordInput->clear();
             m_passwordWarning->clear();
             m_passwordWarning->hide();
-            m_viewer->openDocumentAsync(m_passwordFilePath, password);
+            if (auto* v = currentViewer()) {
+                v->openDocumentAsync(m_passwordFilePath, password);
+            }
         });
         connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
         connect(dialog, &QDialog::finished, this, [this]() {
@@ -424,6 +808,9 @@ void MainWindow::closePasswordDialog() {
 }
 
 void MainWindow::onOutlineReady(const std::vector<pdf::OutlineItem>& outline) {
+    if (!m_outlineModel || !m_outlineEmptyLabel || !m_sidebarStack || !m_outlineView || !m_sidebarTabs) {
+        return;
+    }
     m_outlineModel->clear();
     if (outline.empty()) {
         m_outlineEmptyLabel->setText(tr("No bookmarks in document"));
@@ -435,10 +822,12 @@ void MainWindow::onOutlineReady(const std::vector<pdf::OutlineItem>& outline) {
     m_sidebarStack->setCurrentWidget(m_outlineView);
     m_sidebarTabs->setCurrentWidget(m_sidebarStack);
     m_outlineView->expandToDepth(0);
-    if (m_viewer->pageCount() > 0) {
-        onPageChanged(m_viewer->currentPage() + 1, m_viewer->pageCount());
+    if (auto* v = currentViewer()) {
+        if (v->pageCount() > 0) {
+            onPageChanged(v->currentPage() + 1, v->pageCount());
+        }
     }
-    if (!m_sidebarUserHidden) {
+    if (!m_sidebarUserHidden && m_sidebarDock) {
         m_sidebarDock->show();
     }
 }
@@ -447,15 +836,19 @@ void MainWindow::onOutlineItemClicked(const QModelIndex& index) {
     if (!index.isValid()) {
         return;
     }
+    auto* v = currentViewer();
+    if (!v) {
+        return;
+    }
     int pageIndex = index.data(Qt::UserRole).toInt();
-    if (pageIndex >= 0 && pageIndex < m_viewer->pageCount()) {
+    if (pageIndex >= 0 && pageIndex < v->pageCount()) {
         if (index.data(Qt::UserRole + 2).toBool()) {
-            m_viewer->goToPage(pageIndex, index.data(Qt::UserRole + 1).toDouble());
+            v->goToPage(pageIndex, index.data(Qt::UserRole + 1).toDouble());
         } else {
-            m_viewer->goToPage(pageIndex);
+            v->goToPage(pageIndex);
         }
         m_outlineView->setCurrentIndex(index);
-        m_viewer->setFocus();
+        v->setFocus();
     }
 }
 

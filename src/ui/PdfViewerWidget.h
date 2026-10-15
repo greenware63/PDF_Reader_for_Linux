@@ -58,6 +58,7 @@ public:
     void closeDocument();
 
     bool isDocumentOpen() const noexcept { return m_hasDocument; }
+    QString currentFilePath() const noexcept { return m_currentFilePath; }
     int pageCount() const noexcept { return m_pageCount; }
     int currentPage() const noexcept { return m_currentPage; }
     double currentZoom() const noexcept { return m_scale; }
@@ -266,6 +267,7 @@ private:
     std::vector<pdf::OutlineItem> m_outline;
     QString m_workerErrorMessage;
     std::vector<QString> m_pageLabels;
+    QString m_currentFilePath;
 };
 
 } // namespace ui

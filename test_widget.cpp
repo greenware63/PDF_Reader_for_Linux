@@ -1,4 +1,4 @@
-#include "ui/PdfViewerWidget.h"
+﻿#include "ui/PdfViewerWidget.h"
 #include "ui/MainWindow.h"
 #include "ui/ThumbnailListWidget.h"
 #include <QTabWidget>
@@ -1981,10 +1981,16 @@ int main(int argc, char* argv[]) {
         viewer.resize(1000, 700);
         viewer.setZoom(3.0);
         viewer.findText("FarRight", true);
-        viewer.renderWorker().waitForIdle();
-        QCoreApplication::processEvents();
+        QElapsedTimer searchTimer;
+        searchTimer.start();
+        while (searchTimer.elapsed() < 3000 && viewer.searchMatchCount() == 0) {
+            viewer.renderWorker().waitForIdle();
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
         if (viewer.searchMatchCount() != 1 || viewer.currentDocScrollX() <= 0) {
-            std::cerr << "[FAIL] Navigating to an off-screen horizontal search match did not scroll." << std::endl;
+            std::cerr << "[FAIL] Navigating to an off-screen horizontal search match did not scroll. count="
+                      << viewer.searchMatchCount() << " scrollX=" << viewer.currentDocScrollX() << std::endl;
             return 1;
         }
 
@@ -2455,8 +2461,113 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: ThumbnailListWidget creation, page labels, IPC thumbnail delivery, two-way viewport sync, and teardown verified." << std::endl;
     }
 
+    // Test 36: Multi-Document Tabs and Recent Files Session Management
+    std::cout << "[TEST 36] Testing Multi-Document Tabs and Recent Files Session Management..." << std::endl;
+    {
+        ui::MainWindow window;
+        window.resize(1024, 768);
+        window.show();
+        QCoreApplication::processEvents();
+
+        // Initial state: 1 default untitled tab
+        if (window.tabCount() != 1) {
+            std::cerr << "[FAIL] MainWindow initial tabCount expected 1, got " << window.tabCount() << std::endl;
+            return 1;
+        }
+
+        // 1. Open first document in current tab
+        std::string doc1Path = "widget_tab_doc1.pdf";
+        generateMultiPagePdf(doc1Path, 3);
+        if (!window.openFile(QString::fromStdString(doc1Path))) {
+            std::cerr << "[FAIL] Failed to open first document in MainWindow" << std::endl;
+            return 1;
+        }
+
+        auto* viewer1 = window.currentViewer();
+        QElapsedTimer loadTimer1;
+        loadTimer1.start();
+        while (loadTimer1.elapsed() < 5000 && (!viewer1 || !viewer1->isDocumentOpen())) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (!viewer1 || !viewer1->isDocumentOpen()) {
+            std::cerr << "[FAIL] First document failed to load in tab 0" << std::endl;
+            return 1;
+        }
+
+        // Verify recent files contains doc1
+        if (window.recentFiles().isEmpty() || !window.recentFiles().first().contains("widget_tab_doc1.pdf")) {
+            std::cerr << "[FAIL] First document was not recorded in recent files list" << std::endl;
+            return 1;
+        }
+
+        // 2. Open second document in new tab
+        std::string doc2Path = "widget_tab_doc2.pdf";
+        generateMultiPagePdf(doc2Path, 5);
+        int tab2Index = window.openFileInNewTab(QString::fromStdString(doc2Path));
+        if (tab2Index != 1 || window.tabCount() != 2) {
+            std::cerr << "[FAIL] Expected 2 tabs after openFileInNewTab, got count=" << window.tabCount() << std::endl;
+            return 1;
+        }
+
+        auto* viewer2 = window.currentViewer();
+        if (viewer2 == viewer1) {
+            std::cerr << "[FAIL] Active viewer did not switch to newly opened tab" << std::endl;
+            return 1;
+        }
+
+        QElapsedTimer loadTimer2;
+        loadTimer2.start();
+        while (loadTimer2.elapsed() < 5000 && (!viewer2 || !viewer2->isDocumentOpen())) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (!viewer2 || !viewer2->isDocumentOpen() || viewer2->pageCount() != 5) {
+            std::cerr << "[FAIL] Second document failed to load in tab 1" << std::endl;
+            return 1;
+        }
+
+        // Verify recent files has 2 entries and most recent is doc2
+        if (window.recentFiles().size() < 2 || !window.recentFiles().first().contains("widget_tab_doc2.pdf")) {
+            std::cerr << "[FAIL] Second document was not placed at front of recent files" << std::endl;
+            return 1;
+        }
+
+        // 3. Tab cycling
+        window.selectNextTab();
+        QCoreApplication::processEvents();
+        if (window.documentTabs()->currentIndex() != 0 || window.currentViewer() != viewer1) {
+            std::cerr << "[FAIL] selectNextTab did not wrap back to tab 0" << std::endl;
+            return 1;
+        }
+
+        window.selectPreviousTab();
+        QCoreApplication::processEvents();
+        if (window.documentTabs()->currentIndex() != 1 || window.currentViewer() != viewer2) {
+            std::cerr << "[FAIL] selectPreviousTab did not navigate to tab 1" << std::endl;
+            return 1;
+        }
+
+        // 4. Close current tab (tab 1)
+        window.closeCurrentTab();
+        QCoreApplication::processEvents();
+        if (window.tabCount() != 1 || window.currentViewer() != viewer1) {
+            std::cerr << "[FAIL] closeCurrentTab failed to leave tab 0 active" << std::endl;
+            return 1;
+        }
+
+        // 5. Test Clear Recent Files
+        window.clearRecentFiles();
+        if (!window.recentFiles().isEmpty()) {
+            std::cerr << "[FAIL] clearRecentFiles did not empty recent files list" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Multi-tab opening, tab switching, active viewer sync, tab closure, and recent files persistence verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 35 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 36 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

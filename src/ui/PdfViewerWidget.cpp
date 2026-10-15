@@ -66,6 +66,7 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
         }
         m_workerErrorMessage = message;
         m_hasDocument = false;
+    m_currentFilePath.clear();
         m_pageCount = 0;
         m_inFlightKeys.clear();
         Q_EMIT loadError(message);
@@ -134,6 +135,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_renderWorker.setGeneration(m_currentGeneration);
 
     m_hasDocument = true;
+    m_currentFilePath = filePath;
     m_pageCount = openResult.pageCount;
     m_layout.setPageSizes(openResult.pageSizes);
     m_pageLabels.clear();
@@ -278,6 +280,7 @@ void PdfViewerWidget::closeDocument() {
     ++m_currentGeneration;
 
     m_hasDocument = false;
+    m_currentFilePath.clear();
     m_fallbackScales.clear();
     m_pageCount = 0;
     m_layout.setPageSizes({});

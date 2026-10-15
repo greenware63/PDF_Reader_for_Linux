@@ -3,6 +3,7 @@
 #include <QMainWindow>
 #include <QLabel>
 #include <QPointer>
+#include <QStringList>
 #include "engine/IDocument.h"
 #include "PdfViewerWidget.h"
 #include "FindBar.h"
@@ -17,6 +18,7 @@ class QTreeView;
 class QStandardItemModel;
 class QStackedWidget;
 class QModelIndex;
+class QMenu;
 
 namespace ui {
 
@@ -24,19 +26,56 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
+    static constexpr int MAX_RECENT_FILES = 10;
+
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
-    /// Starts a non-blocking open. @return false only if the path is empty; load errors arrive via loadError().
-    bool openFile(const QString& filePath);
+    /// Starts a non-blocking open. If inNewTab is true, opens in a newly created tab.
+    bool openFile(const QString& filePath, bool inNewTab = false);
+
+    /// Opens a document in a new tab. @return index of the new tab.
+    int openFileInNewTab(const QString& filePath);
+
+    /// Creates an empty untitled tab. @return index of the new tab.
+    int addNewTab();
+
+    /// Closes the tab at index.
+    void closeTab(int index);
+
+    /// Closes the currently active tab.
+    void closeCurrentTab();
+
+    /// Cycles to the next document tab.
+    void selectNextTab();
+
+    /// Cycles to the previous document tab.
+    void selectPreviousTab();
+
+    /// Number of open document tabs.
+    int tabCount() const noexcept;
+
+    /// Currently active PdfViewerWidget.
+    PdfViewerWidget* currentViewer() const;
+
+    /// PdfViewerWidget at specific tab index.
+    PdfViewerWidget* viewerAt(int index) const;
+
+    QTabWidget* documentTabs() const noexcept { return m_docTabs; }
     QDockWidget* sidebarDock() const noexcept { return m_sidebarDock; }
     QTabWidget* sidebarTabs() const noexcept { return m_sidebarTabs; }
     ThumbnailListWidget* thumbnailWidget() const noexcept { return m_thumbnailWidget; }
     QTreeView* outlineView() const noexcept { return m_outlineView; }
     QStandardItemModel* outlineModel() const noexcept { return m_outlineModel; }
+    QMenu* recentFilesMenu() const noexcept { return m_recentFilesMenu; }
+    QStringList recentFiles() const { return m_recentFiles; }
+
+    void addRecentFile(const QString& filePath);
+    void clearRecentFiles();
 
 public Q_SLOTS:
     void openFileDialog();
+    void openFileInNewTabDialog();
     void showFindBar();
 
 private Q_SLOTS:
@@ -48,14 +87,20 @@ private Q_SLOTS:
     void onDocumentOpenFailed(const QString& filePath, pdf::DocumentError error);
     void onOutlineReady(const std::vector<pdf::OutlineItem>& outline);
     void onOutlineItemClicked(const QModelIndex& index);
+    void onCurrentTabChanged(int index);
 
 private:
     void setupUi();
     void setupActions();
     void showPasswordDialog(const QString& filePath, bool incorrectPassword);
     void closePasswordDialog();
+    void loadRecentFiles();
+    void updateRecentFilesMenu();
+    PdfViewerWidget* createViewerTab(const QString& title = QString());
+    void connectViewer(PdfViewerWidget* viewer);
 
     FindBar* m_findBar{nullptr};
+    QTabWidget* m_docTabs{nullptr};
     PdfViewerWidget* m_viewer{nullptr};
     QLabel* m_pageStatusLabel{nullptr};
     QLabel* m_zoomStatusLabel{nullptr};
@@ -71,6 +116,8 @@ private:
     QStandardItemModel* m_outlineModel{nullptr};
     QLabel* m_outlineEmptyLabel{nullptr};
     QAction* m_toggleSidebarAction{nullptr};
+    QMenu* m_recentFilesMenu{nullptr};
+    QStringList m_recentFiles;
     bool m_sidebarUserHidden{false};
 };
 
