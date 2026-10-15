@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QMetaType>
+#include <QString>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -19,6 +20,7 @@
 #include "engine/IPage.h"
 #include "engine/PixelBuffer.h"
 #include "engine/PageText.h"
+#include "engine/SearchTypes.h"
 #include "cache/TileCache.h"
 
 namespace pdf {
@@ -42,7 +44,7 @@ struct OpenResult {
 
 /**
  * @brief Dedicated single-threaded engine worker for serializing ALL PDFium calls off the UI thread.
- * Document loading, metadata queries, page creation, tile rendering, and resource teardown
+ * Document loading, metadata queries, page creation, tile rendering, background search, and resource teardown
  * run strictly on this worker thread.
  */
 class RenderWorker : public QObject {
@@ -103,12 +105,23 @@ public:
     std::shared_ptr<const PageText> getPageTextSync(int64_t documentId, int pageIndex);
 
     /**
+     * @brief Starts an asynchronous page-by-page background text search.
+     * Cancels any ongoing search. Results arrive incrementally via searchMatchesFound() and searchProgress().
+     */
+    void startSearch(int64_t documentId, int64_t searchId, const QString& query, bool matchCase, int totalPages);
+
+    /**
+     * @brief Immediately cancels any running or pending background search.
+     */
+    void cancelSearch();
+
+    /**
      * @brief Cancels all pending queued requests.
      */
     void cancelAll();
 
     /**
-     * @brief Blocks until all queued requests, control tasks, and in-flight render complete.
+     * @brief Blocks until all queued requests, control tasks, in-flight render, and active searches complete.
      */
     void waitForIdle();
 
@@ -152,13 +165,30 @@ Q_SIGNALS:
     void documentOpened(int64_t documentId, pdf::OpenResult result);
     /// Emitted when text extraction for a page completes on the worker thread.
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
+    /// Emitted when search finds matches on a page.
+    void searchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
+    /// Emitted as search progresses page-by-page.
+    void searchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);
+    /// Emitted when a search across all pages completes.
+    void searchCompleted(int64_t documentId, int64_t searchId, int totalMatches);
 
 private:
     void workerLoop();
     IPage* getOrLoadWorkerPage(int pageIndex);
+    static std::vector<SearchMatch> findTextInPage(const PageText& pt, const QString& query, bool matchCase);
 
     struct ControlTask {
         std::function<void()> execute;
+    };
+
+    struct ActiveSearch {
+        int64_t documentId{0};
+        int64_t searchId{0};
+        QString query;
+        bool matchCase{false};
+        int totalPages{0};
+        int nextPageToSearch{0};
+        int totalMatchesFound{0};
     };
 
     std::atomic<bool> m_running{true};
@@ -167,6 +197,7 @@ private:
     std::atomic<size_t> m_cachedPageCount{0};
     std::atomic<int> m_testRenderDelayMs{0};
     std::atomic<int> m_testOpenDelayMs{0};
+    std::atomic<int64_t> m_currentSearchId{0};
 
     std::mutex m_mutex;
     std::condition_variable m_cv;
@@ -181,6 +212,7 @@ private:
 
     std::vector<ControlTask> m_controlQueue;
     std::vector<TileRenderRequest> m_queue;
+    ActiveSearch m_activeSearch;
 
     // Document and open page handles are accessed EXCLUSIVELY on the worker thread inside workerLoop()
     std::unique_ptr<IDocument> m_workerDocument;

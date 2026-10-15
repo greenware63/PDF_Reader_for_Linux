@@ -117,6 +117,8 @@ add_library(pdf_engine STATIC
     include/engine/IDocument.h
     include/engine/IPage.h
     include/engine/PixelBuffer.h
+    include/engine/PageText.h
+    include/engine/SearchTypes.h
     include/engine/RenderWorker.h
     src/engine/PdfiumDocument.h
     src/engine/PdfiumDocument.cpp
@@ -142,6 +144,8 @@ target_link_libraries(pdf_engine PUBLIC
 add_executable(pdf-reader
     main.cpp
     src/ui/ImageUtils.h
+    src/ui/FindBar.h
+    src/ui/FindBar.cpp
     src/ui/PdfViewerWidget.h
     src/ui/PdfViewerWidget.cpp
     src/ui/MainWindow.h
@@ -191,6 +195,8 @@ target_link_libraries(test_tile_cache PRIVATE
 # Viewport Widget headless test (subclasses QAbstractScrollArea)
 add_executable(test_widget
     test_widget.cpp
+    src/ui/FindBar.h
+    src/ui/FindBar.cpp
     src/ui/PdfViewerWidget.cpp
 )
 
@@ -207,6 +213,8 @@ target_link_libraries(test_widget PRIVATE
 # Headless tests for the encrypted-PDF password prompt workflow.
 add_executable(test_password_prompt
     test_password_prompt.cpp
+    src/ui/FindBar.h
+    src/ui/FindBar.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/ui/PdfViewerWidget.cpp

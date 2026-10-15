@@ -1,4 +1,5 @@
 #include "ui/PdfViewerWidget.h"
+#include "ui/FindBar.h"
 #include <QApplication>
 #include <QImage>
 #include <QPainter>
@@ -1725,8 +1726,149 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: missing page answered with empty text." << std::endl;
     }
 
+    std::cout << "[TEST 32] Testing full text search (Ctrl+F), FindBar, match cycling, and Persian search..." << std::endl;
+    {
+        // 1. Two-page Latin document search
+        std::string twoPagePath = "widget_two_page_text.pdf";
+        generateTwoPageTextFixture(twoPagePath, "Page Zero Header", "Page One Content");
+
+        err = viewer.openDocument(QString::fromStdString(twoPagePath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open two-page text fixture for search test" << std::endl;
+            return 1;
+        }
+
+        viewer.resize(1000, 700);
+        viewer.goToPage(0);
+        viewer.setZoom(1.0);
+
+        int lastReportedCurrent = -1;
+        int lastReportedTotal = -1;
+        QObject::connect(&viewer, &ui::PdfViewerWidget::searchResultsChanged, [&](int cur, int tot) {
+            lastReportedCurrent = cur;
+            lastReportedTotal = tot;
+        });
+
+        // Search for "page" (case-insensitive by default)
+        viewer.findText("page", false);
+        viewer.renderWorker().waitForIdle();
+        QCoreApplication::processEvents();
+
+        if (viewer.searchMatchCount() != 2) {
+            std::cerr << "[FAIL] Expected 2 search matches for 'page', got " << viewer.searchMatchCount() << std::endl;
+            return 1;
+        }
+        if (viewer.currentSearchMatchIndex() != 0) {
+            std::cerr << "[FAIL] Initial match index expected 0, got " << viewer.currentSearchMatchIndex() << std::endl;
+            return 1;
+        }
+        if (lastReportedCurrent != 1 || lastReportedTotal != 2) {
+            std::cerr << "[FAIL] searchResultsChanged signal expected 1 of 2, got " << lastReportedCurrent << " of " << lastReportedTotal << std::endl;
+            return 1;
+        }
+
+        // Match 0 is on page 0, Match 1 is on page 1
+        const auto& matches = viewer.searchMatches();
+        if (matches[0].pageIndex != 0 || matches[1].pageIndex != 1) {
+            std::cerr << "[FAIL] Search match pages expected 0 and 1, got " << matches[0].pageIndex << " and " << matches[1].pageIndex << std::endl;
+            return 1;
+        }
+
+        // Cycle next
+        viewer.findNext();
+        if (viewer.currentSearchMatchIndex() != 1) {
+            std::cerr << "[FAIL] findNext expected current index 1, got " << viewer.currentSearchMatchIndex() << std::endl;
+            return 1;
+        }
+
+        // Wrap around next -> back to 0
+        viewer.findNext();
+        if (viewer.currentSearchMatchIndex() != 0) {
+            std::cerr << "[FAIL] findNext wraparound expected index 0, got " << viewer.currentSearchMatchIndex() << std::endl;
+            return 1;
+        }
+
+        // Cycle previous -> wraps back to 1
+        viewer.findPrevious();
+        if (viewer.currentSearchMatchIndex() != 1) {
+            std::cerr << "[FAIL] findPrevious wraparound expected index 1, got " << viewer.currentSearchMatchIndex() << std::endl;
+            return 1;
+        }
+
+        // Render viewport with highlights - ensures drawSearchHighlights() executes without crash
+        QImage frame(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+        QPainter p(&frame);
+        viewer.viewport()->render(&p);
+        p.end();
+
+        // 2. Test Persian RTL text search in viewer
+        std::string persianPath = "persian_test.pdf";
+        err = viewer.openDocument(QString::fromStdString(persianPath));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open Persian document in viewer for search" << std::endl;
+            return 1;
+        }
+
+        viewer.findText(QString::fromUtf8("\xd8\xb3\xd9\x84\xd8\xa7\xd9\x85"), false);
+        viewer.renderWorker().waitForIdle();
+        QCoreApplication::processEvents();
+
+        if (viewer.searchMatchCount() != 1) {
+            std::cerr << "[FAIL] Persian search expected 1 match for 'salam', got " << viewer.searchMatchCount() << std::endl;
+            return 1;
+        }
+        if (viewer.searchMatches()[0].rects.empty()) {
+            std::cerr << "[FAIL] Persian search match has empty highlight rects" << std::endl;
+            return 1;
+        }
+
+        // Render viewport on Persian page with active match
+        {
+            QImage f(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+            QPainter pPersian(&f);
+            viewer.viewport()->render(&pPersian);
+            pPersian.end();
+        }
+
+        // 3. FindBar widget unit test
+        ui::FindBar findBar;
+        int searchReqCount = 0;
+        int nextReqCount = 0;
+        int prevReqCount = 0;
+        int closedCount = 0;
+        QString reqQuery;
+        bool reqCase = false;
+
+        QObject::connect(&findBar, &ui::FindBar::searchRequested, [&](const QString& q, bool c) {
+            ++searchReqCount;
+            reqQuery = q;
+            reqCase = c;
+        });
+        QObject::connect(&findBar, &ui::FindBar::findNextRequested, [&]() { ++nextReqCount; });
+        QObject::connect(&findBar, &ui::FindBar::findPreviousRequested, [&]() { ++prevReqCount; });
+        QObject::connect(&findBar, &ui::FindBar::closed, [&]() { ++closedCount; });
+
+        findBar.setMatchCount(3, 17);
+        // FindBar handles Esc key -> emits closed()
+        QKeyEvent escKey(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QApplication::sendEvent(&findBar, &escKey);
+        if (closedCount != 1) {
+            std::cerr << "[FAIL] FindBar Esc key expected to emit closed(), got count=" << closedCount << std::endl;
+            return 1;
+        }
+
+        // Clear search
+        viewer.clearSearch();
+        if (viewer.searchMatchCount() != 0 || viewer.currentSearchMatchIndex() != -1) {
+            std::cerr << "[FAIL] clearSearch failed to reset match state" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Search findText, next/prev wraparound cycling, Persian RTL search highlights, and FindBar keyboard handling verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 31 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 32 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

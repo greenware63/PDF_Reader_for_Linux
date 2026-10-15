@@ -53,8 +53,19 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 void MainWindow::setupUi() {
-    m_viewer = new PdfViewerWidget(this);
-    setCentralWidget(m_viewer);
+    auto* central = new QWidget(this);
+    auto* layout = new QVBoxLayout(central);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    m_findBar = new FindBar(central);
+    m_findBar->hide();
+    layout->addWidget(m_findBar);
+
+    m_viewer = new PdfViewerWidget(central);
+    layout->addWidget(m_viewer, 1);
+
+    setCentralWidget(central);
 
     connect(m_viewer, &PdfViewerWidget::documentLoaded, this, &MainWindow::onDocumentLoaded);
     connect(m_viewer, &PdfViewerWidget::pageChanged, this, &MainWindow::onPageChanged);
@@ -62,6 +73,15 @@ void MainWindow::setupUi() {
     connect(m_viewer, &PdfViewerWidget::loadError, this, &MainWindow::onLoadError);
     connect(m_viewer, &PdfViewerWidget::documentOpenFailed, this, &MainWindow::onDocumentOpenFailed);
     connect(m_viewer, &PdfViewerWidget::loadingChanged, this, &MainWindow::onLoadingChanged);
+
+    connect(m_findBar, &FindBar::searchRequested, m_viewer, &PdfViewerWidget::findText);
+    connect(m_findBar, &FindBar::findNextRequested, m_viewer, &PdfViewerWidget::findNext);
+    connect(m_findBar, &FindBar::findPreviousRequested, m_viewer, &PdfViewerWidget::findPrevious);
+    connect(m_findBar, &FindBar::closed, this, [this]() {
+        m_viewer->clearSearch();
+        m_viewer->setFocus();
+    });
+    connect(m_viewer, &PdfViewerWidget::searchResultsChanged, m_findBar, &FindBar::setMatchCount);
 
     statusBar()->showMessage(tr("Ready - Open a PDF to begin"));
 }
@@ -86,6 +106,9 @@ void MainWindow::setupActions() {
     connect(m_viewer, &PdfViewerWidget::selectionChanged, copyAction, [this, copyAction]() {
         copyAction->setEnabled(m_viewer->hasSelection());
     });
+
+    QAction* findAction = editMenu->addAction(tr("&Find..."), this, &MainWindow::showFindBar);
+    findAction->setShortcut(QKeySequence::Find);
 
     // Toolbar
     QToolBar* toolbar = addToolBar(tr("Main Toolbar"));
@@ -118,6 +141,12 @@ void MainWindow::setupActions() {
 
     toolbar->addAction(tr("Fit Width"), m_viewer, &PdfViewerWidget::zoomFitWidth);
     toolbar->addAction(tr("100%"), m_viewer, &PdfViewerWidget::zoomReset);
+}
+
+void MainWindow::showFindBar() {
+    if (m_viewer->isDocumentOpen()) {
+        m_findBar->focusSearch();
+    }
 }
 
 bool MainWindow::openFile(const QString& filePath) {
@@ -169,6 +198,8 @@ void MainWindow::openFileDialog() {
 
 void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
     closePasswordDialog();
+    m_findBar->clear();
+    m_findBar->hide();
     setWindowTitle(tr("%1 - PDF Reader").arg(title));
     statusBar()->showMessage(tr("Loaded '%1' (%2 pages)").arg(title).arg(totalPages));
 }

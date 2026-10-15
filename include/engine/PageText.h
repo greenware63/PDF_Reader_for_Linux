@@ -106,6 +106,7 @@ struct PageText {
 
     /**
      * @brief Computes merged highlight rectangles for a character range [startChar, endChar].
+     * Supports both Left-To-Right (LTR) and Right-To-Left (RTL, e.g. Persian/Arabic) character sequences.
      */
     std::vector<PageCharBox> getSelectionRects(int startChar, int endChar) const {
         std::vector<PageCharBox> rects;
@@ -131,8 +132,11 @@ struct PageText {
             } else {
                 double overlapY = std::min(currentLine.bottom, b.bottom) - std::max(currentLine.top, b.top);
                 double minH = std::min(currentLine.height(), b.height());
-                // Merge if vertical overlap is significant and horizontally proximate
-                if (overlapY > 0.5 * minH && (b.left - currentLine.right) < 20.0 && (b.left >= currentLine.left - 5.0)) {
+                // Merge if vertical overlap is significant and horizontally proximate (LTR or RTL)
+                bool ltrProximate = (b.left - currentLine.right) < 20.0 && (b.left >= currentLine.left - 5.0);
+                bool rtlProximate = (currentLine.left - b.right) < 20.0 && (b.right <= currentLine.right + 5.0);
+                if (overlapY > 0.5 * minH && (ltrProximate || rtlProximate)) {
+                    currentLine.left = std::min(currentLine.left, b.left);
                     currentLine.right = std::max(currentLine.right, b.right);
                     currentLine.top = std::min(currentLine.top, b.top);
                     currentLine.bottom = std::max(currentLine.bottom, b.bottom);

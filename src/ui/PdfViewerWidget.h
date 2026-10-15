@@ -12,6 +12,7 @@
 #include "cache/TileCache.h"
 #include "engine/RenderWorker.h"
 #include "engine/PageText.h"
+#include "engine/SearchTypes.h"
 
 namespace ui {
 
@@ -19,7 +20,8 @@ namespace ui {
  * @brief Professional, high-performance Qt6 PDF Viewer widget.
  * Implements continuous document scrolling, smooth zooming, exact 64-bit coordinate space,
  * compressed scrollbar mapping, sub-pixel rounding-safe fit-width, asynchronous background rendering,
- * and background text extraction with cursor hit-testing, selection highlighting, and clipboard copy.
+ * background text extraction with cursor hit-testing, selection highlighting, clipboard copy,
+ * and background asynchronous page-by-page text search with match highlighting and cycling.
  * PDFium operations run strictly on the background RenderWorker thread; 0 PDFium calls occur on UI thread.
  */
 class PdfViewerWidget : public QAbstractScrollArea {
@@ -114,6 +116,15 @@ public:
     void copySelection();
     std::shared_ptr<const pdf::PageText> getPageText(int pageIndex) const;
 
+    // Text search APIs
+    void findText(const QString& query, bool matchCase = false);
+    void findNext();
+    void findPrevious();
+    void clearSearch();
+    int searchMatchCount() const noexcept { return static_cast<int>(m_searchMatches.size()); }
+    int currentSearchMatchIndex() const noexcept { return m_currentMatchIndex; }
+    const std::vector<pdf::SearchMatch>& searchMatches() const noexcept { return m_searchMatches; }
+
 Q_SIGNALS:
     void documentLoaded(const QString& title, int pages);
     void loadError(const QString& errorMessage);
@@ -122,6 +133,7 @@ Q_SIGNALS:
     void pageChanged(int currentPage, int totalPages);
     void zoomChanged(double zoomRatio);
     void selectionChanged();
+    void searchResultsChanged(int currentMatch, int totalMatches);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -138,6 +150,9 @@ private Q_SLOTS:
     void onTileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key);
     void onDocumentOpened(int64_t documentId, pdf::OpenResult result);
     void onPageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
+    void onSearchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
+    void onSearchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);
+    void onSearchCompleted(int64_t documentId, int64_t searchId, int totalMatches);
 
 private:
     struct TextPosition {
@@ -165,6 +180,8 @@ private:
     void ensurePageTextRequested(int pageIndex);
     void trimPageTextCache();
     void drawSelection(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale);
+    void drawSearchHighlights(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale);
+    void scrollToMatch(const pdf::SearchMatch& match);
 
     QString openErrorMessage(pdf::DocumentError error, const QString& filePath) const;
     void applyOpenedDocument(int64_t newDocumentId, const QString& filePath, const pdf::OpenResult& result);
@@ -220,6 +237,13 @@ private:
     TextPosition m_selectionStart;
     TextPosition m_selectionEnd;
     bool m_isSelecting{false};
+
+    // Text search state
+    int64_t m_currentSearchId{0};
+    QString m_searchQuery;
+    bool m_searchMatchCase{false};
+    std::vector<pdf::SearchMatch> m_searchMatches;
+    int m_currentMatchIndex{-1};
 };
 
 } // namespace ui

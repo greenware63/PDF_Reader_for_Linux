@@ -237,6 +237,18 @@ PageText PdfiumPage::extractText() {
         box.unicode = u;
         double left = 0.0, right = 0.0, bottom = 0.0, top = 0.0;
         if (FPDFText_GetCharBox(textPage, i, &left, &right, &bottom, &top)) {
+            if (std::abs(top - bottom) < 1e-4) {
+                FS_RECTF looseRect{};
+                if (FPDFText_GetLooseCharBox(textPage, i, &looseRect) && std::abs(looseRect.top - looseRect.bottom) >= 1e-4) {
+                    bottom = looseRect.bottom;
+                    top = looseRect.top;
+                } else {
+                    double fontSize = FPDFText_GetFontSize(textPage, i);
+                    if (fontSize <= 0.0) fontSize = 12.0;
+                    top = bottom + fontSize * 0.8;
+                    bottom = bottom - fontSize * 0.2;
+                }
+            }
             userRectToTopDown(left, right, bottom, top, box);
         }
 
@@ -248,11 +260,20 @@ PageText PdfiumPage::extractText() {
                 box.unicode = 0x10000 + ((u - 0xD800) << 10) + (nextU - 0xDC00);
                 double l2 = 0.0, r2 = 0.0, b2 = 0.0, t2 = 0.0;
                 PageCharBox low;
-                if (FPDFText_GetCharBox(textPage, i + 1, &l2, &r2, &b2, &t2) && userRectToTopDown(l2, r2, b2, t2, low)) {
-                    box.left = std::min(box.left, low.left);
-                    box.right = std::max(box.right, low.right);
-                    box.top = std::min(box.top, low.top);
-                    box.bottom = std::max(box.bottom, low.bottom);
+                if (FPDFText_GetCharBox(textPage, i + 1, &l2, &r2, &b2, &t2)) {
+                    if (std::abs(t2 - b2) < 1e-4) {
+                        FS_RECTF looseRect{};
+                        if (FPDFText_GetLooseCharBox(textPage, i + 1, &looseRect) && std::abs(looseRect.top - looseRect.bottom) >= 1e-4) {
+                            b2 = looseRect.bottom;
+                            t2 = looseRect.top;
+                        }
+                    }
+                    if (userRectToTopDown(l2, r2, b2, t2, low)) {
+                        box.left = std::min(box.left, low.left);
+                        box.right = std::max(box.right, low.right);
+                        box.top = std::min(box.top, low.top);
+                        box.bottom = std::max(box.bottom, low.bottom);
+                    }
                 }
                 ++i; // consume low surrogate
             }
@@ -282,6 +303,11 @@ PageText PdfiumPage::extractText() {
             donor = &result.chars[i + 1];
         }
         if (!donor) {
+            if (flatVertically) {
+                double fontSize = FPDFText_GetFontSize(textPage, static_cast<int>(i));
+                if (fontSize <= 0.0) fontSize = 12.0;
+                c.bottom = c.top + fontSize;
+            }
             continue;
         }
         if (flatVertically) {

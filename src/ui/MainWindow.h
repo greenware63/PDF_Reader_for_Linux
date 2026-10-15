@@ -5,6 +5,7 @@
 #include <QPointer>
 #include "engine/IDocument.h"
 #include "PdfViewerWidget.h"
+#include "FindBar.h"
 
 class QDialog;
 class QLineEdit;
@@ -24,6 +25,7 @@ public:
 
 public Q_SLOTS:
     void openFileDialog();
+    void showFindBar();
 
 private Q_SLOTS:
     void onDocumentLoaded(const QString& title, int totalPages);
@@ -39,6 +41,7 @@ private:
     void showPasswordDialog(const QString& filePath, bool incorrectPassword);
     void closePasswordDialog();
 
+    FindBar* m_findBar{nullptr};
     PdfViewerWidget* m_viewer{nullptr};
     QLabel* m_pageStatusLabel{nullptr};
     QLabel* m_zoomStatusLabel{nullptr};

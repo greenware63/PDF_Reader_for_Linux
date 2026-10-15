@@ -1,4 +1,4 @@
-#include <iostream>
+﻿#include <iostream>
 #include <vector>
 #include <fstream>
 #include <cmath>
@@ -11,6 +11,10 @@
 #include "layout/DocumentLayout.h"
 #include "engine/PageText.h"
 #include "engine/PdfiumPage.h"
+#include "engine/RenderWorker.h"
+#include "engine/SearchTypes.h"
+#include <QCoreApplication>
+#include <QString>
 
 // Generates a multi-page PDF fixture containing:
 // Page 0: Portrait A4 (595 x 842 pt)
@@ -244,6 +248,82 @@ static void generateSupplementaryUnicodePdfFixture(const std::string& path) {
     std::ofstream out(path, std::ios::binary);
     out.write(pdf.data(), pdf.size());
 }
+static void generatePersianPdfFixture(const std::string& path) {
+    std::string cmap =
+        "/CIDInit /ProcSet findresource begin\n"
+        "12 dict begin\n"
+        "begincmap\n"
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        "/CMapName /Custom-Persian-ToUnicode def\n"
+        "/CMapType 2 def\n"
+        "1 begincodespacerange\n"
+        "<0000> <FFFF>\n"
+        "endcodespacerange\n"
+        "9 beginbfchar\n"
+        "<0001> <0646>\n"
+        "<0002> <0627>\n"
+        "<0003> <0647>\n"
+        "<0004> <062C>\n"
+        "<0005> <0020>\n"
+        "<0006> <0645>\n"
+        "<0007> <0627>\n"
+        "<0008> <0644>\n"
+        "<0009> <0633>\n"
+        "endbfchar\n"
+        "endcmap\n"
+        "CMapName currentdict /CMap defineresource pop\n"
+        "end\n"
+        "end\n";
+
+    std::string contentStream =
+        "BT\n"
+        "/F1 20 Tf\n"
+        "100 700 Td\n"
+        "<000100020003000400050006000700080009> Tj\n"
+        "ET\n";
+
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 8 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Helvetica-Custom /Encoding /Identity-H /DescendantFonts [5 0 R] /ToUnicode 7 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "5 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Helvetica-Custom /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 6 0 R /DW 1000 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "6 0 obj\n<< /Type /FontDescriptor /FontName /Helvetica-Custom /Flags 4 /FontBBox [-500 -500 2000 2000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "7 0 obj\n<< /Length " + std::to_string(cmap.size()) + " >>\nstream\n" + cmap + "\nendstream\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "8 0 obj\n<< /Length " + std::to_string(contentStream.size()) + " >>\nstream\n" + contentStream + "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 9\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
+
 static void generateTextPdfFixture(const std::string& path, const std::string& text = "Hello PDF World!") {
     std::string pdf;
     pdf += "%PDF-1.4\n";
@@ -280,6 +360,7 @@ static void generateTextPdfFixture(const std::string& path, const std::string& t
 }
 
 int main(int argc, char* argv[]) {
+    QCoreApplication app(argc, argv);
     std::cout << "========================================" << std::endl;
     std::cout << " Running PDF Reader Engine Test Suite   " << std::endl;
     std::cout << "========================================" << std::endl;
@@ -1099,8 +1180,162 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Production PdfiumPage::extractText() fallback correctly reconstructed supplementary text without OOB read." << std::endl;
     }
 
+    // Test 17: Persian RTL text extraction, bidirectional highlight box merging, and background search
+    std::cout << "[TEST 17] Testing Persian RTL text extraction, highlight merging, and text search..." << std::endl;
+    {
+        std::string persianPath = "persian_test.pdf";
+        generatePersianPdfFixture(persianPath);
+
+        auto persianDoc = pdf::createDocument();
+        if (persianDoc->loadFromFile(persianPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to load Persian PDF fixture" << std::endl;
+            return 1;
+        }
+
+        auto persianPage = persianDoc->getPage(0);
+        if (!persianPage) {
+            std::cerr << "[FAIL] Failed to open page from Persian PDF fixture" << std::endl;
+            return 1;
+        }
+
+        pdf::PageText pt = persianPage->extractText();
+        std::cout << "  [DEBUG] Persian extracted charCount=" << pt.charCount() << std::endl;
+        for (size_t i = 0; i < pt.charCount(); ++i) {
+            std::cout << "     persian[" << i << "]: unicode=0x" << std::hex << static_cast<uint32_t>(pt.chars[i].unicode)
+                      << " box=[" << pt.chars[i].left << ", " << pt.chars[i].top
+                      << ", " << pt.chars[i].right << ", " << pt.chars[i].bottom << "]"
+                      << std::dec << std::endl;
+        }
+        if (pt.charCount() != 9) {
+            std::cerr << "[FAIL] Expected 9 characters in Persian text, got " << pt.charCount() << std::endl;
+            return 1;
+        }
+
+        // Verify Arabic/Persian Unicode characters in logical reading order:
+        // 'salam' (Seen 0x0633, Lam 0x0644, Alef 0x0627, Meem 0x0645)
+        if (pt.chars[0].unicode != 0x0633 || pt.chars[1].unicode != 0x0644 ||
+            pt.chars[2].unicode != 0x0627 || pt.chars[3].unicode != 0x0645) {
+            std::cerr << "[FAIL] Persian characters mismatch for 'salam': "
+                      << "c0=0x" << std::hex << static_cast<uint32_t>(pt.chars[0].unicode)
+                      << " c1=0x" << static_cast<uint32_t>(pt.chars[1].unicode)
+                      << " c2=0x" << static_cast<uint32_t>(pt.chars[2].unicode)
+                      << " c3=0x" << static_cast<uint32_t>(pt.chars[3].unicode) << std::dec << std::endl;
+            return 1;
+        }
+
+        // Substring extraction
+        std::u16string salamU16 = pt.getSelectedText(0, 3);
+        if (salamU16 != u"\u0633\u0644\u0627\u0645") {
+            std::cerr << "[FAIL] getSelectedText(0, 3) expected 'salam'" << std::endl;
+            return 1;
+        }
+
+        std::u16string jahanU16 = pt.getSelectedText(5, 8);
+        if (jahanU16 != u"\u062C\u0647\u0627\u0646") {
+            std::cerr << "[FAIL] getSelectedText(5, 8) expected 'jahan'" << std::endl;
+            return 1;
+        }
+
+        // Test highlight rectangle merging for RTL character sequences
+        auto salamRects = pt.getSelectionRects(0, 3);
+        if (salamRects.size() != 1) {
+            std::cerr << "[FAIL] Expected contiguous RTL highlight for 'salam' to merge into 1 rect, got " << salamRects.size() << std::endl;
+            return 1;
+        }
+        if (!salamRects[0].isValid() || salamRects[0].width() <= 0.0 || salamRects[0].height() <= 0.0) {
+            std::cerr << "[FAIL] Merged RTL highlight rectangle has non-positive area" << std::endl;
+            return 1;
+        }
+
+        // Test asynchronous RenderWorker search on Persian document
+        pdf::RenderWorker worker;
+        worker.openDocumentSync(101, persianPath);
+
+        std::atomic<int> matchCount{0};
+        std::vector<pdf::SearchMatch> deliveredMatches;
+        std::atomic<bool> searchDone{false};
+
+        QObject::connect(&worker, &pdf::RenderWorker::searchMatchesFound, [&](int64_t, int64_t, int, const std::vector<pdf::SearchMatch>& matches) {
+            matchCount += static_cast<int>(matches.size());
+            deliveredMatches.insert(deliveredMatches.end(), matches.begin(), matches.end());
+        });
+        QObject::connect(&worker, &pdf::RenderWorker::searchCompleted, [&](int64_t, int64_t, int) {
+            searchDone = true;
+        });
+
+        // 1. Search for "salam" (exact Persian word)
+        worker.startSearch(101, 1, QString::fromUtf8("\xd8\xb3\xd9\x84\xd8\xa7\xd9\x85"), false, 1);
+        worker.waitForIdle();
+        QCoreApplication::processEvents();
+
+        if (matchCount.load() != 1 || deliveredMatches.size() != 1) {
+            std::cerr << "[FAIL] Search for 'salam' expected 1 match, got " << matchCount.load() << std::endl;
+            return 1;
+        }
+        if (deliveredMatches[0].charStartIndex != 0 || deliveredMatches[0].charCount != 4) {
+            std::cerr << "[FAIL] Match indices for 'salam' incorrect" << std::endl;
+            return 1;
+        }
+        if (deliveredMatches[0].rects.size() != 1) {
+            std::cerr << "[FAIL] Expected 1 merged highlight rect in search match, got " << deliveredMatches[0].rects.size() << std::endl;
+            return 1;
+        }
+
+        // 2. Search for "jahan"
+        matchCount = 0;
+        deliveredMatches.clear();
+        worker.startSearch(101, 2, QString::fromUtf8("\xd8\xac\xd9\x87\xd8\xa7\xd9\x86"), false, 1);
+        worker.waitForIdle();
+        QCoreApplication::processEvents();
+
+        if (matchCount.load() != 1 || deliveredMatches.size() != 1) {
+            std::cerr << "[FAIL] Search for 'jahan' expected 1 match, got " << matchCount.load() << std::endl;
+            return 1;
+        }
+        if (deliveredMatches[0].charStartIndex != 5 || deliveredMatches[0].charCount != 4) {
+            std::cerr << "[FAIL] Match indices for 'jahan' incorrect" << std::endl;
+            return 1;
+        }
+
+        // 3. Case-insensitive Latin search test on text_test.pdf
+        std::string latinPath = "text_test.pdf";
+        generateTextPdfFixture(latinPath, "Hello PDF World!");
+        worker.openDocumentSync(102, latinPath);
+        matchCount = 0;
+        deliveredMatches.clear();
+        // Case-insensitive search
+        worker.startSearch(102, 3, QStringLiteral("hello"), false, 1);
+        worker.waitForIdle();
+        QCoreApplication::processEvents();
+        int caseInsensitiveMatches = matchCount.load();
+
+        matchCount = 0;
+        deliveredMatches.clear();
+        // Case-sensitive search with mismatched casing
+        worker.startSearch(102, 4, QStringLiteral("hElLo"), true, 1);
+        worker.waitForIdle();
+        QCoreApplication::processEvents();
+        int caseSensitiveMatches = matchCount.load();
+
+        if (caseInsensitiveMatches <= 0) {
+            std::cerr << "[FAIL] Case-insensitive search expected matches for 'hello', got 0" << std::endl;
+            return 1;
+        }
+        if (caseSensitiveMatches != 0) {
+            std::cerr << "[FAIL] Case-sensitive search for 'hElLo' expected 0 matches, got " << caseSensitiveMatches << std::endl;
+            return 1;
+        }
+
+        // 4. Cancel search test: starting a search and immediately canceling
+        worker.startSearch(102, 5, QStringLiteral("a"), false, 1);
+        worker.cancelSearch();
+        worker.waitForIdle();
+
+        std::cout << "  -> Passed: Persian text extracted with accurate code points, RTL highlight boxes merged, and case-sensitive/case-insensitive search verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 16 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 17 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

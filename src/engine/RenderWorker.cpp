@@ -10,6 +10,8 @@ RenderWorker::RenderWorker(QObject* parent)
     qRegisterMetaType<pdf::PixelBuffer>("pdf::PixelBuffer");
     qRegisterMetaType<pdf::OpenResult>("pdf::OpenResult");
     qRegisterMetaType<std::shared_ptr<pdf::PageText>>("std::shared_ptr<pdf::PageText>");
+    qRegisterMetaType<pdf::SearchMatch>("pdf::SearchMatch");
+    qRegisterMetaType<std::vector<pdf::SearchMatch>>("std::vector<pdf::SearchMatch>");
 
     m_thread = std::thread(&RenderWorker::workerLoop, this);
 }
@@ -19,6 +21,7 @@ RenderWorker::~RenderWorker() {
 }
 
 void RenderWorker::stop() {
+    cancelSearch();
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_running.load()) {
@@ -27,6 +30,7 @@ void RenderWorker::stop() {
         m_running.store(false);
         m_queue.clear();
         m_controlQueue.clear();
+        m_activeSearch.searchId = 0;
         m_cv.notify_all();
         m_idleCv.notify_all();
     }
@@ -37,6 +41,7 @@ void RenderWorker::stop() {
 }
 
 OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string& filePath, const std::string& password) {
+    cancelSearch();
     auto promise = std::make_shared<std::promise<OpenResult>>();
     auto future = promise->get_future();
 
@@ -99,6 +104,7 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
 }
 
 void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& filePath, const std::string& password) {
+    cancelSearch();
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_running.load()) {
@@ -152,6 +158,7 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
 }
 
 void RenderWorker::closeDocumentSync() {
+    cancelSearch();
     auto promise = std::make_shared<std::promise<void>>();
     auto future = promise->get_future();
 
@@ -194,7 +201,8 @@ void RenderWorker::setGeneration(uint64_t generation) {
         m_queue.end()
     );
 
-    if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering && !m_isControlRunning) {
+    if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering && !m_isControlRunning &&
+        (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages)) {
         m_idleCv.notify_all();
     }
 }
@@ -307,10 +315,41 @@ std::shared_ptr<const PageText> RenderWorker::getPageTextSync(int64_t documentId
     return future.get();
 }
 
+void RenderWorker::startSearch(int64_t documentId, int64_t searchId, const QString& query, bool matchCase, int totalPages) {
+    m_currentSearchId.store(searchId);
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load() || query.isEmpty() || totalPages <= 0) {
+        m_activeSearch.searchId = 0;
+        return;
+    }
+
+    m_activeSearch.documentId = documentId;
+    m_activeSearch.searchId = searchId;
+    m_activeSearch.query = query;
+    m_activeSearch.matchCase = matchCase;
+    m_activeSearch.totalPages = totalPages;
+    m_activeSearch.nextPageToSearch = 0;
+    m_activeSearch.totalMatchesFound = 0;
+
+    m_cv.notify_one();
+}
+
+void RenderWorker::cancelSearch() {
+    m_currentSearchId.fetch_add(1);
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_activeSearch.searchId = 0;
+    if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering && !m_isControlRunning) {
+        m_idleCv.notify_all();
+    }
+}
+
 void RenderWorker::cancelAll() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_queue.clear();
-    if (m_controlQueue.empty() && !m_isRendering && !m_isControlRunning) {
+    if (m_controlQueue.empty() && !m_isRendering && !m_isControlRunning &&
+        (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages)) {
         m_idleCv.notify_all();
     }
 }
@@ -318,7 +357,8 @@ void RenderWorker::cancelAll() {
 void RenderWorker::waitForIdle() {
     std::unique_lock<std::mutex> lock(m_mutex);
     m_idleCv.wait(lock, [&]() {
-        return m_queue.empty() && m_controlQueue.empty() && !m_isRendering && !m_isControlRunning;
+        return m_queue.empty() && m_controlQueue.empty() && !m_isRendering && !m_isControlRunning &&
+               (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages);
     });
 }
 
@@ -351,36 +391,113 @@ IPage* RenderWorker::getOrLoadWorkerPage(int pageIndex) {
     return insIt->second.first.get();
 }
 
+std::vector<SearchMatch> RenderWorker::findTextInPage(const PageText& pt, const QString& query, bool matchCase) {
+    std::vector<SearchMatch> matches;
+    if (query.isEmpty() || pt.chars.empty()) {
+        return matches;
+    }
+
+    QString pageTextStr;
+    pageTextStr.reserve(static_cast<qsizetype>(pt.chars.size() * 2));
+    std::vector<int> qCharToBoxIndex;
+    qCharToBoxIndex.reserve(pt.chars.size() * 2);
+
+    for (size_t i = 0; i < pt.chars.size(); ++i) {
+        char32_t cp = pt.chars[i].unicode;
+        if (cp == 0) {
+            continue;
+        }
+        if (cp <= 0xFFFF) {
+            pageTextStr.append(QChar(static_cast<ushort>(cp)));
+            qCharToBoxIndex.push_back(static_cast<int>(i));
+        } else if (cp <= 0x10FFFF) {
+            cp -= 0x10000;
+            pageTextStr.append(QChar(static_cast<ushort>(0xD800 + ((cp >> 10) & 0x3FF))));
+            qCharToBoxIndex.push_back(static_cast<int>(i));
+            pageTextStr.append(QChar(static_cast<ushort>(0xDC00 + (cp & 0x3FF))));
+            qCharToBoxIndex.push_back(static_cast<int>(i));
+        }
+    }
+
+    if (pageTextStr.isEmpty() || qCharToBoxIndex.empty()) {
+        return matches;
+    }
+
+    const Qt::CaseSensitivity cs = matchCase ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    qsizetype pos = 0;
+
+    while (pos < pageTextStr.size()) {
+        qsizetype found = pageTextStr.indexOf(query, pos, cs);
+        if (found < 0) {
+            break;
+        }
+
+        qsizetype matchEndQ = found + query.size() - 1;
+        if (matchEndQ < static_cast<qsizetype>(qCharToBoxIndex.size())) {
+            int startBox = qCharToBoxIndex[static_cast<size_t>(found)];
+            int endBox = qCharToBoxIndex[static_cast<size_t>(matchEndQ)];
+
+            SearchMatch m;
+            m.pageIndex = pt.pageIndex;
+            m.charStartIndex = startBox;
+            m.charCount = endBox - startBox + 1;
+            m.rects = pt.getSelectionRects(startBox, endBox);
+            matches.push_back(std::move(m));
+        }
+
+        pos = found + std::max<qsizetype>(1, query.size());
+    }
+
+    return matches;
+}
+
 void RenderWorker::workerLoop() {
+    int tilesRenderedSinceSearch = 0;
+
     while (m_running.load()) {
         ControlTask ctrlTask;
         bool hasControlTask = false;
         TileRenderRequest req;
         bool hasRenderRequest = false;
 
+        bool hasSearchTask = false;
+        int searchPageIndex = -1;
+        int64_t searchDocId = 0;
+        int64_t searchId = 0;
+        QString searchQuery;
+        bool searchMatchCase = false;
+        int searchTotalPages = 0;
+        bool isLastSearchPage = false;
+
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             m_cv.wait(lock, [&]() {
-                return !m_running.load() || !m_controlQueue.empty() || !m_queue.empty();
+                if (!m_running.load()) return true;
+                if (!m_controlQueue.empty()) return true;
+                if (!m_queue.empty()) return true;
+                if (m_activeSearch.searchId != 0 && m_activeSearch.nextPageToSearch < m_activeSearch.totalPages) return true;
+                return false;
             });
 
             if (!m_running.load()) {
                 break;
             }
 
-            // Prioritize control tasks (open/close/text) over tile rendering
+            const bool hasSearch = (m_activeSearch.searchId != 0 &&
+                                    m_activeSearch.nextPageToSearch < m_activeSearch.totalPages &&
+                                    m_activeSearch.searchId == m_currentSearchId.load());
+
             if (!m_controlQueue.empty()) {
                 ctrlTask = std::move(m_controlQueue.front());
                 m_controlQueue.erase(m_controlQueue.begin());
                 m_isControlRunning = true;
                 hasControlTask = true;
-            } else if (!m_queue.empty()) {
+            } else if (!m_queue.empty() && (!hasSearch || tilesRenderedSinceSearch < 4)) {
                 req = std::move(m_queue.front());
                 m_queue.erase(m_queue.begin());
 
-                // Check if tile request is stale (e.g. cancelled by generation or obsolete docId)
                 if (req.documentId != m_activeDocumentId.load() || req.generation < m_currentGeneration.load()) {
-                    if (m_queue.empty() && m_controlQueue.empty()) {
+                    if (m_queue.empty() && m_controlQueue.empty() && !hasSearch) {
                         m_idleCv.notify_all();
                     }
                     continue;
@@ -389,6 +506,17 @@ void RenderWorker::workerLoop() {
                 m_isRendering = true;
                 m_inFlightKey = req.key;
                 hasRenderRequest = true;
+                tilesRenderedSinceSearch++;
+            } else if (hasSearch) {
+                hasSearchTask = true;
+                searchPageIndex = m_activeSearch.nextPageToSearch++;
+                searchDocId = m_activeSearch.documentId;
+                searchId = m_activeSearch.searchId;
+                searchQuery = m_activeSearch.query;
+                searchMatchCase = m_activeSearch.matchCase;
+                searchTotalPages = m_activeSearch.totalPages;
+                isLastSearchPage = (m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages);
+                tilesRenderedSinceSearch = 0;
             }
         }
 
@@ -396,7 +524,8 @@ void RenderWorker::workerLoop() {
             ctrlTask.execute();
             std::lock_guard<std::mutex> lock(m_mutex);
             m_isControlRunning = false;
-            if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering) {
+            if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering &&
+                (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages)) {
                 m_idleCv.notify_all();
             }
             continue;
@@ -431,10 +560,57 @@ void RenderWorker::workerLoop() {
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_isRendering = false;
-                if (m_queue.empty() && m_controlQueue.empty()) {
+                if (m_queue.empty() && m_controlQueue.empty() &&
+                    (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages)) {
                     m_idleCv.notify_all();
                 }
             }
+            continue;
+        }
+
+        if (hasSearchTask) {
+            if (!m_running.load() || searchId != m_currentSearchId.load() || searchDocId != m_activeDocumentId.load()) {
+                continue;
+            }
+
+            std::vector<SearchMatch> pageMatches;
+            if (m_workerDocument && m_running.load()) {
+                IPage* page = getOrLoadWorkerPage(searchPageIndex);
+                if (page) {
+                    PageText pt = page->extractText();
+                    pt.pageIndex = searchPageIndex;
+                    pageMatches = findTextInPage(pt, searchQuery, searchMatchCase);
+                }
+            }
+
+            // Deliver matches if search is still current
+            if (m_running.load() && searchId == m_currentSearchId.load() && searchDocId == m_activeDocumentId.load()) {
+                int totalSoFar = 0;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_activeSearch.searchId == searchId) {
+                        m_activeSearch.totalMatchesFound += static_cast<int>(pageMatches.size());
+                        totalSoFar = m_activeSearch.totalMatchesFound;
+                    }
+                }
+
+                if (!pageMatches.empty()) {
+                    Q_EMIT searchMatchesFound(searchDocId, searchId, searchPageIndex, pageMatches);
+                }
+                Q_EMIT searchProgress(searchDocId, searchId, searchPageIndex + 1, searchTotalPages);
+
+                if (isLastSearchPage) {
+                    Q_EMIT searchCompleted(searchDocId, searchId, totalSoFar);
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (m_activeSearch.searchId == searchId) {
+                        m_activeSearch.searchId = 0;
+                    }
+                    if (m_queue.empty() && m_controlQueue.empty() && !m_isRendering) {
+                        m_idleCv.notify_all();
+                    }
+                }
+            }
+            continue;
         }
     }
 
