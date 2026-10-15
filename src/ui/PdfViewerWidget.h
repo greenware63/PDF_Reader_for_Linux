@@ -184,6 +184,7 @@ private:
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
     void drawPendingPlaceholder(QPainter& painter, const QRectF& rect);
     void drawLoadingOverlay(QPainter& painter);
+    void drawWorkerErrorBanner(QPainter& painter);
     bool drawFallbackTile(QPainter& painter, const layout::VisibleTile& tile, const QRectF& tileRect, double qScale, double qDpr);
     void rememberFallbackScale(double previousScale);
     void ensurePageTextRequested(int pageIndex);
@@ -256,6 +257,7 @@ private:
     std::vector<pdf::SearchMatch> m_searchMatches;
     int m_currentMatchIndex{-1};
     std::vector<pdf::OutlineItem> m_outline;
+    QString m_workerErrorMessage;
 };
 
 } // namespace ui

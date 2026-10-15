@@ -374,6 +374,12 @@ void WorkerClient::setOpenDelayForTesting(std::chrono::milliseconds delay) {
                 serialize(WorkerControlRequest{0, -1, static_cast<int>(delay.count()), false, false}));
 }
 
+void WorkerClient::killWorkerForTesting() {
+    if (m_process.state() != QProcess::NotRunning) {
+        m_process.kill();
+    }
+}
+
 void WorkerClient::stop() {
     if (m_stopping) {
         return;

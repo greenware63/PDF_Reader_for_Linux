@@ -49,6 +49,7 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
             Q_EMIT loadingChanged(false, QFileInfo(failedPath).fileName());
             Q_EMIT documentOpenFailed(failedPath, pdf::DocumentError::InvalidFormat);
         }
+        m_workerErrorMessage = message;
         m_hasDocument = false;
         m_pageCount = 0;
         m_inFlightKeys.clear();
@@ -105,6 +106,7 @@ QString PdfViewerWidget::openErrorMessage(pdf::DocumentError error, const QStrin
 }
 
 void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& filePath, const pdf::OpenResult& openResult) {
+    m_workerErrorMessage.clear();
     // Success: atomically cancel worker work, flush previous cache, and advance epochs
     m_renderWorker.cancelAll();
     m_cache.invalidateDocument(m_currentDocumentId);
@@ -179,6 +181,7 @@ void PdfViewerWidget::openDocumentAsync(const QString& filePath, const QString& 
 }
 
 void PdfViewerWidget::startAsyncOpen(const QString& filePath, const QString& password) {
+    m_workerErrorMessage.clear();
     m_loading = true;
     m_pendingOpenId = m_currentDocumentId + 1;
     m_pendingOpenPath = filePath;
@@ -234,6 +237,7 @@ void PdfViewerWidget::onDocumentOpened(int64_t documentId, pdf::OpenResult resul
 }
 
 void PdfViewerWidget::closeDocument() {
+    m_workerErrorMessage.clear();
     cancelPendingOpen();
     // Close document and page cache serially on worker thread
     m_renderWorker.closeDocumentSync();
@@ -644,6 +648,42 @@ void PdfViewerWidget::drawErrorPlaceholder(QPainter& painter, const QRectF& rect
 
 void PdfViewerWidget::drawPendingPlaceholder(QPainter& painter, const QRectF& rect) {
     painter.fillRect(rect, QColor(252, 252, 252));
+}
+
+void PdfViewerWidget::drawWorkerErrorBanner(QPainter& painter) {
+    const int vpW = viewport()->width();
+    const int vpH = viewport()->height();
+
+    const int boxW = std::min(560, std::max(280, vpW - 40));
+    const int boxH = 150;
+    const QRect boxRect((vpW - boxW) / 2, (vpH - boxH) / 2, boxW, boxH);
+
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(QColor(40, 44, 48));
+    painter.setPen(QPen(QColor(220, 80, 80), 1.5));
+    painter.drawRoundedRect(boxRect, 8, 8);
+
+    QFont titleFont = painter.font();
+    titleFont.setBold(true);
+    titleFont.setPointSizeF(titleFont.pointSizeF() * 1.15);
+    painter.setFont(titleFont);
+    painter.setPen(QColor(240, 100, 100));
+    painter.drawText(boxRect.adjusted(20, 16, -20, -90), Qt::AlignLeft | Qt::AlignVCenter,
+                     tr("Isolated Renderer Terminated"));
+
+    QFont bodyFont = painter.font();
+    bodyFont.setBold(false);
+    bodyFont.setPointSizeF(bodyFont.pointSizeF() * 0.85);
+    painter.setFont(bodyFont);
+    painter.setPen(QColor(210, 215, 220));
+    painter.drawText(boxRect.adjusted(20, 46, -20, -35), Qt::AlignLeft | Qt::TextWordWrap,
+                     m_workerErrorMessage.isEmpty()
+                         ? tr("The isolated rendering worker process crashed or exited unexpectedly. The main application was protected.")
+                         : m_workerErrorMessage);
+
+    painter.setPen(QColor(150, 155, 160));
+    painter.drawText(boxRect.adjusted(20, 105, -20, -12), Qt::AlignLeft | Qt::AlignVCenter,
+                     tr("Open another document or reload to restart the worker process."));
 }
 
 void PdfViewerWidget::drawLoadingOverlay(QPainter& painter) {
@@ -1206,7 +1246,11 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     painter.fillRect(viewport()->rect(), QColor("#323639"));
 
     if (!isDocumentOpen()) {
-        drawLoadingOverlay(painter);
+        if (!m_workerErrorMessage.isEmpty()) {
+            drawWorkerErrorBanner(painter);
+        } else {
+            drawLoadingOverlay(painter);
+        }
         return;
     }
 

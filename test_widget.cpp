@@ -2243,8 +2243,62 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: async outline loading, cycle safety, sidebar visibility, bookmark destination navigation, clicked-row retention, and active tracking verified." << std::endl;
     }
 
+    std::cout << "[TEST 34] Testing isolated worker crash survival and recovery banner..." << std::endl;
+    {
+        ui::MainWindow window;
+        window.resize(1024, 768);
+        window.show();
+        QCoreApplication::processEvents();
+
+        auto* viewer = window.findChild<ui::PdfViewerWidget*>();
+        if (!viewer) {
+            std::cerr << "[FAIL] Could not find PdfViewerWidget child in MainWindow" << std::endl;
+            return 1;
+        }
+
+        std::string samplePath = "widget_test_crash_recovery.pdf";
+        generateMultiPagePdf(samplePath, 2);
+
+        if (!window.openFile(QString::fromStdString(samplePath))) {
+            std::cerr << "[FAIL] Failed to open test fixture in crash recovery test." << std::endl;
+            return 1;
+        }
+
+        QElapsedTimer loadTimer;
+        loadTimer.start();
+        while (loadTimer.elapsed() < 3000 && !viewer->isDocumentOpen()) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+
+        if (!viewer->isDocumentOpen()) {
+            std::cerr << "[FAIL] Document failed to open in crash recovery test." << std::endl;
+            return 1;
+        }
+
+        // Simulate worker process crash
+        viewer->renderWorker().killWorkerForTesting();
+        QElapsedTimer crashTimer;
+        crashTimer.start();
+        while (crashTimer.elapsed() < 3000 && viewer->isDocumentOpen()) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+
+        if (viewer->isDocumentOpen()) {
+            std::cerr << "[FAIL] Viewer still reports open document after worker termination." << std::endl;
+            return 1;
+        }
+
+        // Repaint verifying paintEvent renders drawWorkerErrorBanner without crash
+        viewer->viewport()->repaint();
+        QCoreApplication::processEvents();
+
+        std::cout << "  -> Passed: Worker crash cleanly contained; UI survived and rendered recovery banner." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 33 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 34 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

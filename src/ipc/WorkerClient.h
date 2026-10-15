@@ -40,6 +40,7 @@ public:
     size_t cachedPageCount();
     void setRenderDelayForTesting(std::chrono::milliseconds delay);
     void setOpenDelayForTesting(std::chrono::milliseconds delay);
+    void killWorkerForTesting();
 
 Q_SIGNALS:
     void tileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key,
