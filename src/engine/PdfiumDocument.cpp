@@ -3,6 +3,7 @@
 #include "PdfiumMutex.h"
 #include <mutex>
 #include <cstring>
+#include <unordered_set>
 #include <vector>
 
 namespace pdf {
@@ -155,10 +156,25 @@ std::unique_ptr<IPage> PdfiumDocument::getPage(int pageIndex) {
     return page;
 }
 
-static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK bookmark) {
-    OutlineItem item;
+namespace {
 
-    // 1. Title
+constexpr size_t MAX_OUTLINE_ITEMS = 10000;
+constexpr size_t MAX_OUTLINE_DEPTH = 128;
+
+struct OutlineExtractionState {
+    std::unordered_set<FPDF_BOOKMARK> visited;
+    size_t itemCount{0};
+};
+
+static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK bookmark,
+                                            size_t depth, OutlineExtractionState& state) {
+    OutlineItem item;
+    if (!bookmark || depth >= MAX_OUTLINE_DEPTH || state.itemCount >= MAX_OUTLINE_ITEMS ||
+        !state.visited.insert(bookmark).second) {
+        return item;
+    }
+    ++state.itemCount;
+
     unsigned long titleBytes = FPDFBookmark_GetTitle(bookmark, nullptr, 0);
     if (titleBytes > 2) {
         std::vector<char16_t> buf(titleBytes / 2);
@@ -170,7 +186,6 @@ static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK boo
         item.title = QString::fromUtf16(buf.data(), static_cast<qsizetype>(charCount));
     }
 
-    // 2. Destination
     FPDF_DEST dest = FPDFBookmark_GetDest(doc, bookmark);
     if (!dest) {
         FPDF_ACTION action = FPDFBookmark_GetAction(bookmark);
@@ -186,19 +201,24 @@ static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK boo
         if (FPDFDest_GetLocationInPage(dest, &hasX, &hasY, &hasZoom, &xVal, &yVal, &zoomVal)) {
             if (hasY) {
                 item.targetYPoints = static_cast<double>(yVal);
+                item.hasTargetY = true;
             }
         }
     }
 
-    // 3. Children
     FPDF_BOOKMARK child = FPDFBookmark_GetFirstChild(doc, bookmark);
-    while (child) {
-        item.children.push_back(extractBookmarkRecursive(doc, child));
+    while (child && state.itemCount < MAX_OUTLINE_ITEMS) {
+        if (state.visited.find(child) != state.visited.end() || depth + 1 >= MAX_OUTLINE_DEPTH) {
+            break;
+        }
+        item.children.push_back(extractBookmarkRecursive(doc, child, depth + 1, state));
         child = FPDFBookmark_GetNextSibling(doc, child);
     }
 
     return item;
 }
+
+} // namespace
 
 std::vector<OutlineItem> PdfiumDocument::getOutline() const {
     if (!m_doc) {
@@ -206,10 +226,14 @@ std::vector<OutlineItem> PdfiumDocument::getOutline() const {
     }
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
     std::vector<OutlineItem> outline;
+    OutlineExtractionState state;
 
     FPDF_BOOKMARK rootChild = FPDFBookmark_GetFirstChild(m_doc.get(), nullptr);
-    while (rootChild) {
-        outline.push_back(extractBookmarkRecursive(m_doc.get(), rootChild));
+    while (rootChild && state.itemCount < MAX_OUTLINE_ITEMS) {
+        if (state.visited.find(rootChild) != state.visited.end()) {
+            break;
+        }
+        outline.push_back(extractBookmarkRecursive(m_doc.get(), rootChild, 0, state));
         rootChild = FPDFBookmark_GetNextSibling(m_doc.get(), rootChild);
     }
 

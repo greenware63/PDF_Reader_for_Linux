@@ -53,7 +53,10 @@ static void addOutlineItemsRecursive(QStandardItem* parent, const std::vector<pd
         auto* treeItem = new QStandardItem(item.title);
         treeItem->setData(item.pageIndex, Qt::UserRole);
         treeItem->setData(item.targetYPoints, Qt::UserRole + 1);
-        treeItem->setToolTip(QObject::tr("%1 (Page %2)").arg(item.title).arg(item.pageIndex + 1));
+        treeItem->setData(item.hasTargetY, Qt::UserRole + 2);
+        treeItem->setToolTip(item.isValid()
+                                 ? QObject::tr("%1 (Page %2)").arg(item.title).arg(item.pageIndex + 1)
+                                 : item.title);
         if (!item.children.empty()) {
             addOutlineItemsRecursive(treeItem, item.children);
         }
@@ -66,13 +69,13 @@ static QStandardItem* findBestOutlineItem(QStandardItem* parent, int currentPage
     for (int r = 0; r < parent->rowCount(); ++r) {
         auto* child = parent->child(r);
         int page = child->data(Qt::UserRole).toInt();
-        if (page <= currentPage) {
+        if (page >= 0 && page <= currentPage && (!best || page >= best->data(Qt::UserRole).toInt())) {
             best = child;
-            if (child->hasChildren()) {
-                auto* deeper = findBestOutlineItem(child, currentPage);
-                if (deeper) {
-                    best = deeper;
-                }
+        }
+        if (child->hasChildren()) {
+            auto* deeper = findBestOutlineItem(child, currentPage);
+            if (deeper && (!best || deeper->data(Qt::UserRole).toInt() >= best->data(Qt::UserRole).toInt())) {
+                best = deeper;
             }
         }
     }
@@ -393,7 +396,9 @@ void MainWindow::onOutlineReady(const std::vector<pdf::OutlineItem>& outline) {
     addOutlineItemsRecursive(m_outlineModel->invisibleRootItem(), outline);
     m_sidebarStack->setCurrentWidget(m_outlineView);
     m_outlineView->expandToDepth(0);
-    m_sidebarDock->show();
+    if (m_viewer->pageCount() > 0) {
+        onPageChanged(m_viewer->currentPage() + 1, m_viewer->pageCount());
+    }
 }
 
 void MainWindow::onOutlineItemClicked(const QModelIndex& index) {
@@ -402,7 +407,12 @@ void MainWindow::onOutlineItemClicked(const QModelIndex& index) {
     }
     int pageIndex = index.data(Qt::UserRole).toInt();
     if (pageIndex >= 0 && pageIndex < m_viewer->pageCount()) {
-        m_viewer->goToPage(pageIndex);
+        if (index.data(Qt::UserRole + 2).toBool()) {
+            m_viewer->goToPage(pageIndex, index.data(Qt::UserRole + 1).toDouble());
+        } else {
+            m_viewer->goToPage(pageIndex);
+        }
+        m_outlineView->setCurrentIndex(index);
         m_viewer->setFocus();
     }
 }

@@ -3,6 +3,7 @@
 #include <QAbstractScrollArea>
 #include <QString>
 #include <memory>
+#include <optional>
 #include <vector>
 #include <cstdint>
 #include <unordered_set>
@@ -73,6 +74,8 @@ public:
     void zoomFitWidth();
 
     void goToPage(int pageIndex);
+    /// Navigates to a PDF destination Y measured upward from the page bottom.
+    void goToPage(int pageIndex, double targetYPoints);
     void nextPage();
     void previousPage();
 
@@ -176,6 +179,7 @@ private:
     void updateScrollBars();
 
     void setDocScrollPosition(int64_t docX, int64_t docY);
+    void goToPageImpl(int pageIndex, std::optional<double> targetYPoints);
 
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
     void drawPendingPlaceholder(QPainter& painter, const QRectF& rect);
@@ -207,6 +211,7 @@ private:
     QString m_queuedOpenPassword;
 
     bool m_hasDocument{false};
+    bool m_outlineRequestPending{false};
     int m_pageCount{0};
     int64_t m_currentDocumentId{1};
     uint64_t m_currentGeneration{1};

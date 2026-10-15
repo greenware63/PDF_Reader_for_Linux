@@ -40,7 +40,6 @@ struct OpenResult {
     DocumentError error{DocumentError::None};
     int pageCount{0};
     std::vector<std::pair<double, double>> pageSizes;
-    std::vector<OutlineItem> outline;
 };
 
 /**
@@ -78,6 +77,12 @@ public:
      * @brief Closes the active document and clears all open page handles serially on the worker thread.
      */
     void closeDocumentSync();
+
+    /**
+     * @brief Requests low-priority extraction of the active document outline.
+     * The result is delivered through documentOutlineReady().
+     */
+    void requestDocumentOutline(int64_t documentId);
 
     /**
      * @brief Sets current request generation. Discards queued requests with older generations.
@@ -155,11 +160,6 @@ public:
     /**
      * @return Number of open IPage handles currently cached on the worker thread.
      */
-    /**
-     * @brief Synchronously extracts the outline/bookmarks tree from the active document on the worker thread.
-     */
-    std::vector<OutlineItem> getOutlineSync(int64_t documentId);
-
     size_t cachedPageCount() const noexcept {
         return m_cachedPageCount.load(std::memory_order_relaxed);
     }
@@ -214,12 +214,14 @@ private:
     // True while a control task (open/close) executes on the worker; included in the idle condition
     // so waitForIdle() also waits for asynchronous document opens. Guarded by m_mutex.
     bool m_isControlRunning{false};
+    bool m_isOutlineRunning{false};
     // Key of the tile currently being rendered (valid while m_isRendering); guarded by m_mutex.
     // enqueueRequest(s) deduplicates against it so a scroll that re-requests the in-flight tile is a no-op.
     TileKey m_inFlightKey;
 
     std::vector<ControlTask> m_controlQueue;
     std::vector<TileRenderRequest> m_queue;
+    std::vector<int64_t> m_outlineQueue;
     ActiveSearch m_activeSearch;
 
     // Document and open page handles are accessed EXCLUSIVELY on the worker thread inside workerLoop()
