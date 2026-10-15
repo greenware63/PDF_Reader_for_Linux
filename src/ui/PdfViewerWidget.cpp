@@ -40,6 +40,21 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
     connect(&m_renderWorker, &pdf::ipc::WorkerClient::searchMatchesFound, this, &PdfViewerWidget::onSearchMatchesFound);
     connect(&m_renderWorker, &pdf::ipc::WorkerClient::searchProgress, this, &PdfViewerWidget::onSearchProgress);
     connect(&m_renderWorker, &pdf::ipc::WorkerClient::searchCompleted, this, &PdfViewerWidget::onSearchCompleted);
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::thumbnailReady, this,
+            [this](int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer) {
+                if (documentId == m_currentDocumentId && buffer.isValid()) {
+                    QImage img(reinterpret_cast<const uchar*>(buffer.data()),
+                               buffer.width(), buffer.height(), static_cast<qsizetype>(buffer.stride()),
+                               QImage::Format_RGB32);
+                    Q_EMIT thumbnailReady(pageIndex, img.copy());
+                }
+            });
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::thumbnailFailed, this,
+            [this](int64_t documentId, int pageIndex) {
+                if (documentId == m_currentDocumentId) {
+                    Q_EMIT thumbnailFailed(pageIndex);
+                }
+            });
     connect(&m_renderWorker, &pdf::ipc::WorkerClient::workerFailed, this, [this](const QString& message) {
         const QString failedPath = m_pendingOpenPath;
         if (m_loading) {
@@ -121,6 +136,18 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_hasDocument = true;
     m_pageCount = openResult.pageCount;
     m_layout.setPageSizes(openResult.pageSizes);
+    m_pageLabels.clear();
+    m_pageLabels.reserve(m_pageCount);
+    if (!openResult.pageLabels.empty() && static_cast<int>(openResult.pageLabels.size()) == m_pageCount) {
+        for (const auto& l : openResult.pageLabels) {
+            m_pageLabels.push_back(QString::fromStdString(l));
+        }
+    } else {
+        for (int i = 0; i < m_pageCount; ++i) {
+            m_pageLabels.push_back(QString::number(i + 1));
+        }
+    }
+    Q_EMIT pageLabelsReady(m_pageLabels);
     m_outline.clear();
     m_outlineRequestPending = true;
 
@@ -256,6 +283,7 @@ void PdfViewerWidget::closeDocument() {
     m_layout.setPageSizes({});
     m_outline.clear();
     m_outlineRequestPending = false;
+    m_pageLabels.clear();
     m_currentPage = 0;
     m_docScrollX = 0;
     m_docScrollY = 0;
@@ -266,6 +294,19 @@ void PdfViewerWidget::closeDocument() {
     viewport()->update();
     Q_EMIT pageChanged(0, 0);
     Q_EMIT outlineReady(m_outline);
+}
+
+QString PdfViewerWidget::pageLabel(int pageIndex) const {
+    if (pageIndex >= 0 && pageIndex < static_cast<int>(m_pageLabels.size())) {
+        return m_pageLabels[static_cast<size_t>(pageIndex)];
+    }
+    return QString::number(pageIndex + 1);
+}
+
+void PdfViewerWidget::requestThumbnail(int pageIndex, int targetWidth) {
+    if (m_hasDocument && pageIndex >= 0 && pageIndex < m_pageCount) {
+        m_renderWorker.requestThumbnail(m_currentDocumentId, pageIndex, targetWidth);
+    }
 }
 
 void PdfViewerWidget::nextPage() {

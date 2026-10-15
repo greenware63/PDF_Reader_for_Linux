@@ -41,6 +41,7 @@ public:
     void setRenderDelayForTesting(std::chrono::milliseconds delay);
     void setOpenDelayForTesting(std::chrono::milliseconds delay);
     void killWorkerForTesting();
+    void requestThumbnail(int64_t documentId, int pageIndex, int targetWidth = 140);
 
 Q_SIGNALS:
     void tileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key,
@@ -55,6 +56,8 @@ Q_SIGNALS:
     void searchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated);
     void workerFailed(const QString& message);
     void workerControlReceived(quint64 requestId, const pdf::ipc::WorkerControlResponse& response);
+    void thumbnailReady(int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer);
+    void thumbnailFailed(int64_t documentId, int pageIndex);
 
 private Q_SLOTS:
     void onSocketConnected();

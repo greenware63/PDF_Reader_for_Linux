@@ -310,6 +310,51 @@ std::vector<OutlineItem> PdfiumDocument::getOutline() const {
     return outline;
 }
 
+std::string PdfiumDocument::getPageLabel(int pageIndex) const {
+    if (!m_doc || pageIndex < 0 || pageIndex >= pageCount()) {
+        return "";
+    }
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+    unsigned long length = FPDF_GetPageLabel(m_doc.get(), pageIndex, nullptr, 0);
+    if (length > 2) {
+        std::vector<char16_t> buf(length / 2);
+        FPDF_GetPageLabel(m_doc.get(), pageIndex, buf.data(), length);
+        size_t charCount = length / 2;
+        if (charCount > 0 && buf[charCount - 1] == 0) {
+            --charCount;
+        }
+        QString qLabel = QString::fromUtf16(buf.data(), static_cast<qsizetype>(charCount));
+        if (!qLabel.isEmpty()) {
+            return qLabel.toStdString();
+        }
+    }
+    return std::to_string(pageIndex + 1);
+}
+
+std::vector<std::string> PdfiumDocument::getPageLabels() const {
+    if (!m_doc) {
+        return {};
+    }
+    const int count = pageCount();
+    std::vector<std::string> labels;
+    labels.reserve(count);
+    for (int i = 0; i < count; ++i) {
+        labels.push_back(getPageLabel(i));
+    }
+    return labels;
+}
+
+PixelBuffer PdfiumDocument::renderThumbnail(int pageIndex, int targetWidth) {
+    if (!m_doc || pageIndex < 0 || pageIndex >= pageCount()) {
+        return {};
+    }
+    auto page = getPage(pageIndex);
+    if (!page) {
+        return {};
+    }
+    return page->renderThumbnail(targetWidth);
+}
+
 void PdfiumDocument::close() {
     m_doc.reset();
     m_lastError = DocumentError::None;

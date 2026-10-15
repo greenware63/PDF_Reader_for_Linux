@@ -43,6 +43,11 @@ enum class MessageType : uint32_t {
     WorkerControlRequest = 56,
     WorkerControlResponse = 57,
 
+    // Thumbnails
+    ThumbnailRequest = 60,
+    ThumbnailResponse = 61,
+    ThumbnailFailedResponse = 62,
+
     // Error / Diagnostic
     WorkerError = 99
 };

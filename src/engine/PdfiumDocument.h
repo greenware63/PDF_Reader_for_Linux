@@ -4,6 +4,8 @@
 #include "PdfiumPage.h"
 #include <fpdfview.h>
 #include <utility>
+#include <string>
+#include <vector>
 
 namespace pdf {
 
@@ -18,6 +20,9 @@ public:
     std::pair<double, double> pageSizePoints(int pageIndex) const override;
     std::unique_ptr<IPage> getPage(int pageIndex) override;
     std::vector<OutlineItem> getOutline() const override;
+    std::string getPageLabel(int pageIndex) const override;
+    std::vector<std::string> getPageLabels() const override;
+    PixelBuffer renderThumbnail(int pageIndex, int targetWidth) override;
     void close() override;
     bool isOpen() const override { return m_doc != nullptr; }
     DocumentError lastError() const override { return m_lastError; }

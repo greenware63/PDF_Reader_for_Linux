@@ -6,11 +6,13 @@
 #include "engine/IDocument.h"
 #include "PdfViewerWidget.h"
 #include "FindBar.h"
+#include "ThumbnailListWidget.h"
 
 class QDialog;
 class QLineEdit;
 class QLabel;
 class QDockWidget;
+class QTabWidget;
 class QTreeView;
 class QStandardItemModel;
 class QStackedWidget;
@@ -28,6 +30,8 @@ public:
     /// Starts a non-blocking open. @return false only if the path is empty; load errors arrive via loadError().
     bool openFile(const QString& filePath);
     QDockWidget* sidebarDock() const noexcept { return m_sidebarDock; }
+    QTabWidget* sidebarTabs() const noexcept { return m_sidebarTabs; }
+    ThumbnailListWidget* thumbnailWidget() const noexcept { return m_thumbnailWidget; }
     QTreeView* outlineView() const noexcept { return m_outlineView; }
     QStandardItemModel* outlineModel() const noexcept { return m_outlineModel; }
 
@@ -60,6 +64,8 @@ private:
     QLabel* m_passwordWarning{nullptr};
     QString m_passwordFilePath;
     QDockWidget* m_sidebarDock{nullptr};
+    QTabWidget* m_sidebarTabs{nullptr};
+    ThumbnailListWidget* m_thumbnailWidget{nullptr};
     QStackedWidget* m_sidebarStack{nullptr};
     QTreeView* m_outlineView{nullptr};
     QStandardItemModel* m_outlineModel{nullptr};
@@ -67,6 +73,5 @@ private:
     QAction* m_toggleSidebarAction{nullptr};
     bool m_sidebarUserHidden{false};
 };
-
 
 } // namespace ui

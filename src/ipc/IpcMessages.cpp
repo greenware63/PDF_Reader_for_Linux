@@ -56,6 +56,10 @@ QDataStream& operator<<(QDataStream& out, const OpenResult& res) {
     for (const auto& size : res.pageSizes) {
         out << size.first << size.second;
     }
+    out << static_cast<quint32>(res.pageLabels.size());
+    for (const auto& label : res.pageLabels) {
+        out << QString::fromStdString(label);
+    }
     return out;
 }
 
@@ -75,6 +79,18 @@ QDataStream& operator>>(QDataStream& in, OpenResult& res) {
         double w = 0.0, h = 0.0;
         in >> w >> h;
         res.pageSizes.emplace_back(w, h);
+    }
+    quint32 labelCount = 0;
+    in >> labelCount;
+    res.pageLabels.clear();
+    if (!validateCollection(in, labelCount, MAX_PAGE_COUNT, 4)) {
+        return in;
+    }
+    res.pageLabels.reserve(labelCount);
+    for (quint32 i = 0; i < labelCount; ++i) {
+        QString s;
+        in >> s;
+        res.pageLabels.push_back(s.toStdString());
     }
     return in;
 }
@@ -674,6 +690,64 @@ QDataStream& operator<<(QDataStream& out, const WorkerControlResponse& response)
 
 QDataStream& operator>>(QDataStream& in, WorkerControlResponse& response) {
     in >> response.requestId >> response.pendingCount >> response.cachedPageCount;
+    return in;
+}
+
+// ThumbnailRequest
+QDataStream& operator<<(QDataStream& out, const ThumbnailRequest& req) {
+    out << static_cast<qint64>(req.documentId)
+        << static_cast<qint32>(req.pageIndex)
+        << static_cast<qint32>(req.targetWidth);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, ThumbnailRequest& req) {
+    qint64 docId = 0;
+    qint32 pIdx = 0;
+    qint32 tW = 0;
+    in >> docId >> pIdx >> tW;
+    req.documentId = docId;
+    req.pageIndex = pIdx;
+    req.targetWidth = tW;
+    return in;
+}
+
+// ThumbnailResponse
+QDataStream& operator<<(QDataStream& out, const ThumbnailResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << static_cast<qint32>(res.pageIndex)
+        << static_cast<qint32>(res.width)
+        << static_cast<qint32>(res.height)
+        << static_cast<qint32>(res.stride)
+        << res.pixelData;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, ThumbnailResponse& res) {
+    qint64 docId = 0;
+    qint32 pIdx = 0, w = 0, h = 0, s = 0;
+    in >> docId >> pIdx >> w >> h >> s >> res.pixelData;
+    res.documentId = docId;
+    res.pageIndex = pIdx;
+    res.width = w;
+    res.height = h;
+    res.stride = s;
+    return in;
+}
+
+// ThumbnailFailedResponse
+QDataStream& operator<<(QDataStream& out, const ThumbnailFailedResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << static_cast<qint32>(res.pageIndex);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, ThumbnailFailedResponse& res) {
+    qint64 docId = 0;
+    qint32 pIdx = 0;
+    in >> docId >> pIdx;
+    res.documentId = docId;
+    res.pageIndex = pIdx;
     return in;
 }
 

@@ -189,6 +189,8 @@ add_executable(pdf-reader
     src/ui/ImageUtils.h
     src/ui/FindBar.h
     src/ui/FindBar.cpp
+    src/ui/ThumbnailListWidget.h
+    src/ui/ThumbnailListWidget.cpp
     src/ui/PdfViewerWidget.h
     src/ui/PdfViewerWidget.cpp
     src/ui/MainWindow.h
@@ -241,6 +243,8 @@ add_executable(test_widget
     test_widget.cpp
     src/ui/FindBar.h
     src/ui/FindBar.cpp
+    src/ui/ThumbnailListWidget.h
+    src/ui/ThumbnailListWidget.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/ui/PdfViewerWidget.cpp
@@ -262,6 +266,8 @@ add_executable(test_password_prompt
     test_password_prompt.cpp
     src/ui/FindBar.h
     src/ui/FindBar.cpp
+    src/ui/ThumbnailListWidget.h
+    src/ui/ThumbnailListWidget.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/ui/PdfViewerWidget.cpp

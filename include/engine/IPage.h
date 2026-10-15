@@ -49,6 +49,14 @@ public:
     virtual PixelBuffer renderWholePage(double scale, double devicePixelRatio) = 0;
 
     /**
+     * @brief Renders a miniature thumbnail of the page with the given target width,
+     * maintaining aspect ratio.
+     * @param targetWidth Desired thumbnail width in pixels.
+     * @return PixelBuffer containing the rendered thumbnail.
+     */
+    virtual PixelBuffer renderThumbnail(int targetWidth) = 0;
+
+    /**
      * @brief Extracts text and character bounding boxes for the page.
      * Must be called only from the worker thread.
      */

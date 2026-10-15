@@ -177,6 +177,39 @@ PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio) {
     return buffer;
 }
 
+PixelBuffer PdfiumPage::renderThumbnail(int targetWidth) {
+    if (!m_page || m_width <= 0.0 || m_height <= 0.0 || targetWidth <= 0) {
+        return {};
+    }
+
+    const int targetW = std::clamp(targetWidth, 16, 1024);
+    const double scale = static_cast<double>(targetW) / m_width;
+    const int targetH = std::max(1, static_cast<int>(std::round(m_height * scale)));
+
+    PixelBuffer buffer = PixelBuffer::allocate(targetW, targetH, PixelFormat::BGRX8888);
+    if (!buffer.isValid()) {
+        return {};
+    }
+
+    std::memset(buffer.data(), 0xFF, buffer.sizeBytes());
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+    FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(
+        targetW,
+        targetH,
+        FPDFBitmap_BGRx,
+        buffer.data(),
+        buffer.stride()
+    );
+
+    if (!bitmap) {
+        return {};
+    }
+
+    FPDF_RenderPageBitmap(bitmap, m_page, 0, 0, targetW, targetH, 0, FPDF_ANNOT);
+    FPDFBitmap_Destroy(bitmap);
+    return buffer;
+}
 
 PageText PdfiumPage::extractText() {
     PageText result;

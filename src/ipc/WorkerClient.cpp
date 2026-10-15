@@ -7,6 +7,7 @@
 #include <QRandomGenerator>
 #include "ipc/SharedTile.h"
 #include <QTimer>
+#include <iostream>
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -31,6 +32,8 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::SearchMatchesFoundResponse:
         case MessageType::SearchProgressResponse:
         case MessageType::SearchCompletedResponse:
+        case MessageType::ThumbnailResponse:
+        case MessageType::ThumbnailFailedResponse:
         case MessageType::WorkerError:
         case MessageType::WorkerControlResponse:
             return true;
@@ -383,6 +386,15 @@ void WorkerClient::killWorkerForTesting() {
     }
 }
 
+void WorkerClient::requestThumbnail(int64_t documentId, int pageIndex, int targetWidth) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT thumbnailFailed(documentId, pageIndex);
+        return;
+    }
+    sendMessage(MessageType::ThumbnailRequest,
+                serialize(ThumbnailRequest{documentId, pageIndex, targetWidth}));
+}
+
 void WorkerClient::stop() {
     if (m_stopping) {
         return;
@@ -543,6 +555,33 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
             WorkerControlResponse response;
             if (deserialize(payload, response)) {
                 Q_EMIT workerControlReceived(response.requestId, response);
+            }
+            break;
+        }
+        case MessageType::ThumbnailResponse: {
+            ThumbnailResponse response;
+            if (deserialize(payload, response)) {
+                if (response.width > 0 && response.height > 0 &&
+                    response.width <= 2048 && response.height <= 2048 &&
+                    response.stride >= response.width * 4 &&
+                    response.pixelData.size() >= response.stride * response.height) {
+                    PixelBuffer buf = PixelBuffer::allocate(response.width, response.height, PixelFormat::BGRX8888);
+                    if (buf.isValid()) {
+                        std::memcpy(buf.data(), response.pixelData.constData(), buf.sizeBytes());
+                        Q_EMIT thumbnailReady(response.documentId, response.pageIndex, buf);
+                    } else {
+                        Q_EMIT thumbnailFailed(response.documentId, response.pageIndex);
+                    }
+                } else {
+                    Q_EMIT thumbnailFailed(response.documentId, response.pageIndex);
+                }
+            }
+            break;
+        }
+        case MessageType::ThumbnailFailedResponse: {
+            ThumbnailFailedResponse response;
+            if (deserialize(payload, response)) {
+                Q_EMIT thumbnailFailed(response.documentId, response.pageIndex);
             }
             break;
         }

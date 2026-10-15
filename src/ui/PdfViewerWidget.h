@@ -129,9 +129,15 @@ public:
     const std::vector<pdf::OutlineItem>& outline() const noexcept { return m_outline; }
     bool hasWorkerError() const noexcept { return !m_workerErrorMessage.isEmpty(); }
     QString workerErrorMessage() const noexcept { return m_workerErrorMessage; }
+    QString pageLabel(int pageIndex) const;
+    const std::vector<QString>& pageLabels() const noexcept { return m_pageLabels; }
+    void requestThumbnail(int pageIndex, int targetWidth = 140);
 
 Q_SIGNALS:
     void documentLoaded(const QString& title, int pages);
+    void pageLabelsReady(const std::vector<QString>& labels);
+    void thumbnailReady(int pageIndex, const QImage& image);
+    void thumbnailFailed(int pageIndex);
     void loadError(const QString& errorMessage);
     void documentOpenFailed(const QString& filePath, pdf::DocumentError error);
     void loadingChanged(bool loading, const QString& fileName);
@@ -259,6 +265,7 @@ private:
     int m_currentMatchIndex{-1};
     std::vector<pdf::OutlineItem> m_outline;
     QString m_workerErrorMessage;
+    std::vector<QString> m_pageLabels;
 };
 
 } // namespace ui

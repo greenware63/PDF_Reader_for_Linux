@@ -184,6 +184,26 @@ struct WorkerControlResponse {
     quint64 cachedPageCount{0};
 };
 
+struct ThumbnailRequest {
+    int64_t documentId{0};
+    int pageIndex{0};
+    int targetWidth{140};
+};
+
+struct ThumbnailResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+    int width{0};
+    int height{0};
+    int stride{0};
+    QByteArray pixelData;
+};
+
+struct ThumbnailFailedResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+};
+
 // Message stream operators
 QDataStream& operator<<(QDataStream& out, const OpenDocumentRequest& req);
 QDataStream& operator>>(QDataStream& in, OpenDocumentRequest& req);
@@ -250,6 +270,15 @@ QDataStream& operator<<(QDataStream& out, const WorkerControlRequest& request);
 QDataStream& operator>>(QDataStream& in, WorkerControlRequest& request);
 QDataStream& operator<<(QDataStream& out, const WorkerControlResponse& response);
 QDataStream& operator>>(QDataStream& in, WorkerControlResponse& response);
+
+QDataStream& operator<<(QDataStream& out, const ThumbnailRequest& req);
+QDataStream& operator>>(QDataStream& in, ThumbnailRequest& req);
+
+QDataStream& operator<<(QDataStream& out, const ThumbnailResponse& res);
+QDataStream& operator>>(QDataStream& in, ThumbnailResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const ThumbnailFailedResponse& res);
+QDataStream& operator>>(QDataStream& in, ThumbnailFailedResponse& res);
 
 // --- Serialization Templates ---
 

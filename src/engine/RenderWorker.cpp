@@ -51,7 +51,7 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_running.load()) {
-            return {DocumentError::Unknown, 0, {}};
+            return {DocumentError::Unknown, 0, {}, {}};
         }
 
         // Cancel pending render requests from older epochs
@@ -97,6 +97,7 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
             for (int i = 0; i < result.pageCount; ++i) {
                 result.pageSizes.push_back(m_workerDocument->pageSizePoints(i));
             }
+            result.pageLabels = m_workerDocument->getPageLabels();
             promise->set_value(std::move(result));
         }});
 
@@ -153,6 +154,7 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
             for (int i = 0; i < result.pageCount; ++i) {
                 result.pageSizes.push_back(m_workerDocument->pageSizePoints(i));
             }
+            result.pageLabels = m_workerDocument->getPageLabels();
             Q_EMIT documentOpened(documentId, result);
         }});
 
@@ -169,6 +171,32 @@ void RenderWorker::requestDocumentOutline(int64_t documentId) {
         m_outlineQueue.push_back(documentId);
         m_cv.notify_one();
     }
+}
+
+void RenderWorker::requestThumbnail(int64_t documentId, int pageIndex, int targetWidth) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load()) {
+        Q_EMIT thumbnailFailed(documentId, pageIndex);
+        return;
+    }
+    m_controlQueue.push_back({[this, documentId, pageIndex, targetWidth]() {
+        if (documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT thumbnailFailed(documentId, pageIndex);
+            return;
+        }
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (!page) {
+            Q_EMIT thumbnailFailed(documentId, pageIndex);
+            return;
+        }
+        PixelBuffer buf = page->renderThumbnail(targetWidth);
+        if (buf.isValid()) {
+            Q_EMIT thumbnailReady(documentId, pageIndex, buf);
+        } else {
+            Q_EMIT thumbnailFailed(documentId, pageIndex);
+        }
+    }});
+    m_cv.notify_one();
 }
 
 void RenderWorker::closeDocumentSync() {

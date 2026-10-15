@@ -22,6 +22,7 @@ bool isRequestType(uint32_t type) {
         case ipc::MessageType::PageTextRequest:
         case ipc::MessageType::StartSearchRequest:
         case ipc::MessageType::CancelSearchRequest:
+        case ipc::MessageType::ThumbnailRequest:
         case ipc::MessageType::SharedMemoryAck:
         case ipc::MessageType::WorkerControlRequest:
             return true;
@@ -52,6 +53,10 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
             this, &WorkerServer::onSearchProgress, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::searchCompleted,
             this, &WorkerServer::onSearchCompleted, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::thumbnailReady,
+            this, &WorkerServer::onThumbnailReady, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::thumbnailFailed,
+            this, &WorkerServer::onThumbnailFailed, Qt::QueuedConnection);
 }
 
 WorkerServer::~WorkerServer() {
@@ -238,6 +243,14 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             break;
         }
 
+        case ipc::MessageType::ThumbnailRequest: {
+            ipc::ThumbnailRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestThumbnail(req.documentId, req.pageIndex, req.targetWidth);
+            }
+            break;
+        }
+
         case ipc::MessageType::SharedMemoryAck: {
             ipc::SharedMemoryAck ack;
             if (ipc::deserialize(payload, ack)) {
@@ -373,6 +386,22 @@ void WorkerServer::onSearchProgress(int64_t documentId, int64_t searchId, int pa
 void WorkerServer::onSearchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated) {
     ipc::SearchCompletedResponse resp{documentId, searchId, totalMatches, truncated};
     sendPacket(ipc::MessageType::SearchCompletedResponse, ipc::serialize(resp));
+}
+
+void WorkerServer::onThumbnailReady(int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer) {
+    ipc::ThumbnailResponse resp;
+    resp.documentId = documentId;
+    resp.pageIndex = pageIndex;
+    resp.width = buffer.width();
+    resp.height = buffer.height();
+    resp.stride = static_cast<int>(buffer.stride());
+    resp.pixelData = QByteArray(reinterpret_cast<const char*>(buffer.data()), static_cast<qsizetype>(buffer.sizeBytes()));
+    sendPacket(ipc::MessageType::ThumbnailResponse, ipc::serialize(resp));
+}
+
+void WorkerServer::onThumbnailFailed(int64_t documentId, int pageIndex) {
+    ipc::ThumbnailFailedResponse resp{documentId, pageIndex};
+    sendPacket(ipc::MessageType::ThumbnailFailedResponse, ipc::serialize(resp));
 }
 
 } // namespace pdf::worker

@@ -298,6 +298,30 @@ int main(int argc, char* argv[]) {
     }
     std::cout << "  -> Passed: Outline response received over IPC." << std::endl;
 
+    // --- TEST 5.1: Thumbnail Rendering over IPC ---
+    std::cout << "[TEST 5.1] Testing page thumbnail rendering over IPC..." << std::endl;
+    pdf::ipc::ThumbnailRequest thumbReq{1, 0, 140};
+    sendPacket(pdf::ipc::MessageType::ThumbnailRequest, pdf::ipc::serialize(thumbReq));
+
+    bool gotThumbResp = waitFor([&]() {
+        return readPacket(msgType, msgPayload) && msgType == pdf::ipc::MessageType::ThumbnailResponse;
+    }, 4000);
+
+    if (!gotThumbResp) {
+        std::cerr << "[FAIL] Did not receive ThumbnailResponse from worker." << std::endl;
+        worker.kill();
+        return 1;
+    }
+
+    pdf::ipc::ThumbnailResponse thumbResp;
+    if (!pdf::ipc::deserialize(msgPayload, thumbResp) || thumbResp.width <= 0 || thumbResp.height <= 0 || thumbResp.pixelData.isEmpty()) {
+        std::cerr << "[FAIL] Invalid ThumbnailResponse received over IPC." << std::endl;
+        worker.kill();
+        return 1;
+    }
+    std::cout << "  -> Passed: Thumbnail rendered over IPC (" << thumbResp.width << "x"
+              << thumbResp.height << ", " << thumbResp.pixelData.size() << " bytes)." << std::endl;
+
     // --- TEST 6: Clean Teardown on Disconnect ---
     std::cout << "[TEST 6] Testing clean worker exit when client disconnects..." << std::endl;
     client.disconnectFromServer();

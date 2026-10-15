@@ -6,6 +6,7 @@
 #include <string>
 #include <cstdint>
 #include <utility>
+#include <vector>
 
 namespace pdf {
 
@@ -71,6 +72,28 @@ public:
      * @return Vector of top-level OutlineItem nodes, each potentially containing nested children.
      */
     virtual std::vector<OutlineItem> getOutline() const = 0;
+
+    /**
+     * @brief Gets the page label for a given 0-based page index.
+     * If the document does not define page labels, returns a 1-based decimal string (e.g. "1", "2").
+     * @param pageIndex 0-based page index.
+     * @return String label for the page.
+     */
+    virtual std::string getPageLabel(int pageIndex) const = 0;
+
+    /**
+     * @brief Extracts all page labels for the entire document.
+     * @return Vector of string labels matching total pages.
+     */
+    virtual std::vector<std::string> getPageLabels() const = 0;
+
+    /**
+     * @brief Renders a thumbnail miniature of the specified page.
+     * @param pageIndex 0-based page index.
+     * @param targetWidth Desired thumbnail width in pixels (height scales to maintain aspect ratio).
+     * @return PixelBuffer containing the rendered thumbnail.
+     */
+    virtual PixelBuffer renderThumbnail(int pageIndex, int targetWidth) = 0;
 
     /**
      * @brief Closes the open document and releases engine resources.

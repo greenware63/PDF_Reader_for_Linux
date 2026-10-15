@@ -40,6 +40,7 @@ struct OpenResult {
     DocumentError error{DocumentError::None};
     int pageCount{0};
     std::vector<std::pair<double, double>> pageSizes;
+    std::vector<std::string> pageLabels;
 };
 
 /**
@@ -83,6 +84,12 @@ public:
      * The result is delivered through documentOutlineReady().
      */
     void requestDocumentOutline(int64_t documentId);
+
+    /**
+     * @brief Requests rendering a miniature thumbnail for the given page.
+     * Delivered via thumbnailReady() or thumbnailFailed().
+     */
+    void requestThumbnail(int64_t documentId, int pageIndex, int targetWidth = 140);
 
     /**
      * @brief Sets current request generation. Discards queued requests with older generations.
@@ -171,6 +178,9 @@ Q_SIGNALS:
     void documentOpened(int64_t documentId, pdf::OpenResult result);
     /// Emitted when the document outline (bookmarks) has been extracted.
     void documentOutlineReady(int64_t documentId, const std::vector<pdf::OutlineItem>& outline);
+    /// Emitted when thumbnail rendering completes.
+    void thumbnailReady(int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer);
+    void thumbnailFailed(int64_t documentId, int pageIndex);
     /// Emitted when text extraction for a page completes on the worker thread.
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
     /// Emitted when search finds matches on a page.

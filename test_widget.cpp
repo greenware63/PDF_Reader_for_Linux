@@ -1,5 +1,7 @@
 #include "ui/PdfViewerWidget.h"
 #include "ui/MainWindow.h"
+#include "ui/ThumbnailListWidget.h"
+#include <QTabWidget>
 #include <QDockWidget>
 #include <QTreeView>
 #include <QStandardItemModel>
@@ -300,9 +302,7 @@ int main(int argc, char* argv[]) {
     }
     QApplication app(argc, argv);
 
-    std::cout << "========================================" << std::endl;
     std::cout << " RUNNING PDF VIEWER WIDGET UNIT TESTS   " << std::endl;
-    std::cout << "========================================" << std::endl;
 
     std::string samplePath = (argc > 1) ? argv[1] : "sample.pdf";
 
@@ -2344,8 +2344,119 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Worker crash cleanly contained; UI survived, showed the recovery banner, and recovered on the next open." << std::endl;
     }
 
+        // Test 35: Thumbnails & Page Labels Sidebar, worker thumbnail rendering, and viewport sync
+    std::cout << "[TEST 35] Testing Thumbnails & Page Labels Sidebar, worker thumbnail rendering, and viewport sync..." << std::endl;
+    {
+        ui::MainWindow window;
+        window.resize(1024, 768);
+        window.show();
+        QCoreApplication::processEvents();
+
+        auto* viewer = window.findChild<ui::PdfViewerWidget*>();
+        auto* thumbWidget = window.thumbnailWidget();
+        auto* tabs = window.sidebarTabs();
+        if (!viewer || !thumbWidget || !tabs) {
+            std::cerr << "[FAIL] Required UI components (viewer, thumbnailWidget, sidebarTabs) not found in MainWindow" << std::endl;
+            return 1;
+        }
+
+        // 1. Verify tabs setup
+        if (tabs->count() < 2) {
+            std::cerr << "[FAIL] sidebarTabs expected at least 2 tabs, got " << tabs->count() << std::endl;
+            return 1;
+        }
+        if (tabs->widget(0) != thumbWidget) {
+            std::cerr << "[FAIL] Tab 0 is not ThumbnailListWidget" << std::endl;
+            return 1;
+        }
+
+        // 2. Open a 3-page document
+        std::string sampleDoc = "widget_test_thumbnails.pdf";
+        generateMultiPagePdf(sampleDoc, 3);
+        if (!window.openFile(QString::fromStdString(sampleDoc))) {
+            std::cerr << "[FAIL] Failed to open multi-page document for thumbnail testing" << std::endl;
+            return 1;
+        }
+
+        QElapsedTimer loadTimer;
+        loadTimer.start();
+        while (loadTimer.elapsed() < 5000 && !viewer->isDocumentOpen()) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (!viewer->isDocumentOpen() || viewer->pageCount() != 3) {
+            std::cerr << "[FAIL] Document failed to open in thumbnail test" << std::endl;
+            return 1;
+        }
+
+        // 3. Verify page count and page labels
+        if (thumbWidget->totalPages() != 3 || thumbWidget->count() != 3) {
+            std::cerr << "[FAIL] ThumbnailListWidget page count mismatch: totalPages="
+                      << thumbWidget->totalPages() << ", count=" << thumbWidget->count() << std::endl;
+            return 1;
+        }
+        for (int i = 0; i < 3; ++i) {
+            auto* it = thumbWidget->item(i);
+            QString expectedLabel = QString::number(i + 1);
+            if (it->text() != expectedLabel) {
+                std::cerr << "[FAIL] Page label for page " << i << " expected '"
+                          << expectedLabel.toStdString() << "', got '" << it->text().toStdString() << "'" << std::endl;
+                return 1;
+            }
+        }
+
+        // 4. Request thumbnail rendering and verify worker delivery
+        thumbWidget->requestVisibleThumbnails();
+        QElapsedTimer thumbTimer;
+        thumbTimer.start();
+        while (thumbTimer.elapsed() < 5000 && !thumbWidget->isThumbnailLoaded(0)) {
+            viewer->renderWorker().waitForIdle();
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+
+        if (!thumbWidget->isThumbnailLoaded(0)) {
+            std::cerr << "[FAIL] Thumbnail for page 0 was not delivered by isolated worker" << std::endl;
+            return 1;
+        }
+        auto* item0 = thumbWidget->item(0);
+        if (item0->icon().isNull()) {
+            std::cerr << "[FAIL] Thumbnail item 0 icon is null after loading" << std::endl;
+            return 1;
+        }
+
+        // 5. Test two-way synchronization:
+        // A: Viewport scrolls -> Thumbnail selection follows
+        viewer->goToPage(2);
+        QCoreApplication::processEvents();
+        if (thumbWidget->currentRow() != 2) {
+            std::cerr << "[FAIL] Changing viewer page to 2 did not update thumbnail currentRow to 2 (got "
+                      << thumbWidget->currentRow() << ")" << std::endl;
+            return 1;
+        }
+
+        // B: Thumbnail clicked -> Viewport scrolls
+        emit thumbWidget->itemClicked(thumbWidget->item(1));
+        QCoreApplication::processEvents();
+        if (viewer->currentPage() != 1) {
+            std::cerr << "[FAIL] Clicking thumbnail item 1 did not navigate viewer to page 1 (got "
+                      << viewer->currentPage() << ")" << std::endl;
+            return 1;
+        }
+
+        // 6. Test document close clears thumbnails
+        viewer->closeDocument();
+        QCoreApplication::processEvents();
+        if (thumbWidget->totalPages() != 0 || thumbWidget->count() != 0) {
+            std::cerr << "[FAIL] Closing document did not reset thumbnail widget" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: ThumbnailListWidget creation, page labels, IPC thumbnail delivery, two-way viewport sync, and teardown verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 34 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 35 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

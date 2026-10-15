@@ -1,5 +1,7 @@
 #include "MainWindow.h"
+#include "ThumbnailListWidget.h"
 #include <QDockWidget>
+#include <QTabWidget>
 #include <QTreeView>
 #include <QStandardItemModel>
 #include <QStandardItem>
@@ -133,12 +135,18 @@ void MainWindow::setupUi() {
     connect(m_viewer, &PdfViewerWidget::searchProgressChanged, m_findBar, &FindBar::setSearchingProgress);
     connect(m_viewer, &PdfViewerWidget::searchFinished, m_findBar, &FindBar::finishSearch);
 
-    // Sidebar dock for Document Outline / Bookmarks
+    // Sidebar dock with tabs: Thumbnails & Document Outline / Bookmarks
     m_sidebarDock = new QDockWidget(tr("Bookmarks"), this);
     m_sidebarDock->setObjectName(QStringLiteral("BookmarksDock"));
     m_sidebarDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
 
-    m_sidebarStack = new QStackedWidget(m_sidebarDock);
+    m_sidebarTabs = new QTabWidget(m_sidebarDock);
+    m_sidebarTabs->setObjectName(QStringLiteral("SidebarTabs"));
+
+    m_thumbnailWidget = new ThumbnailListWidget(m_sidebarTabs);
+    m_thumbnailWidget->setViewer(m_viewer);
+
+    m_sidebarStack = new QStackedWidget(m_sidebarTabs);
 
     m_outlineEmptyLabel = new QLabel(tr("No bookmarks in document"), m_sidebarStack);
     m_outlineEmptyLabel->setObjectName(QStringLiteral("OutlineEmptyLabel"));
@@ -159,11 +167,23 @@ void MainWindow::setupUi() {
     m_sidebarStack->addWidget(m_outlineView);       // index 1: tree
     m_sidebarStack->setCurrentWidget(m_outlineEmptyLabel);
 
-    m_sidebarDock->setWidget(m_sidebarStack);
+    m_sidebarTabs->addTab(m_thumbnailWidget, tr("Pages"));
+    m_sidebarTabs->addTab(m_sidebarStack, tr("Bookmarks"));
+
+    connect(m_sidebarTabs, &QTabWidget::currentChanged, this, [this](int index) {
+        if (m_sidebarTabs->widget(index) == m_thumbnailWidget) {
+            m_thumbnailWidget->requestVisibleThumbnails();
+        }
+    });
+
+    m_sidebarDock->setWidget(m_sidebarTabs);
     addDockWidget(Qt::LeftDockWidgetArea, m_sidebarDock);
     m_sidebarDock->hide();
     connect(m_sidebarDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
         m_sidebarUserHidden = !visible;
+        if (visible && m_sidebarTabs->currentWidget() == m_thumbnailWidget) {
+            m_thumbnailWidget->requestVisibleThumbnails();
+        }
     });
 
     connect(m_viewer, &PdfViewerWidget::outlineReady, this, &MainWindow::onOutlineReady);
@@ -200,7 +220,7 @@ void MainWindow::setupActions() {
     findPreviousAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F3));
 
     QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
-    m_toggleSidebarAction = viewMenu->addAction(tr("&Bookmarks Sidebar"), this, [this]() {
+    m_toggleSidebarAction = viewMenu->addAction(tr("&Sidebar"), this, [this]() {
         m_sidebarDock->setVisible(!m_sidebarDock->isVisible());
     });
     m_toggleSidebarAction->setShortcut(QKeySequence(Qt::Key_F4));
@@ -271,7 +291,7 @@ void MainWindow::onLoadingChanged(bool loading, const QString& fileName) {
         }
     }
     if (loading) {
-        statusBar()->showMessage(tr("Opening '%1'\u2026").arg(fileName));
+        statusBar()->showMessage(tr("Opening '%1'…").arg(fileName));
         setCursor(Qt::BusyCursor);
     } else {
         unsetCursor();
@@ -296,8 +316,9 @@ void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
     m_findBar->clear();
     m_findBar->hide();
     m_outlineModel->clear();
-    m_outlineEmptyLabel->setText(tr("Loading bookmarks\u2026"));
+    m_outlineEmptyLabel->setText(tr("Loading bookmarks…"));
     m_sidebarStack->setCurrentWidget(m_outlineEmptyLabel);
+    m_thumbnailWidget->setDocument(totalPages, m_viewer->pageLabels());
     setWindowTitle(tr("%1 - PDF Reader").arg(title));
     statusBar()->showMessage(tr("Loaded '%1' (%2 pages)").arg(title).arg(totalPages));
 }
@@ -305,8 +326,9 @@ void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
 void MainWindow::onPageChanged(int currentPage, int totalPages) {
     if (totalPages > 0) {
         m_pageStatusLabel->setText(tr(" Page %1 / %2 ").arg(currentPage).arg(totalPages));
+        const int zeroBasedPage = currentPage - 1;
+        m_thumbnailWidget->setCurrentPage(zeroBasedPage);
         if (m_outlineModel && m_outlineModel->rowCount() > 0) {
-            const int zeroBasedPage = currentPage - 1;
             auto* item = findBestOutlineItem(m_outlineModel->invisibleRootItem(), zeroBasedPage);
             if (item) {
                 m_outlineView->blockSignals(true);
@@ -317,6 +339,7 @@ void MainWindow::onPageChanged(int currentPage, int totalPages) {
     } else {
         m_pageStatusLabel->setText(tr(" Page 0 / 0 "));
         setWindowTitle(tr("PDF Reader - Linux Prototype"));
+        m_thumbnailWidget->clearDocument();
     }
 }
 
@@ -410,6 +433,7 @@ void MainWindow::onOutlineReady(const std::vector<pdf::OutlineItem>& outline) {
 
     addOutlineItemsRecursive(m_outlineModel->invisibleRootItem(), outline);
     m_sidebarStack->setCurrentWidget(m_outlineView);
+    m_sidebarTabs->setCurrentWidget(m_sidebarStack);
     m_outlineView->expandToDepth(0);
     if (m_viewer->pageCount() > 0) {
         onPageChanged(m_viewer->currentPage() + 1, m_viewer->pageCount());
