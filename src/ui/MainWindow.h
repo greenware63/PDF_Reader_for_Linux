@@ -65,6 +65,7 @@ private:
     QStandardItemModel* m_outlineModel{nullptr};
     QLabel* m_outlineEmptyLabel{nullptr};
     QAction* m_toggleSidebarAction{nullptr};
+    bool m_sidebarUserHidden{false};
 };
 
 

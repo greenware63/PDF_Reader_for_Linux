@@ -52,7 +52,7 @@ static void addOutlineItemsRecursive(QStandardItem* parent, const std::vector<pd
     for (const auto& item : items) {
         auto* treeItem = new QStandardItem(item.title);
         treeItem->setData(item.pageIndex, Qt::UserRole);
-        treeItem->setData(item.targetYPoints, Qt::UserRole + 1);
+        treeItem->setData(item.targetYFraction, Qt::UserRole + 1);
         treeItem->setData(item.hasTargetY, Qt::UserRole + 2);
         treeItem->setToolTip(item.isValid()
                                  ? QObject::tr("%1 (Page %2)").arg(item.title).arg(item.pageIndex + 1)
@@ -154,6 +154,9 @@ void MainWindow::setupUi() {
     m_sidebarDock->setWidget(m_sidebarStack);
     addDockWidget(Qt::LeftDockWidgetArea, m_sidebarDock);
     m_sidebarDock->hide();
+    connect(m_sidebarDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+        m_sidebarUserHidden = !visible;
+    });
 
     connect(m_viewer, &PdfViewerWidget::outlineReady, this, &MainWindow::onOutlineReady);
 
@@ -284,6 +287,9 @@ void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
     closePasswordDialog();
     m_findBar->clear();
     m_findBar->hide();
+    m_outlineModel->clear();
+    m_outlineEmptyLabel->setText(tr("Loading bookmarks\u2026"));
+    m_sidebarStack->setCurrentWidget(m_outlineEmptyLabel);
     setWindowTitle(tr("%1 - PDF Reader").arg(title));
     statusBar()->showMessage(tr("Loaded '%1' (%2 pages)").arg(title).arg(totalPages));
 }
@@ -389,6 +395,7 @@ void MainWindow::closePasswordDialog() {
 void MainWindow::onOutlineReady(const std::vector<pdf::OutlineItem>& outline) {
     m_outlineModel->clear();
     if (outline.empty()) {
+        m_outlineEmptyLabel->setText(tr("No bookmarks in document"));
         m_sidebarStack->setCurrentWidget(m_outlineEmptyLabel);
         return;
     }
@@ -398,6 +405,9 @@ void MainWindow::onOutlineReady(const std::vector<pdf::OutlineItem>& outline) {
     m_outlineView->expandToDepth(0);
     if (m_viewer->pageCount() > 0) {
         onPageChanged(m_viewer->currentPage() + 1, m_viewer->pageCount());
+    }
+    if (!m_sidebarUserHidden) {
+        m_sidebarDock->show();
     }
 }
 

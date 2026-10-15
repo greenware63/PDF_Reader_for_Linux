@@ -74,8 +74,8 @@ public:
     void zoomFitWidth();
 
     void goToPage(int pageIndex);
-    /// Navigates to a PDF destination Y measured upward from the page bottom.
-    void goToPage(int pageIndex, double targetYPoints);
+    /// Navigates to a normalized vertical position in the displayed page.
+    void goToPage(int pageIndex, double targetYFraction);
     void nextPage();
     void previousPage();
 
@@ -179,7 +179,7 @@ private:
     void updateScrollBars();
 
     void setDocScrollPosition(int64_t docX, int64_t docY);
-    void goToPageImpl(int pageIndex, std::optional<double> targetYPoints);
+    void goToPageImpl(int pageIndex, std::optional<double> targetYFraction);
 
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
     void drawPendingPlaceholder(QPainter& painter, const QRectF& rect);

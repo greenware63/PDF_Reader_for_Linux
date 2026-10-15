@@ -1,10 +1,14 @@
 #include "PdfiumDocument.h"
 #include <fpdf_doc.h>
+#include <fpdf_edit.h>
+#include <fpdf_transformpage.h>
 #include "PdfiumMutex.h"
 #include <mutex>
 #include <cstring>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
+#include <cmath>
 
 namespace pdf {
 
@@ -163,8 +167,73 @@ constexpr size_t MAX_OUTLINE_DEPTH = 128;
 
 struct OutlineExtractionState {
     std::unordered_set<FPDF_BOOKMARK> visited;
+    struct PageGeometry {
+        float left{0.0f};
+        float bottom{0.0f};
+        float right{0.0f};
+        float top{0.0f};
+        int rotation{0};
+    };
+    std::unordered_map<int, PageGeometry> pageGeometry;
     size_t itemCount{0};
 };
+
+static bool getDisplayedYFraction(FPDF_DOCUMENT doc, int pageIndex, bool hasX, bool hasY,
+                                  float x, float y, OutlineExtractionState& state,
+                                  double& fraction) {
+    if (pageIndex < 0 || !hasY || !std::isfinite(x) || !std::isfinite(y)) {
+        return false;
+    }
+
+    auto geometryIt = state.pageGeometry.find(pageIndex);
+    if (geometryIt == state.pageGeometry.end()) {
+        FPDF_PAGE page = FPDF_LoadPage(doc, pageIndex);
+        if (!page) {
+            return false;
+        }
+
+        OutlineExtractionState::PageGeometry geometry;
+        const bool hasCropBox = FPDFPage_GetCropBox(page, &geometry.left, &geometry.bottom,
+                                                     &geometry.right, &geometry.top);
+        if (!hasCropBox &&
+            !FPDFPage_GetMediaBox(page, &geometry.left, &geometry.bottom, &geometry.right, &geometry.top)) {
+            FPDF_ClosePage(page);
+            return false;
+        }
+        geometry.rotation = FPDFPage_GetRotation(page);
+        FPDF_ClosePage(page);
+        geometryIt = state.pageGeometry.emplace(pageIndex, geometry).first;
+    }
+
+    const auto& geometry = geometryIt->second;
+    const double width = static_cast<double>(geometry.right) - geometry.left;
+    const double height = static_cast<double>(geometry.top) - geometry.bottom;
+    if (!(width > 0.0) || !(height > 0.0)) {
+        return false;
+    }
+
+    double position = 0.0;
+    double extent = height;
+    switch ((geometry.rotation % 4 + 4) % 4) {
+        case 1:
+            position = (hasX ? static_cast<double>(x) : geometry.left) - geometry.left;
+            extent = width;
+            break;
+        case 2:
+            position = static_cast<double>(y) - geometry.bottom;
+            break;
+        case 3:
+            position = geometry.right - (hasX ? static_cast<double>(x) : geometry.right);
+            extent = width;
+            break;
+        default:
+            position = geometry.top - static_cast<double>(y);
+            break;
+    }
+
+    fraction = std::clamp(position / extent, 0.0, 1.0);
+    return true;
+}
 
 static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK bookmark,
                                             size_t depth, OutlineExtractionState& state) {
@@ -200,8 +269,9 @@ static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK boo
         FS_FLOAT xVal = 0.0f, yVal = 0.0f, zoomVal = 0.0f;
         if (FPDFDest_GetLocationInPage(dest, &hasX, &hasY, &hasZoom, &xVal, &yVal, &zoomVal)) {
             if (hasY) {
-                item.targetYPoints = static_cast<double>(yVal);
-                item.hasTargetY = true;
+                item.hasTargetY = getDisplayedYFraction(doc, item.pageIndex, hasX != 0,
+                                                        hasY != 0, xVal, yVal, state,
+                                                        item.targetYFraction);
             }
         }
     }
