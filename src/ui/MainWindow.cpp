@@ -92,6 +92,14 @@ MainWindow::MainWindow(QWidget* parent)
     resize(1024, 768);
 }
 
+MainWindow::~MainWindow() {
+    // The dock is destroyed by ~QMainWindow, after this object's own destructor has finished. Without this,
+    // its visibilityChanged lambda would run on a half-destroyed MainWindow (UBSan: vptr check).
+    if (m_sidebarDock) {
+        QObject::disconnect(m_sidebarDock, nullptr, this, nullptr);
+    }
+}
+
 void MainWindow::setupUi() {
     auto* central = new QWidget(this);
     auto* layout = new QVBoxLayout(central);

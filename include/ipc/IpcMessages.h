@@ -51,8 +51,7 @@ QDataStream& operator>>(QDataStream& in, SearchMatch& match);
 
 namespace pdf::ipc {
 
-// --- Message Structures ---
-
+// --- Message Structures ---\n
 struct OpenDocumentRequest {
     int64_t documentId{0};
     QString filePath;
@@ -258,7 +257,7 @@ template <typename T>
 QByteArray serialize(const T& msg) {
     QByteArray buffer;
     QDataStream stream(&buffer, QIODevice::WriteOnly);
-    stream.setVersion(QDataStream::Qt_6_5);
+    stream.setVersion(QDataStream::Qt_6_4);
     stream << msg;
     return buffer;
 }
@@ -266,7 +265,7 @@ QByteArray serialize(const T& msg) {
 template <typename T>
 bool deserialize(const QByteArray& buffer, T& msg) {
     QDataStream stream(buffer);
-    stream.setVersion(QDataStream::Qt_6_5);
+    stream.setVersion(QDataStream::Qt_6_4);
     stream >> msg;
     return stream.status() == QDataStream::Ok && stream.atEnd();
 }

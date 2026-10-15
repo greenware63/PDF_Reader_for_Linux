@@ -2312,7 +2312,36 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::cout << "  -> Passed: Worker crash cleanly contained; UI survived and rendered recovery banner." << std::endl;
+        // Recovery: opening a document again after the crash must start a fresh worker and render tiles.
+        const std::string recoverPath = "widget_test_crash_recovered.pdf";
+        generateMultiPagePdf(recoverPath, 3);
+        if (!window.openFile(QString::fromStdString(recoverPath))) {
+            std::cerr << "[FAIL] openFile refused after a worker crash" << std::endl;
+            return 1;
+        }
+        QElapsedTimer reopenTimer;
+        reopenTimer.start();
+        while (reopenTimer.elapsed() < 5000 && !(viewer->isDocumentOpen() && viewer->pageCount() == 3)) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (!viewer->isDocumentOpen() || viewer->pageCount() != 3) {
+            std::cerr << "[FAIL] Could not open a document after the worker crashed (no recovery)" << std::endl;
+            return 1;
+        }
+        viewer->viewport()->repaint();
+        QElapsedTimer renderTimer;
+        renderTimer.start();
+        while (renderTimer.elapsed() < 5000 && viewer->cache().size() == 0) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+            viewer->viewport()->repaint();
+        }
+        if (viewer->cache().size() == 0) {
+            std::cerr << "[FAIL] No tiles rendered after the worker was restarted" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Worker crash cleanly contained; UI survived, showed the recovery banner, and recovered on the next open." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

@@ -23,7 +23,7 @@ class MainWindow : public QMainWindow {
 
 public:
     explicit MainWindow(QWidget* parent = nullptr);
-    ~MainWindow() override = default;
+    ~MainWindow() override;
 
     /// Starts a non-blocking open. @return false only if the path is empty; load errors arrive via loadError().
     bool openFile(const QString& filePath);

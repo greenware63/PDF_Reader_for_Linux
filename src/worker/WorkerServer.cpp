@@ -243,8 +243,7 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             if (ipc::deserialize(payload, ack)) {
                 const auto it = m_sharedTiles.find(ack.shmKey);
                 if (it != m_sharedTiles.end()) {
-                    it->second->detach();
-                    m_sharedTiles.erase(it);
+                    m_sharedTiles.erase(it); // unmaps and unlinks (harmless if the UI already unlinked it)
                 }
             }
             break;
@@ -326,8 +325,8 @@ void WorkerServer::onTileReady(int64_t documentId, uint64_t generation, const pd
         const QString shmKey = QStringLiteral("pdf-tile-%1-%2")
                                    .arg(QCoreApplication::applicationPid())
                                    .arg(QRandomGenerator::global()->generate64(), 0, 16);
-        auto memory = std::make_unique<QSharedMemory>(shmKey);
-        if (!memory->create(static_cast<int>(buffer.sizeBytes()))) {
+        auto memory = std::make_unique<ipc::SharedTileSegment>();
+        if (!memory->create(shmKey.toStdString(), buffer.sizeBytes())) {
             sendPacket(ipc::MessageType::TileFailedResponse,
                        ipc::serialize(ipc::TileFailedResponse{documentId, generation, key}));
             return;

@@ -5,7 +5,7 @@
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QRandomGenerator>
-#include <QSharedMemory>
+#include "ipc/SharedTile.h"
 #include <QTimer>
 #include <algorithm>
 #include <cstring>
@@ -466,17 +466,12 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
                                                static_cast<PixelFormat>(response.format));
                 if (buffer.isValid()) {
                     if (response.isShm) {
-                        QSharedMemory memory(response.shmKey);
-                        if (memory.attach(QSharedMemory::ReadOnly) && memory.size() >= static_cast<int>(bytes)) {
-                            const size_t rowBytes = static_cast<size_t>(response.width) * 4;
-                            for (int row = 0; row < response.height; ++row) {
-                                std::memcpy(buffer.data() + static_cast<size_t>(row) * buffer.stride(),
-                                            static_cast<const uint8_t*>(memory.constData()) +
-                                                static_cast<size_t>(row) * response.stride,
-                                            rowBytes);
-                            }
-                            memory.detach();
-                        } else {
+                        // The worker is untrusted: validated name, size-checked, copied with pread (no mmap).
+                        if (!readAndUnlinkSharedTile(response.shmKey.toStdString(),
+                                                     static_cast<size_t>(response.height),
+                                                     static_cast<size_t>(response.stride),
+                                                     static_cast<size_t>(response.width) * 4,
+                                                     buffer.data(), static_cast<size_t>(buffer.stride()))) {
                             buffer = {};
                         }
                         sendMessage(MessageType::SharedMemoryAck, serialize(SharedMemoryAck{response.shmKey}));

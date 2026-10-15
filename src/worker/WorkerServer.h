@@ -4,7 +4,7 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QByteArray>
-#include <QSharedMemory>
+#include "ipc/SharedTile.h"
 #include <memory>
 #include <unordered_map>
 #include "ipc/IpcProtocol.h"
@@ -48,7 +48,7 @@ private:
     QLocalServer* m_server{nullptr};
     QLocalSocket* m_clientSocket{nullptr};
     QByteArray m_incomingBuffer;
-    std::unordered_map<QString, std::unique_ptr<QSharedMemory>> m_sharedTiles;
+    std::unordered_map<QString, std::unique_ptr<ipc::SharedTileSegment>> m_sharedTiles;
 
     pdf::RenderWorker m_engineWorker;
 };

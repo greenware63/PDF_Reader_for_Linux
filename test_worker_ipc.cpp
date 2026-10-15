@@ -1,7 +1,9 @@
 #include <QCoreApplication>
 #include <QProcess>
 #include <QLocalSocket>
-#include <QSharedMemory>
+#include "ipc/SharedTile.h"
+#include <cstring>
+#include <vector>
 #include <QElapsedTimer>
 #include <QThread>
 #include <iostream>
@@ -37,6 +39,47 @@ int main(int argc, char* argv[]) {
     std::cout << "========================================" << std::endl;
     std::cout << " RUNNING SANDBOXED WORKER IPC UNIT TESTS" << std::endl;
     std::cout << "========================================" << std::endl;
+
+    // --- TEST 0: Shared-tile transport security ---
+    std::cout << "[TEST 0] Shared-tile transport rejects hostile names and survives a shrunken segment..." << std::endl;
+    {
+        using namespace pdf::ipc;
+        std::vector<uint8_t> sink(4096);
+        for (const char* bad : {"", "pdf-tile-", "../etc/passwd", "pdf-tile-1-../x", "pdf-tile-x-1", "pdf-tile-1-XYZ",
+                                "pdf-tile-1-12345678901234567", "/pdf-tile-1-a", "other-1-a"}) {
+            if (isValidSharedTileKey(bad) || readAndUnlinkSharedTile(bad, 1, 16, 16, sink.data(), 16)) {
+                std::cerr << "[FAIL] Hostile shared-tile name accepted: '" << bad << "'" << std::endl;
+                return 1;
+            }
+        }
+#ifndef _WIN32
+        const std::string key = "pdf-tile-" + std::to_string(::getpid()) + "-feed";
+        SharedTileSegment seg;
+        if (!seg.create(key, 4096)) {
+            std::cerr << "[FAIL] Could not create a shared tile segment" << std::endl;
+            return 1;
+        }
+        std::memset(seg.data(), 0x5A, 4096);
+        // A worker that truncates the segment after announcing it must produce a clean failure, not a SIGBUS.
+        const int fd = ::shm_open(("/" + key).c_str(), O_RDWR, 0600);
+        if (fd < 0 || ::ftruncate(fd, 64) != 0) {
+            std::cerr << "[FAIL] Could not shrink the segment for the test" << std::endl;
+            return 1;
+        }
+        ::close(fd);
+        if (readAndUnlinkSharedTile(key, 16, 256, 256, sink.data(), 256)) {
+            std::cerr << "[FAIL] Reading a shrunken segment must fail" << std::endl;
+            return 1;
+        }
+        if (readAndUnlinkSharedTile(key, 16, 256, 256, sink.data(), 256)) { // the failed read still unlinked it
+            std::cerr << "[FAIL] Segment should be gone after the first read attempt" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: names validated, truncation handled, segment unlinked by the reader." << std::endl;
+#else
+        std::cout << "  -> Passed: hostile names rejected." << std::endl;
+#endif
+    }
 
     // --- TEST 1: Process Launch and Handshake (Ping/Pong) ---
     std::cout << "[TEST 1] Testing pdf_worker process spawn and Ping/Pong handshake..." << std::endl;
@@ -193,19 +236,18 @@ int main(int argc, char* argv[]) {
         worker.kill();
         return 1;
     }
-    QSharedMemory tileMemory(tileResp.shmKey);
-    if (!tileMemory.attach(QSharedMemory::ReadOnly) ||
-        tileMemory.size() < tileResp.stride * tileResp.height) {
-        std::cerr << "[FAIL] Could not map the shared-memory tile buffer." << std::endl;
+    const size_t tileByteCount = static_cast<size_t>(tileResp.stride) *
+                                 static_cast<size_t>(tileResp.height);
+    std::vector<unsigned char> pixelCopy(tileByteCount);
+    if (!pdf::ipc::readAndUnlinkSharedTile(tileResp.shmKey.toStdString(), static_cast<size_t>(tileResp.height),
+                                           static_cast<size_t>(tileResp.stride),
+                                           static_cast<size_t>(tileResp.width) * 4, pixelCopy.data(),
+                                           static_cast<size_t>(tileResp.stride))) {
+        std::cerr << "[FAIL] Could not read the shared-memory tile buffer." << std::endl;
         worker.kill();
         return 1;
     }
-    const size_t tileByteCount = static_cast<size_t>(tileResp.stride) *
-                                 static_cast<size_t>(tileResp.height);
-    const auto* pixels = static_cast<const unsigned char*>(tileMemory.constData());
-    const bool hasPixels = pixels &&
-        std::any_of(pixels, pixels + tileByteCount, [](unsigned char value) { return value != 0; });
-    tileMemory.detach();
+    const bool hasPixels = std::any_of(pixelCopy.begin(), pixelCopy.end(), [](unsigned char value) { return value != 0; });
     if (!hasPixels) {
         std::cerr << "[FAIL] Shared-memory tile has no readable pixel data." << std::endl;
         worker.kill();
