@@ -40,6 +40,7 @@ struct OpenResult {
     DocumentError error{DocumentError::None};
     int pageCount{0};
     std::vector<std::pair<double, double>> pageSizes;
+    std::vector<OutlineItem> outline;
 };
 
 /**
@@ -154,6 +155,11 @@ public:
     /**
      * @return Number of open IPage handles currently cached on the worker thread.
      */
+    /**
+     * @brief Synchronously extracts the outline/bookmarks tree from the active document on the worker thread.
+     */
+    std::vector<OutlineItem> getOutlineSync(int64_t documentId);
+
     size_t cachedPageCount() const noexcept {
         return m_cachedPageCount.load(std::memory_order_relaxed);
     }
@@ -163,6 +169,8 @@ Q_SIGNALS:
     void tileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key);
     /// Emitted exactly once per openDocumentAsync() call, from the worker thread.
     void documentOpened(int64_t documentId, pdf::OpenResult result);
+    /// Emitted when the document outline (bookmarks) has been extracted.
+    void documentOutlineReady(int64_t documentId, const std::vector<pdf::OutlineItem>& outline);
     /// Emitted when text extraction for a page completes on the worker thread.
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
     /// Emitted when search finds matches on a page.

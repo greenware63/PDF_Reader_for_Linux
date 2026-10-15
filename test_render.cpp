@@ -22,6 +22,57 @@
 // Page 1: Landscape A4 (842 x 595 pt)
 // Page 2: Rotated 90 degrees (/Rotate 90)
 // Page 3: Cropped page (MediaBox [0 0 612 792], CropBox [50 50 550 700])
+static void generateOutlinePdfFixture(const std::string& path) {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    auto addObj = [&](int num, const std::string& content) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(num) + " 0 obj\n" + content + "\nendobj\n";
+    };
+
+    // 1: Catalog with /Outlines
+    addObj(1, "<< /Type /Catalog /Pages 2 0 R /Outlines 6 0 R >>");
+
+    // 2: Pages
+    addObj(2, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>");
+
+    // 3: Page 0
+    addObj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+
+    // 4: Page 1
+    addObj(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+
+    // 5: Page 2
+    addObj(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+
+    // 6: Outlines root
+    addObj(6, "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 3 >>");
+
+    // 7: Bookmark Chapter 1
+    addObj(7, "<< /Title (Chapter 1) /Parent 6 0 R /Next 8 0 R /First 9 0 R /Last 9 0 R /Count 1 /Dest [3 0 R /Fit] >>");
+
+    // 8: Bookmark Chapter 2
+    addObj(8, "<< /Title (Chapter 2) /Parent 6 0 R /Prev 7 0 R /Dest [5 0 R /Fit] >>");
+
+    // 9: Bookmark Section 1.1 (child of 7)
+    addObj(9, "<< /Title (Section 1.1) /Parent 7 0 R /Dest [4 0 R /Fit] >>");
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size " + std::to_string(offsets.size() + 1) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
+
 static void generateMultiPageFixture(const std::string& path) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
@@ -1396,8 +1447,84 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Persian text extracted with accurate code points, RTL highlight boxes merged, and case-sensitive/case-insensitive search verified." << std::endl;
     }
 
+    // Test 18: Document Outline / Bookmarks extraction
+    std::cout << "[TEST 18] Testing Document Outline / Bookmarks hierarchical extraction..." << std::endl;
+    {
+        std::string outlinePdf = "render_test_outline.pdf";
+        generateOutlinePdfFixture(outlinePdf);
+
+        auto doc = pdf::createDocument();
+        auto err = doc->loadFromFile(outlinePdf);
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open outline PDF fixture: " << static_cast<int>(err) << std::endl;
+            return 1;
+        }
+
+        auto outline = doc->getOutline();
+        if (outline.size() != 2) {
+            std::cerr << "[FAIL] Expected 2 top-level outline items, got " << outline.size() << std::endl;
+            return 1;
+        }
+
+        // Check Chapter 1
+        if (outline[0].title != "Chapter 1") {
+            std::cerr << "[FAIL] Expected title 'Chapter 1', got: " << outline[0].title.toStdString() << std::endl;
+            return 1;
+        }
+        if (outline[0].pageIndex != 0) {
+            std::cerr << "[FAIL] Expected pageIndex 0 for Chapter 1, got: " << outline[0].pageIndex << std::endl;
+            return 1;
+        }
+        if (outline[0].children.size() != 1) {
+            std::cerr << "[FAIL] Expected 1 child under Chapter 1, got: " << outline[0].children.size() << std::endl;
+            return 1;
+        }
+
+        // Check Section 1.1
+        if (outline[0].children[0].title != "Section 1.1") {
+            std::cerr << "[FAIL] Expected child title 'Section 1.1', got: " << outline[0].children[0].title.toStdString() << std::endl;
+            return 1;
+        }
+        if (outline[0].children[0].pageIndex != 1) {
+            std::cerr << "[FAIL] Expected pageIndex 1 for Section 1.1, got: " << outline[0].children[0].pageIndex << std::endl;
+            return 1;
+        }
+
+        // Check Chapter 2
+        if (outline[1].title != "Chapter 2") {
+            std::cerr << "[FAIL] Expected title 'Chapter 2', got: " << outline[1].title.toStdString() << std::endl;
+            return 1;
+        }
+        if (outline[1].pageIndex != 2) {
+            std::cerr << "[FAIL] Expected pageIndex 2 for Chapter 2, got: " << outline[1].pageIndex << std::endl;
+            return 1;
+        }
+
+        // Test RenderWorker::getOutlineSync
+        pdf::RenderWorker worker;
+        worker.openDocumentSync(101, outlinePdf);
+        auto workerOutline = worker.getOutlineSync(101);
+        if (workerOutline != outline) {
+            std::cerr << "[FAIL] RenderWorker::getOutlineSync did not match direct document outline!" << std::endl;
+            return 1;
+        }
+
+        // Test document with no outline returns empty vector
+        std::string noOutlinePdf = "render_no_outline.pdf";
+        generateMultiPageFixture(noOutlinePdf);
+        auto noOutlineDoc = pdf::createDocument();
+        noOutlineDoc->loadFromFile(noOutlinePdf);
+        auto emptyOutline = noOutlineDoc->getOutline();
+        if (!emptyOutline.empty()) {
+            std::cerr << "[FAIL] Document without outline returned non-empty outline!" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Document Outline hierarchy, titles, destination pages, and RenderWorker sync extraction verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 17 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 18 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

@@ -13,6 +13,8 @@ RenderWorker::RenderWorker(QObject* parent)
     qRegisterMetaType<std::shared_ptr<pdf::PageText>>("std::shared_ptr<pdf::PageText>");
     qRegisterMetaType<pdf::SearchMatch>("pdf::SearchMatch");
     qRegisterMetaType<std::vector<pdf::SearchMatch>>("std::vector<pdf::SearchMatch>");
+    qRegisterMetaType<pdf::OutlineItem>("pdf::OutlineItem");
+    qRegisterMetaType<std::vector<pdf::OutlineItem>>("std::vector<pdf::OutlineItem>");
 
     m_thread = std::thread(&RenderWorker::workerLoop, this);
 }
@@ -49,7 +51,7 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_running.load()) {
-            return {DocumentError::Unknown, 0, {}};
+            return {DocumentError::Unknown, 0, {}, {}};
         }
 
         // Cancel pending render requests from older epochs
@@ -95,6 +97,7 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
             for (int i = 0; i < result.pageCount; ++i) {
                 result.pageSizes.push_back(m_workerDocument->pageSizePoints(i));
             }
+            result.outline = m_workerDocument->getOutline();
             promise->set_value(std::move(result));
         }});
 
@@ -151,11 +154,33 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
             for (int i = 0; i < result.pageCount; ++i) {
                 result.pageSizes.push_back(m_workerDocument->pageSizePoints(i));
             }
+            result.outline = m_workerDocument->getOutline();
             Q_EMIT documentOpened(documentId, result);
+            Q_EMIT documentOutlineReady(documentId, result.outline);
         }});
 
         m_cv.notify_one();
     }
+}
+
+std::vector<OutlineItem> RenderWorker::getOutlineSync(int64_t documentId) {
+    auto promise = std::make_shared<std::promise<std::vector<OutlineItem>>>();
+    auto future = promise->get_future();
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_running.load() || m_activeDocumentId.load() != documentId || !m_workerDocument) {
+            return {};
+        }
+        m_controlQueue.push_back({[this, promise]() {
+            if (m_workerDocument) {
+                promise->set_value(m_workerDocument->getOutline());
+            } else {
+                promise->set_value({});
+            }
+        }});
+        m_cv.notify_one();
+    }
+    return future.get();
 }
 
 void RenderWorker::closeDocumentSync() {

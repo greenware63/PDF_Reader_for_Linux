@@ -1,4 +1,5 @@
 #include "PdfiumDocument.h"
+#include <fpdf_doc.h>
 #include "PdfiumMutex.h"
 #include <mutex>
 #include <cstring>
@@ -152,6 +153,67 @@ std::unique_ptr<IPage> PdfiumDocument::getPage(int pageIndex) {
         return nullptr;
     }
     return page;
+}
+
+static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK bookmark) {
+    OutlineItem item;
+
+    // 1. Title
+    unsigned long titleBytes = FPDFBookmark_GetTitle(bookmark, nullptr, 0);
+    if (titleBytes > 2) {
+        std::vector<char16_t> buf(titleBytes / 2);
+        FPDFBookmark_GetTitle(bookmark, buf.data(), titleBytes);
+        size_t charCount = (titleBytes / 2);
+        if (charCount > 0 && buf[charCount - 1] == 0) {
+            --charCount;
+        }
+        item.title = QString::fromUtf16(buf.data(), static_cast<qsizetype>(charCount));
+    }
+
+    // 2. Destination
+    FPDF_DEST dest = FPDFBookmark_GetDest(doc, bookmark);
+    if (!dest) {
+        FPDF_ACTION action = FPDFBookmark_GetAction(bookmark);
+        if (action) {
+            dest = FPDFAction_GetDest(doc, action);
+        }
+    }
+
+    if (dest) {
+        item.pageIndex = FPDFDest_GetDestPageIndex(doc, dest);
+        FPDF_BOOL hasX = 0, hasY = 0, hasZoom = 0;
+        FS_FLOAT xVal = 0.0f, yVal = 0.0f, zoomVal = 0.0f;
+        if (FPDFDest_GetLocationInPage(dest, &hasX, &hasY, &hasZoom, &xVal, &yVal, &zoomVal)) {
+            if (hasY) {
+                item.targetYPoints = static_cast<double>(yVal);
+            }
+        }
+    }
+
+    // 3. Children
+    FPDF_BOOKMARK child = FPDFBookmark_GetFirstChild(doc, bookmark);
+    while (child) {
+        item.children.push_back(extractBookmarkRecursive(doc, child));
+        child = FPDFBookmark_GetNextSibling(doc, child);
+    }
+
+    return item;
+}
+
+std::vector<OutlineItem> PdfiumDocument::getOutline() const {
+    if (!m_doc) {
+        return {};
+    }
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+    std::vector<OutlineItem> outline;
+
+    FPDF_BOOKMARK rootChild = FPDFBookmark_GetFirstChild(m_doc.get(), nullptr);
+    while (rootChild) {
+        outline.push_back(extractBookmarkRecursive(m_doc.get(), rootChild));
+        rootChild = FPDFBookmark_GetNextSibling(m_doc.get(), rootChild);
+    }
+
+    return outline;
 }
 
 void PdfiumDocument::close() {

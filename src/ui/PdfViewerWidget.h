@@ -124,6 +124,7 @@ public:
     int searchMatchCount() const noexcept { return static_cast<int>(m_searchMatches.size()); }
     int currentSearchMatchIndex() const noexcept { return m_currentMatchIndex; }
     const std::vector<pdf::SearchMatch>& searchMatches() const noexcept { return m_searchMatches; }
+    const std::vector<pdf::OutlineItem>& outline() const noexcept { return m_outline; }
 
 Q_SIGNALS:
     void documentLoaded(const QString& title, int pages);
@@ -136,6 +137,7 @@ Q_SIGNALS:
     void searchResultsChanged(int currentMatch, int totalMatches);
     void searchProgressChanged(int pagesSearched, int totalPages);
     void searchFinished(bool truncated);
+    void outlineReady(const std::vector<pdf::OutlineItem>& outline);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -155,6 +157,7 @@ private Q_SLOTS:
     void onSearchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
     void onSearchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);
     void onSearchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated);
+    void onDocumentOutlineReady(int64_t documentId, const std::vector<pdf::OutlineItem>& outline);
 
 private:
     struct TextPosition {
@@ -247,6 +250,7 @@ private:
     int m_searchStartPage{0};
     std::vector<pdf::SearchMatch> m_searchMatches;
     int m_currentMatchIndex{-1};
+    std::vector<pdf::OutlineItem> m_outline;
 };
 
 } // namespace ui

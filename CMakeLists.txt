@@ -119,6 +119,7 @@ add_library(pdf_engine STATIC
     include/engine/PixelBuffer.h
     include/engine/PageText.h
     include/engine/SearchTypes.h
+    include/engine/OutlineTypes.h
     include/engine/RenderWorker.h
     src/engine/SearchText.h
     src/engine/SearchText.cpp
@@ -199,6 +200,8 @@ add_executable(test_widget
     test_widget.cpp
     src/ui/FindBar.h
     src/ui/FindBar.cpp
+    src/ui/MainWindow.h
+    src/ui/MainWindow.cpp
     src/ui/PdfViewerWidget.cpp
 )
 

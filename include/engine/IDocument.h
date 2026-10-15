@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IPage.h"
+#include "OutlineTypes.h"
 #include <memory>
 #include <string>
 #include <cstdint>
@@ -68,6 +69,12 @@ public:
     /**
      * @brief Closes the open document and releases engine resources.
      */
+    /**
+     * @brief Extracts the document outline (table of contents / bookmarks) hierarchy.
+     * @return Vector of top-level OutlineItem nodes, each potentially containing nested children.
+     */
+    virtual std::vector<OutlineItem> getOutline() const = 0;
+
     virtual void close() = 0;
 
     /**

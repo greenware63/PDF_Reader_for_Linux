@@ -1,4 +1,10 @@
 #include "MainWindow.h"
+#include <QDockWidget>
+#include <QTreeView>
+#include <QStandardItemModel>
+#include <QStandardItem>
+#include <QStackedWidget>
+#include <QHeaderView>
 #include <QToolBar>
 #include <QFileDialog>
 #include <QStatusBar>
@@ -41,6 +47,37 @@ private:
 
     bool m_dismissible{true};
 };
+
+static void addOutlineItemsRecursive(QStandardItem* parent, const std::vector<pdf::OutlineItem>& items) {
+    for (const auto& item : items) {
+        auto* treeItem = new QStandardItem(item.title);
+        treeItem->setData(item.pageIndex, Qt::UserRole);
+        treeItem->setData(item.targetYPoints, Qt::UserRole + 1);
+        treeItem->setToolTip(QObject::tr("%1 (Page %2)").arg(item.title).arg(item.pageIndex + 1));
+        if (!item.children.empty()) {
+            addOutlineItemsRecursive(treeItem, item.children);
+        }
+        parent->appendRow(treeItem);
+    }
+}
+
+static QStandardItem* findBestOutlineItem(QStandardItem* parent, int currentPage) {
+    QStandardItem* best = nullptr;
+    for (int r = 0; r < parent->rowCount(); ++r) {
+        auto* child = parent->child(r);
+        int page = child->data(Qt::UserRole).toInt();
+        if (page <= currentPage) {
+            best = child;
+            if (child->hasChildren()) {
+                auto* deeper = findBestOutlineItem(child, currentPage);
+                if (deeper) {
+                    best = deeper;
+                }
+            }
+        }
+    }
+    return best;
+}
 
 } // namespace
 
@@ -85,6 +122,38 @@ void MainWindow::setupUi() {
     connect(m_viewer, &PdfViewerWidget::searchProgressChanged, m_findBar, &FindBar::setSearchingProgress);
     connect(m_viewer, &PdfViewerWidget::searchFinished, m_findBar, &FindBar::finishSearch);
 
+    // Sidebar dock for Document Outline / Bookmarks
+    m_sidebarDock = new QDockWidget(tr("Bookmarks"), this);
+    m_sidebarDock->setObjectName(QStringLiteral("BookmarksDock"));
+    m_sidebarDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+
+    m_sidebarStack = new QStackedWidget(m_sidebarDock);
+
+    m_outlineEmptyLabel = new QLabel(tr("No bookmarks in document"), m_sidebarStack);
+    m_outlineEmptyLabel->setObjectName(QStringLiteral("OutlineEmptyLabel"));
+    m_outlineEmptyLabel->setAlignment(Qt::AlignCenter);
+    m_outlineEmptyLabel->setStyleSheet(QStringLiteral("color: #888; font-size: 13px; padding: 20px;"));
+
+    m_outlineView = new QTreeView(m_sidebarStack);
+    m_outlineView->setObjectName(QStringLiteral("OutlineView"));
+    m_outlineView->setHeaderHidden(true);
+    m_outlineView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_outlineView->setUniformRowHeights(true);
+    m_outlineModel = new QStandardItemModel(this);
+    m_outlineView->setModel(m_outlineModel);
+
+    connect(m_outlineView, &QTreeView::clicked, this, &MainWindow::onOutlineItemClicked);
+
+    m_sidebarStack->addWidget(m_outlineEmptyLabel); // index 0: empty
+    m_sidebarStack->addWidget(m_outlineView);       // index 1: tree
+    m_sidebarStack->setCurrentWidget(m_outlineEmptyLabel);
+
+    m_sidebarDock->setWidget(m_sidebarStack);
+    addDockWidget(Qt::LeftDockWidgetArea, m_sidebarDock);
+    m_sidebarDock->hide();
+
+    connect(m_viewer, &PdfViewerWidget::outlineReady, this, &MainWindow::onOutlineReady);
+
     statusBar()->showMessage(tr("Ready - Open a PDF to begin"));
 }
 
@@ -115,6 +184,12 @@ void MainWindow::setupActions() {
     findNextAction->setShortcut(QKeySequence(Qt::Key_F3));
     QAction* findPreviousAction = editMenu->addAction(tr("Find &Previous"), m_viewer, &PdfViewerWidget::findPrevious);
     findPreviousAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F3));
+
+    QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
+    m_toggleSidebarAction = viewMenu->addAction(tr("&Bookmarks Sidebar"), this, [this]() {
+        m_sidebarDock->setVisible(!m_sidebarDock->isVisible());
+    });
+    m_toggleSidebarAction->setShortcut(QKeySequence(Qt::Key_F4));
 
     // Toolbar
     QToolBar* toolbar = addToolBar(tr("Main Toolbar"));
@@ -213,6 +288,15 @@ void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
 void MainWindow::onPageChanged(int currentPage, int totalPages) {
     if (totalPages > 0) {
         m_pageStatusLabel->setText(tr(" Page %1 / %2 ").arg(currentPage).arg(totalPages));
+        if (m_outlineModel && m_outlineModel->rowCount() > 0) {
+            const int zeroBasedPage = currentPage - 1;
+            auto* item = findBestOutlineItem(m_outlineModel->invisibleRootItem(), zeroBasedPage);
+            if (item) {
+                m_outlineView->blockSignals(true);
+                m_outlineView->setCurrentIndex(item->index());
+                m_outlineView->blockSignals(false);
+            }
+        }
     } else {
         m_pageStatusLabel->setText(tr(" Page 0 / 0 "));
         setWindowTitle(tr("PDF Reader - Linux Prototype"));
@@ -296,6 +380,30 @@ void MainWindow::closePasswordDialog() {
     if (m_passwordDialog) {
         static_cast<PasswordDialog*>(m_passwordDialog.data())->setDismissible(true);
         m_passwordDialog->reject();
+    }
+}
+
+void MainWindow::onOutlineReady(const std::vector<pdf::OutlineItem>& outline) {
+    m_outlineModel->clear();
+    if (outline.empty()) {
+        m_sidebarStack->setCurrentWidget(m_outlineEmptyLabel);
+        return;
+    }
+
+    addOutlineItemsRecursive(m_outlineModel->invisibleRootItem(), outline);
+    m_sidebarStack->setCurrentWidget(m_outlineView);
+    m_outlineView->expandToDepth(0);
+    m_sidebarDock->show();
+}
+
+void MainWindow::onOutlineItemClicked(const QModelIndex& index) {
+    if (!index.isValid()) {
+        return;
+    }
+    int pageIndex = index.data(Qt::UserRole).toInt();
+    if (pageIndex >= 0 && pageIndex < m_viewer->pageCount()) {
+        m_viewer->goToPage(pageIndex);
+        m_viewer->setFocus();
     }
 }
 

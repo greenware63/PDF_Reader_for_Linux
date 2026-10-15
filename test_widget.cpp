@@ -1,4 +1,8 @@
 #include "ui/PdfViewerWidget.h"
+#include "ui/MainWindow.h"
+#include <QDockWidget>
+#include <QTreeView>
+#include <QStandardItemModel>
 #include "ui/FindBar.h"
 #include <QApplication>
 #include <QImage>
@@ -20,6 +24,40 @@
 #include <cassert>
 #include <cmath>
 #include <vector>
+
+static void generateOutlinePdfFixture(const std::string& path) {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    auto addObj = [&](int num, const std::string& content) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(num) + " 0 obj\n" + content + "\nendobj\n";
+    };
+
+    addObj(1, "<< /Type /Catalog /Pages 2 0 R /Outlines 6 0 R >>");
+    addObj(2, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>");
+    addObj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    addObj(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    addObj(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    addObj(6, "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 3 >>");
+    addObj(7, "<< /Title (Chapter 1) /Parent 6 0 R /Next 8 0 R /First 9 0 R /Last 9 0 R /Count 1 /Dest [3 0 R /Fit] >>");
+    addObj(8, "<< /Title (Chapter 2) /Parent 6 0 R /Prev 7 0 R /Dest [5 0 R /Fit] >>");
+    addObj(9, "<< /Title (Section 1.1) /Parent 7 0 R /Dest [4 0 R /Fit] >>");
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size " + std::to_string(offsets.size() + 1) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
 
 static void generateMultiPagePdf(const std::string& path, int count = 5) {
     std::string pdf;
@@ -1952,8 +1990,122 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Search findText, next/prev wraparound cycling, Persian RTL search highlights, and FindBar keyboard handling verified." << std::endl;
     }
 
+    // Test 33: Document Outline / Bookmarks Sidebar, QTreeView population, and navigation
+    std::cout << "[TEST 33] Testing Document Outline / Bookmarks Sidebar and TreeView navigation..." << std::endl;
+    {
+        std::string outlinePath = "widget_test_outline.pdf";
+        generateOutlinePdfFixture(outlinePath);
+
+        ui::MainWindow window;
+        window.resize(1024, 768);
+        window.show();
+        QCoreApplication::processEvents();
+
+        // 1. Sidebar initial state: hidden before document with bookmarks is loaded
+        auto* dock = window.sidebarDock();
+        if (!dock) {
+            std::cerr << "[FAIL] sidebarDock is null on MainWindow!" << std::endl;
+            return 1;
+        }
+
+        // 2. F4 shortcut toggles sidebar visibility
+        QKeyEvent f4Press(QEvent::KeyPress, Qt::Key_F4, Qt::NoModifier);
+        QApplication::sendEvent(&window, &f4Press);
+        if (!dock->isVisible()) {
+            std::cerr << "[FAIL] F4 key press did not make sidebarDock visible!" << std::endl;
+            return 1;
+        }
+
+        QApplication::sendEvent(&window, &f4Press);
+        if (dock->isVisible()) {
+            std::cerr << "[FAIL] Second F4 key press did not hide sidebarDock!" << std::endl;
+            return 1;
+        }
+
+        // 3. Open document with outline
+        bool opened = window.openFile(QString::fromStdString(outlinePath));
+        if (!opened) {
+            std::cerr << "[FAIL] window.openFile returned false for outline fixture" << std::endl;
+            return 1;
+        }
+
+        auto* viewer = window.findChild<ui::PdfViewerWidget*>();
+        if (!viewer) {
+            std::cerr << "[FAIL] Could not find PdfViewerWidget child in MainWindow" << std::endl;
+            return 1;
+        }
+
+        viewer->renderWorker().waitForIdle();
+        QCoreApplication::processEvents();
+
+        // 4. Verify viewer.outline()
+        const auto& outline = viewer->outline();
+        if (outline.size() != 2) {
+            std::cerr << "[FAIL] Expected 2 top-level outline items in viewer, got " << outline.size() << std::endl;
+            return 1;
+        }
+        if (outline[0].title != "Chapter 1" || outline[0].pageIndex != 0) {
+            std::cerr << "[FAIL] Unexpected title/page for Chapter 1" << std::endl;
+            return 1;
+        }
+        if (outline[0].children.size() != 1 || outline[0].children[0].title != "Section 1.1" || outline[0].children[0].pageIndex != 1) {
+            std::cerr << "[FAIL] Unexpected child title/page for Section 1.1" << std::endl;
+            return 1;
+        }
+        if (outline[1].title != "Chapter 2" || outline[1].pageIndex != 2) {
+            std::cerr << "[FAIL] Unexpected title/page for Chapter 2" << std::endl;
+            return 1;
+        }
+
+        // 5. Verify Sidebar was auto-shown and tree view populated
+        if (!dock->isVisible()) {
+            std::cerr << "[FAIL] Sidebar dock was not automatically shown when document with bookmarks loaded!" << std::endl;
+            return 1;
+        }
+
+        auto* model = window.outlineModel();
+        if (!model || model->rowCount() != 2) {
+            std::cerr << "[FAIL] Outline tree model row count expected 2, got " << (model ? model->rowCount() : -1) << std::endl;
+            return 1;
+        }
+
+        // 6. Test clicking outline node navigates viewer
+        // Click Chapter 2 (row 1)
+        QModelIndex chapter2Index = model->index(1, 0);
+        emit window.outlineView()->clicked(chapter2Index);
+        QCoreApplication::processEvents();
+
+        if (viewer->currentPage() != 2) {
+            std::cerr << "[FAIL] Clicking Chapter 2 outline node did not navigate viewer to page 2! Current: " << viewer->currentPage() << std::endl;
+            return 1;
+        }
+
+        // Click Section 1.1 (child 0 of row 0)
+        QModelIndex chapter1Index = model->index(0, 0);
+        QModelIndex section11Index = model->index(0, 0, chapter1Index);
+        emit window.outlineView()->clicked(section11Index);
+        QCoreApplication::processEvents();
+
+        if (viewer->currentPage() != 1) {
+            std::cerr << "[FAIL] Clicking Section 1.1 outline node did not navigate viewer to page 1! Current: " << viewer->currentPage() << std::endl;
+            return 1;
+        }
+
+        // 7. Test active outline item synchronization on page change
+        viewer->goToPage(2);
+        QCoreApplication::processEvents();
+        QModelIndex currentTreeIdx = window.outlineView()->currentIndex();
+        if (currentTreeIdx.data(Qt::UserRole).toInt() != 2) {
+            std::cerr << "[FAIL] Active outline item did not sync to current page 2! Got page: "
+                      << currentTreeIdx.data(Qt::UserRole).toInt() << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Document Outline Sidebar, QTreeView population, click-to-page navigation, active tracking, and F4 toggle verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 32 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 33 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

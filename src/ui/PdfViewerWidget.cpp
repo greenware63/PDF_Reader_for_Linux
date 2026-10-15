@@ -104,6 +104,8 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_hasDocument = true;
     m_pageCount = openResult.pageCount;
     m_layout.setPageSizes(openResult.pageSizes);
+    m_outline = openResult.outline;
+    Q_EMIT outlineReady(m_outline);
 
     m_currentPage = 0;
     m_docScrollX = 0;
@@ -233,6 +235,7 @@ void PdfViewerWidget::closeDocument() {
     m_fallbackScales.clear();
     m_pageCount = 0;
     m_layout.setPageSizes({});
+    m_outline.clear();
     m_currentPage = 0;
     m_docScrollX = 0;
     m_docScrollY = 0;
@@ -242,6 +245,7 @@ void PdfViewerWidget::closeDocument() {
     updateScrollBars();
     viewport()->update();
     Q_EMIT pageChanged(0, 0);
+    Q_EMIT outlineReady(m_outline);
 }
 
 void PdfViewerWidget::nextPage() {
@@ -1012,6 +1016,14 @@ void PdfViewerWidget::onSearchCompleted(int64_t documentId, int64_t searchId, in
     Q_EMIT searchResultsChanged(cur, std::min(totalMatches, pdf::MAX_SEARCH_MATCHES));
     Q_EMIT searchFinished(truncated);
     viewport()->update();
+}
+
+void PdfViewerWidget::onDocumentOutlineReady(int64_t documentId, const std::vector<pdf::OutlineItem>& outline) {
+    if (documentId != m_currentDocumentId) {
+        return;
+    }
+    m_outline = outline;
+    Q_EMIT outlineReady(m_outline);
 }
 
 void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
