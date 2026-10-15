@@ -5,6 +5,7 @@
 #include <QToolButton>
 #include <QCheckBox>
 #include <QKeyEvent>
+#include <QLocale>
 #include <algorithm>
 
 namespace ui {
@@ -100,7 +101,8 @@ void FindBar::updateStatusLabel() {
 
     QString countText;
     if (m_totalMatches > 0) {
-        const QString total = m_matchLimitReached ? tr("%1+").arg(m_totalMatches) : QString::number(m_totalMatches);
+        const QString formattedTotal = QLocale(QLocale::English, QLocale::UnitedStates).toString(m_totalMatches);
+        const QString total = m_matchLimitReached ? tr("%1+").arg(formattedTotal) : formattedTotal;
         countText = tr("%1 of %2").arg(m_currentMatch).arg(total);
     } else if (!m_isSearching) {
         countText = tr("No matches");

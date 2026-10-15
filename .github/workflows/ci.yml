@@ -1,0 +1,65 @@
+name: Linux CI & Sanitizers
+
+on:
+  push:
+    branches: ["main", "greenware63-pdf-search-fixes"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        build_type: [Release, Sanitizer, ThreadSanitizer]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Qt 6 and Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            qt6-base-dev \
+            libgl1-mesa-dev \
+            libxkbcommon-dev
+
+      - name: Configure CMake (Release)
+        if: matrix.build_type == 'Release'
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure CMake (Sanitizer)
+        if: matrix.build_type == 'Sanitizer'
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Configure CMake (ThreadSanitizer)
+        if: matrix.build_type == 'ThreadSanitizer'
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+      - name: Build Project
+        run: cmake --build build
+
+      - name: Run CTest Test Suite
+        env:
+          QT_QPA_PLATFORM: "offscreen"
+          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+          TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1:suppressions=${{ github.workspace }}/ci/tsan_suppressions.txt"
+        run: ctest --test-dir build --output-on-failure

@@ -1913,7 +1913,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         findBar.finishSearch(true);
-        if (!countLabel->text().contains(QStringLiteral("10000+"))) {
+        if (!countLabel->text().contains(QStringLiteral("10,000+"))) {
             std::cerr << "[FAIL] FindBar did not display the truncated match count." << std::endl;
             return 1;
         }
