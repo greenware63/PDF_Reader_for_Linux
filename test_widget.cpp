@@ -25,7 +25,7 @@
 #include <cmath>
 #include <vector>
 
-static void generateOutlinePdfFixture(const std::string& path) {
+static void generateOutlinePdfFixture(const std::string& path, bool cyclicSibling = false) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
     std::vector<size_t> offsets;
@@ -40,10 +40,13 @@ static void generateOutlinePdfFixture(const std::string& path) {
     addObj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
     addObj(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
     addObj(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
-    addObj(6, "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 3 >>");
+    addObj(6, "<< /Type /Outlines /First 7 0 R /Last 10 0 R /Count 4 >>");
     addObj(7, "<< /Title (Chapter 1) /Parent 6 0 R /Next 8 0 R /First 9 0 R /Last 9 0 R /Count 1 /Dest [3 0 R /Fit] >>");
-    addObj(8, "<< /Title (Chapter 2) /Parent 6 0 R /Prev 7 0 R /Dest [5 0 R /Fit] >>");
-    addObj(9, "<< /Title (Section 1.1) /Parent 7 0 R /Dest [4 0 R /Fit] >>");
+    addObj(8, "<< /Title (Chapter 2) /Parent 6 0 R /Prev 7 0 R /Next 10 0 R /Dest [5 0 R /XYZ 0 700 1] >>");
+    addObj(9, "<< /Title (Section 1.1) /Parent 7 0 R /Dest [3 0 R /Fit] >>");
+    addObj(10, cyclicSibling
+                   ? "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R /Next 7 0 R >>"
+                   : "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R >>");
 
     size_t xrefOffset = pdf.size();
     pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";
@@ -2035,20 +2038,28 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        viewer->renderWorker().waitForIdle();
-        QCoreApplication::processEvents();
+        QElapsedTimer outlineTimer;
+        outlineTimer.start();
+        while (outlineTimer.elapsed() < 3000) {
+            viewer->renderWorker().waitForIdle();
+            QCoreApplication::processEvents();
+            if (!viewer->outline().empty()) {
+                break;
+            }
+            QThread::msleep(5);
+        }
 
         // 4. Verify viewer.outline()
         const auto& outline = viewer->outline();
-        if (outline.size() != 2) {
-            std::cerr << "[FAIL] Expected 2 top-level outline items in viewer, got " << outline.size() << std::endl;
+        if (outline.size() != 3) {
+            std::cerr << "[FAIL] Expected 3 top-level outline items in viewer, got " << outline.size() << std::endl;
             return 1;
         }
         if (outline[0].title != "Chapter 1" || outline[0].pageIndex != 0) {
             std::cerr << "[FAIL] Unexpected title/page for Chapter 1" << std::endl;
             return 1;
         }
-        if (outline[0].children.size() != 1 || outline[0].children[0].title != "Section 1.1" || outline[0].children[0].pageIndex != 1) {
+        if (outline[0].children.size() != 1 || outline[0].children[0].title != "Section 1.1" || outline[0].children[0].pageIndex != 0) {
             std::cerr << "[FAIL] Unexpected child title/page for Section 1.1" << std::endl;
             return 1;
         }
@@ -2057,15 +2068,24 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // 5. Verify Sidebar was auto-shown and tree view populated
-        if (!dock->isVisible()) {
-            std::cerr << "[FAIL] Sidebar dock was not automatically shown when document with bookmarks loaded!" << std::endl;
+        if (outline[2].title != "Preface" || outline[2].pageIndex != -1) {
+            std::cerr << "[FAIL] Bookmark without a destination was not preserved as non-navigable." << std::endl;
+            return 1;
+        }
+
+        // 5. Outline loading must not override the user's sidebar visibility choice.
+        if (dock->isVisible()) {
+            std::cerr << "[FAIL] Loading an outline reopened the sidebar after the user hid it!" << std::endl;
             return 1;
         }
 
         auto* model = window.outlineModel();
-        if (!model || model->rowCount() != 2) {
-            std::cerr << "[FAIL] Outline tree model row count expected 2, got " << (model ? model->rowCount() : -1) << std::endl;
+        if (!model || model->rowCount() != 3) {
+            std::cerr << "[FAIL] Outline tree model row count expected 3, got " << (model ? model->rowCount() : -1) << std::endl;
+            return 1;
+        }
+        if (model->index(2, 0).data(Qt::ToolTipRole).toString().contains(QStringLiteral("Page 0"))) {
+            std::cerr << "[FAIL] Bookmark without a destination showed a misleading page tooltip." << std::endl;
             return 1;
         }
 
@@ -2079,15 +2099,29 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Clicking Chapter 2 outline node did not navigate viewer to page 2! Current: " << viewer->currentPage() << std::endl;
             return 1;
         }
+        const int64_t bookmarkScrollY = viewer->currentDocScrollY();
+        viewer->goToPage(2);
+        if (bookmarkScrollY <= viewer->currentDocScrollY()) {
+            std::cerr << "[FAIL] Bookmark destination Y was not applied in PDF bottom-up coordinates." << std::endl;
+            return 1;
+        }
 
-        // Click Section 1.1 (child 0 of row 0)
+        // Clicking a parent bookmark must keep that exact row selected when it shares a page with its child.
         QModelIndex chapter1Index = model->index(0, 0);
+        emit window.outlineView()->clicked(chapter1Index);
+        QCoreApplication::processEvents();
+        if (window.outlineView()->currentIndex() != chapter1Index) {
+            std::cerr << "[FAIL] Page synchronization overrode the bookmark explicitly clicked by the user." << std::endl;
+            return 1;
+        }
+
+        // Clicking Section 1.1 (child 0 of row 0) remains independently selectable.
         QModelIndex section11Index = model->index(0, 0, chapter1Index);
         emit window.outlineView()->clicked(section11Index);
         QCoreApplication::processEvents();
 
-        if (viewer->currentPage() != 1) {
-            std::cerr << "[FAIL] Clicking Section 1.1 outline node did not navigate viewer to page 1! Current: " << viewer->currentPage() << std::endl;
+        if (viewer->currentPage() != 0 || window.outlineView()->currentIndex() != section11Index) {
+            std::cerr << "[FAIL] Clicking Section 1.1 did not preserve its selected row and destination page." << std::endl;
             return 1;
         }
 
@@ -2100,8 +2134,48 @@ int main(int argc, char* argv[]) {
                       << currentTreeIdx.data(Qt::UserRole).toInt() << std::endl;
             return 1;
         }
+        viewer->goToPage(0);
+        if (window.outlineView()->currentIndex().data(Qt::UserRole).toInt() != 0) {
+            std::cerr << "[FAIL] Bookmark without a destination stole the active page highlight." << std::endl;
+            return 1;
+        }
 
-        std::cout << "  -> Passed: Document Outline Sidebar, QTreeView population, click-to-page navigation, active tracking, and F4 toggle verified." << std::endl;
+        QApplication::sendEvent(&window, &f4Press);
+        if (!dock->isVisible()) {
+            std::cerr << "[FAIL] F4 could not show the sidebar after outline loading." << std::endl;
+            return 1;
+        }
+        QApplication::sendEvent(&window, &f4Press);
+        viewer->goToPage(0);
+        viewer->goToPage(2);
+        if (dock->isVisible()) {
+            std::cerr << "[FAIL] Page synchronization reopened a sidebar hidden by the user." << std::endl;
+            return 1;
+        }
+
+        std::string cyclicOutlinePath = "widget_test_cyclic_outline.pdf";
+        generateOutlinePdfFixture(cyclicOutlinePath, true);
+        bool cyclicOpened = window.openFile(QString::fromStdString(cyclicOutlinePath));
+        if (!cyclicOpened) {
+            std::cerr << "[FAIL] Could not open cyclic outline fixture." << std::endl;
+            return 1;
+        }
+        QElapsedTimer cyclicTimer;
+        cyclicTimer.start();
+        while (cyclicTimer.elapsed() < 3000) {
+            viewer->renderWorker().waitForIdle();
+            QCoreApplication::processEvents();
+            if (!viewer->outline().empty()) {
+                break;
+            }
+            QThread::msleep(5);
+        }
+        if (viewer->outline().size() != 3) {
+            std::cerr << "[FAIL] Cyclic bookmark links did not terminate with the unique outline nodes." << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: async outline loading, cycle safety, sidebar visibility, bookmark destination navigation, clicked-row retention, and active tracking verified." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

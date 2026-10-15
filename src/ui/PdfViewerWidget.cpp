@@ -36,6 +36,7 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
     connect(&m_renderWorker, &pdf::RenderWorker::tileReady, this, &PdfViewerWidget::onTileReady, Qt::QueuedConnection);
     connect(&m_renderWorker, &pdf::RenderWorker::tileFailed, this, &PdfViewerWidget::onTileFailed, Qt::QueuedConnection);
     connect(&m_renderWorker, &pdf::RenderWorker::documentOpened, this, &PdfViewerWidget::onDocumentOpened, Qt::QueuedConnection);
+    connect(&m_renderWorker, &pdf::RenderWorker::documentOutlineReady, this, &PdfViewerWidget::onDocumentOutlineReady, Qt::QueuedConnection);
     connect(&m_renderWorker, &pdf::RenderWorker::pageTextReady, this, &PdfViewerWidget::onPageTextReady, Qt::QueuedConnection);
     connect(&m_renderWorker, &pdf::RenderWorker::searchMatchesFound, this, &PdfViewerWidget::onSearchMatchesFound, Qt::QueuedConnection);
     connect(&m_renderWorker, &pdf::RenderWorker::searchProgress, this, &PdfViewerWidget::onSearchProgress, Qt::QueuedConnection);
@@ -104,7 +105,8 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_hasDocument = true;
     m_pageCount = openResult.pageCount;
     m_layout.setPageSizes(openResult.pageSizes);
-    m_outline = openResult.outline;
+    m_outline.clear();
+    m_outlineRequestPending = true;
     Q_EMIT outlineReady(m_outline);
 
     m_currentPage = 0;
@@ -236,6 +238,7 @@ void PdfViewerWidget::closeDocument() {
     m_pageCount = 0;
     m_layout.setPageSizes({});
     m_outline.clear();
+    m_outlineRequestPending = false;
     m_currentPage = 0;
     m_docScrollX = 0;
     m_docScrollY = 0;
@@ -261,6 +264,14 @@ void PdfViewerWidget::previousPage() {
 }
 
 void PdfViewerWidget::goToPage(int pageIndex) {
+    goToPageImpl(pageIndex, std::nullopt);
+}
+
+void PdfViewerWidget::goToPage(int pageIndex, double targetYPoints) {
+    goToPageImpl(pageIndex, targetYPoints);
+}
+
+void PdfViewerWidget::goToPageImpl(int pageIndex, std::optional<double> targetYPoints) {
     if (!isDocumentOpen()) {
         return;
     }
@@ -273,8 +284,15 @@ void PdfViewerWidget::goToPage(int pageIndex) {
     const int64_t oldScrollX = m_docScrollX;
     const int64_t oldScrollY = m_docScrollY;
 
+    int64_t targetDocY = pl.topPixel;
+    if (targetYPoints && std::isfinite(*targetYPoints) && pl.heightPoints > 0.0) {
+        const double topDownPoints = std::clamp(pl.heightPoints - *targetYPoints, 0.0, pl.heightPoints);
+        targetDocY += static_cast<int64_t>(std::llround(
+            topDownPoints * static_cast<double>(pl.heightPixel) / pl.heightPoints));
+    }
+
     m_navigating = true;
-    setDocScrollPosition(m_docScrollX, pl.topPixel);
+    setDocScrollPosition(m_docScrollX, targetDocY);
     m_navigating = false;
 
     if (m_docScrollX != oldScrollX || m_docScrollY != oldScrollY) {
@@ -1335,6 +1353,10 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
 
     if (!pendingRequests.empty()) {
         m_renderWorker.enqueueRequests(std::move(pendingRequests));
+    }
+    if (m_outlineRequestPending && !tiles.empty()) {
+        m_outlineRequestPending = false;
+        m_renderWorker.requestDocumentOutline(m_currentDocumentId);
     }
 
     // 6. Draw selection highlights over rendered pages

@@ -22,7 +22,7 @@
 // Page 1: Landscape A4 (842 x 595 pt)
 // Page 2: Rotated 90 degrees (/Rotate 90)
 // Page 3: Cropped page (MediaBox [0 0 612 792], CropBox [50 50 550 700])
-static void generateOutlinePdfFixture(const std::string& path) {
+static void generateOutlinePdfFixture(const std::string& path, bool cyclicSibling = false) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
     std::vector<size_t> offsets;
@@ -48,16 +48,19 @@ static void generateOutlinePdfFixture(const std::string& path) {
     addObj(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
 
     // 6: Outlines root
-    addObj(6, "<< /Type /Outlines /First 7 0 R /Last 8 0 R /Count 3 >>");
+    addObj(6, "<< /Type /Outlines /First 7 0 R /Last 10 0 R /Count 4 >>");
 
     // 7: Bookmark Chapter 1
     addObj(7, "<< /Title (Chapter 1) /Parent 6 0 R /Next 8 0 R /First 9 0 R /Last 9 0 R /Count 1 /Dest [3 0 R /Fit] >>");
 
     // 8: Bookmark Chapter 2
-    addObj(8, "<< /Title (Chapter 2) /Parent 6 0 R /Prev 7 0 R /Dest [5 0 R /Fit] >>");
+    addObj(8, "<< /Title (Chapter 2) /Parent 6 0 R /Prev 7 0 R /Next 10 0 R /Dest [5 0 R /XYZ 0 700 1] >>");
 
     // 9: Bookmark Section 1.1 (child of 7)
-    addObj(9, "<< /Title (Section 1.1) /Parent 7 0 R /Dest [4 0 R /Fit] >>");
+    addObj(9, "<< /Title (Section 1.1) /Parent 7 0 R /Dest [3 0 R /Fit] >>");
+    addObj(10, cyclicSibling
+                   ? "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R /Next 7 0 R >>"
+                   : "<< /Title (Preface) /Parent 6 0 R /Prev 8 0 R >>");
 
     size_t xrefOffset = pdf.size();
     pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";
@@ -1461,8 +1464,8 @@ int main(int argc, char* argv[]) {
         }
 
         auto outline = doc->getOutline();
-        if (outline.size() != 2) {
-            std::cerr << "[FAIL] Expected 2 top-level outline items, got " << outline.size() << std::endl;
+        if (outline.size() != 3) {
+            std::cerr << "[FAIL] Expected 3 top-level outline items, got " << outline.size() << std::endl;
             return 1;
         }
 
@@ -1485,8 +1488,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Expected child title 'Section 1.1', got: " << outline[0].children[0].title.toStdString() << std::endl;
             return 1;
         }
-        if (outline[0].children[0].pageIndex != 1) {
-            std::cerr << "[FAIL] Expected pageIndex 1 for Section 1.1, got: " << outline[0].children[0].pageIndex << std::endl;
+        if (outline[0].children[0].pageIndex != 0) {
+            std::cerr << "[FAIL] Expected pageIndex 0 for Section 1.1, got: " << outline[0].children[0].pageIndex << std::endl;
             return 1;
         }
 
@@ -1500,12 +1503,17 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Test RenderWorker::getOutlineSync
-        pdf::RenderWorker worker;
-        worker.openDocumentSync(101, outlinePdf);
-        auto workerOutline = worker.getOutlineSync(101);
-        if (workerOutline != outline) {
-            std::cerr << "[FAIL] RenderWorker::getOutlineSync did not match direct document outline!" << std::endl;
+        if (outline[2].title != "Preface" || outline[2].pageIndex != -1) {
+            std::cerr << "[FAIL] Bookmark without a destination was not represented correctly." << std::endl;
+            return 1;
+        }
+
+        const std::string cyclicOutlinePdf = "render_test_cyclic_outline.pdf";
+        generateOutlinePdfFixture(cyclicOutlinePdf, true);
+        auto cyclicDoc = pdf::createDocument();
+        if (cyclicDoc->loadFromFile(cyclicOutlinePdf) != pdf::DocumentError::None ||
+            cyclicDoc->getOutline().size() != 3) {
+            std::cerr << "[FAIL] Cyclic outline links were not bounded during extraction." << std::endl;
             return 1;
         }
 
@@ -1520,7 +1528,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::cout << "  -> Passed: Document Outline hierarchy, titles, destination pages, and RenderWorker sync extraction verified." << std::endl;
+        std::cout << "  -> Passed: Document Outline hierarchy, destination validity, and cyclic-link safety verified." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;
