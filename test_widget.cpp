@@ -761,7 +761,7 @@ int main(int argc, char* argv[]) {
         viewer.renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(15));
         int deliveredDuringScroll = 0;
         QMetaObject::Connection countConn = QObject::connect(
-            &viewer.renderWorker(), &pdf::RenderWorker::tileReady, &viewer,
+            &viewer.renderWorker(), &pdf::ipc::WorkerClient::tileReady, &viewer,
             [&](int64_t, uint64_t, const pdf::TileKey&, const pdf::PixelBuffer&) { ++deliveredDuringScroll; });
 
         const int stepDelta = maxV / 60;
@@ -1228,7 +1228,7 @@ int main(int argc, char* argv[]) {
         // (b) on a fresh area, every visible tile is delivered before any prefetched tile
         std::vector<pdf::TileKey> deliveryOrder;
         QMetaObject::Connection orderConn = QObject::connect(
-            &viewer.renderWorker(), &pdf::RenderWorker::tileReady, &viewer,
+            &viewer.renderWorker(), &pdf::ipc::WorkerClient::tileReady, &viewer,
             [&](int64_t, uint64_t, const pdf::TileKey& k, const pdf::PixelBuffer&) { deliveryOrder.push_back(k); });
         viewer.renderWorker().setRenderDelayForTesting(std::chrono::milliseconds(10));
         viewer.goToPage(3);
@@ -1769,7 +1769,7 @@ int main(int argc, char* argv[]) {
         std::atomic<int> answers{0};
         std::atomic<bool> emptyAnswer{false};
         QMetaObject::Connection c = QObject::connect(
-            &viewer.renderWorker(), &pdf::RenderWorker::pageTextReady, &viewer,
+            &viewer.renderWorker(), &pdf::ipc::WorkerClient::pageTextReady, &viewer,
             [&](int64_t, int, std::shared_ptr<pdf::PageText> t) { ++answers; emptyAnswer = (!t || t->empty()); },
             Qt::DirectConnection);
         viewer.renderWorker().requestPageText(viewer.currentDocumentId(), 99999);

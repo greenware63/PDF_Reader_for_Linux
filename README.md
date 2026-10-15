@@ -5,15 +5,18 @@ A high-performance, native PDF workstation for Linux designed with an Adobe Pro-
 ## Architecture & Principles
 
 - **Engine Foundation**: Uses Google's [PDFium](https://pdfium.googlesource.com/pdfium/) via prebuilt release binaries (`bblanchon/pdfium-binaries`), verified cryptographically with SHA256 checksums and integrated via CMake `FetchContent`.
-- **Pure Qt-Free Raster Core**: `PixelBuffer` represents rasters with explicit byte strides and custom `std::shared_ptr<const void>` buffer ownership, decoupling the rendering core from GUI toolkits and preparing for zero-copy Linux `memfd_create` IPC in Phase 3.
+- **Pure Qt-Free Raster Core**: `PixelBuffer` represents rasters with explicit byte strides and custom `std::shared_ptr<const void>` buffer ownership, decoupling the rendering core from GUI toolkits.
 - **Standalone Layout Engine (`pdf_layout`)**: `DocumentLayout` is compiled as a standalone static library with **zero Qt and zero PDFium dependencies**. It operates entirely in 64-bit device pixel space, providing continuous page layout, O(log N) binary search for visible pages, gap/boundary detection, horizontal centering, 2D cursor zoom anchor pinning, and Qt-free visible tile enumeration.
-- **Strict Engine Abstraction (`pdf_engine`)**: The viewport and UI layers interact exclusively through `IDocument`, `IPage`, and `PixelBuffer` interfaces without exposing PDFium types.
-- **Single-Threaded PDFium Concurrency Model**: Conforms strictly to PDFium's single-threaded API contract. PDFium calls (`loadFromFile`, `close`, `pageCount`, `pageSizePoints`, `getPage`, `renderTile`) and page caching are 100% serialized on a dedicated background worker thread (`RenderWorker`), eliminating concurrency hazards with UI lifecycle routines.
+- **Separate PDF Worker Process**: The `pdf-reader` executable links to `pdf_ipc`, not `pdf_engine` or PDFium. It launches `pdf_worker` and sends document, tile, text, outline, and search requests over a versioned `QLocalSocket` protocol. PDFium calls and page caching remain serialized on the worker's `RenderWorker` thread.
+- **Shared-Memory Tile Transport**: Rendered tile pixels are transferred through per-tile `QSharedMemory` segments; only the segment key and layout metadata travel in the socket packet. The UI copies pixels into an owned `PixelBuffer` before acknowledging and releasing the segment.
+- **Bounded IPC Framing**: Packets validate magic, protocol version, message type, and a 32 MiB payload ceiling. Deserialization rejects trailing data and bounds collection sizes before allocation.
 - **Unconstrained Virtual Tiling**: Virtual page dimensions at deep zoom are unconstrained (supporting rasters up to 17,850 × 25,260 px and beyond). Rendering is decomposed into a 512×512 tile grid via `renderTile()` with origin translation `(-x0, -y0)` and LCD sub-pixel font fringing disabled.
 - **Scale-Preserving Whole-Page Clamping**: For single-buffer whole-page convenience renders, rasters are safely clamped to 8192 px and 16 Megapixels to prevent bad allocation / OOM, scaling effective device pixel ratios dynamically so page layout is preserved. Individual tile requests are guarded against requests exceeding 4096 px per side or 16 MP.
 - **Robust Object Lifetimes**: Pages hold shared ownership of the underlying document handle, preventing use-after-free even if the document is closed or reloaded while pages are retained.
 - **In-Memory Lifetime Safety**: In-memory byte buffers are tied to the document handle's custom deleter, ensuring zero dangling pointer access during lifetime overlaps.
 - **Non-Destructive Loading & Restoration**: Failed document opens (corrupt file, wrong password, missing file) preserve any currently active document and its render queue intact.
+
+The worker process boundary is not an OS sandbox: Linux currently uses parent-death signaling, but seccomp and Landlock confinement are not implemented.
 
 ## Security Hardening & Compiler Diagnostics
 
@@ -37,6 +40,9 @@ The build system configures strict diagnostics and defense-in-depth compile-time
 │   └── layout/
 │       ├── DocumentLayout.h    # 64-bit continuous layout, binary search & tile enumeration
 │       └── ScrollMapper.h      # Qt-free 64-bit to 32-bit scrollbar mapping & resize remapping
+│   └── ipc/
+│       ├── IpcMessages.h       # Typed worker request/response serialization
+│       └── IpcProtocol.h       # Versioned, bounded packet framing
 ├── src/
 │   ├── cache/
 │   │   └── TileCache.cpp       # Thread-confined tile caching & recovery tombstones
@@ -46,6 +52,12 @@ The build system configures strict diagnostics and defense-in-depth compile-time
 │   │   └── RenderWorker.cpp    # Serialized worker thread, priority queue & document lifecycle
 │   ├── layout/
 │   │   └── DocumentLayout.cpp  # Qt-free layout calculations, 2D anchors & tile grids
+│   ├── ipc/
+│   │   ├── IpcMessages.cpp     # IPC serializers
+│   │   └── WorkerClient.cpp    # Worker process lifecycle and UI-side IPC client
+│   ├── worker/
+│   │   ├── main.cpp            # Headless PDF worker entry point
+│   │   └── WorkerServer.cpp    # Socket server and RenderWorker bridge
 │   └── ui/
 │       ├── ImageUtils.h        # Zero-copy wrapper from PixelBuffer to QImage
 │       ├── MainWindow.h/cpp    # Desktop main window & actions

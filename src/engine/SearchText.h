@@ -6,8 +6,6 @@
 
 namespace pdf {
 
-inline constexpr int MAX_SEARCH_MATCHES = 10000;
-
 std::vector<SearchMatch> findTextInPage(
     const PageText& pageText,
     const QString& query,

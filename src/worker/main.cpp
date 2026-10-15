@@ -26,7 +26,7 @@ int main(int argc, char* argv[]) {
     applyProcessIsolation();
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("Sandboxed PDFium rendering engine worker process"));
+    parser.setApplicationDescription(QStringLiteral("PDFium rendering engine worker process"));
     parser.addHelpOption();
 
     QCommandLineOption socketOption(

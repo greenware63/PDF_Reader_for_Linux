@@ -6,6 +6,8 @@
 
 namespace pdf {
 
+inline constexpr int MAX_SEARCH_MATCHES = 10000;
+
 struct SearchMatch {
     int pageIndex{0};
     int charStartIndex{0};

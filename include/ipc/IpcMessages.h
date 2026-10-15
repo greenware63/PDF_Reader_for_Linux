@@ -167,6 +167,24 @@ struct WorkerErrorResponse {
     QString errorMessage;
 };
 
+struct SharedMemoryAck {
+    QString shmKey;
+};
+
+struct WorkerControlRequest {
+    quint64 requestId{0};
+    int renderDelayMs{-1};
+    int openDelayMs{-1};
+    bool waitForIdle{false};
+    bool queryStatus{false};
+};
+
+struct WorkerControlResponse {
+    quint64 requestId{0};
+    quint64 pendingCount{0};
+    quint64 cachedPageCount{0};
+};
+
 // Message stream operators
 QDataStream& operator<<(QDataStream& out, const OpenDocumentRequest& req);
 QDataStream& operator>>(QDataStream& in, OpenDocumentRequest& req);
@@ -227,6 +245,12 @@ QDataStream& operator>>(QDataStream& in, PongResponse& res);
 
 QDataStream& operator<<(QDataStream& out, const WorkerErrorResponse& res);
 QDataStream& operator>>(QDataStream& in, WorkerErrorResponse& res);
+QDataStream& operator<<(QDataStream& out, const SharedMemoryAck& ack);
+QDataStream& operator>>(QDataStream& in, SharedMemoryAck& ack);
+QDataStream& operator<<(QDataStream& out, const WorkerControlRequest& request);
+QDataStream& operator>>(QDataStream& in, WorkerControlRequest& request);
+QDataStream& operator<<(QDataStream& out, const WorkerControlResponse& response);
+QDataStream& operator>>(QDataStream& in, WorkerControlResponse& response);
 
 // --- Serialization Templates ---
 
@@ -244,10 +268,13 @@ bool deserialize(const QByteArray& buffer, T& msg) {
     QDataStream stream(buffer);
     stream.setVersion(QDataStream::Qt_6_5);
     stream >> msg;
-    return stream.status() == QDataStream::Ok;
+    return stream.status() == QDataStream::Ok && stream.atEnd();
 }
 
 inline QByteArray buildPacket(MessageType type, const QByteArray& payload) {
+    if (payload.size() < 0 || static_cast<uint64_t>(payload.size()) > MAX_IPC_PAYLOAD_SIZE) {
+        return {};
+    }
     PacketHeader header;
     header.magic = IPC_MAGIC;
     header.version = IPC_PROTOCOL_VERSION;

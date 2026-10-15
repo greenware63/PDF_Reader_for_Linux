@@ -1,6 +1,39 @@
 #include "ipc/IpcMessages.h"
+#include <algorithm>
 
 namespace pdf {
+namespace {
+
+constexpr quint32 MAX_PAGE_COUNT = 100000;
+constexpr quint32 MAX_OUTLINE_ITEMS = 10000;
+constexpr quint32 MAX_PAGE_CHARACTERS = 4000000;
+constexpr quint32 IPC_MAX_SEARCH_MATCHES = 10000;
+constexpr quint32 MAX_MATCH_RECTS = 1000000;
+constexpr int MAX_OUTLINE_DEPTH = 128;
+constexpr quint32 MIN_OUTLINE_ITEM_BYTES = 21;
+thread_local quint32 outlineNodeCount = 0;
+
+bool validateCount(QDataStream& stream, quint32 count, quint32 limit) {
+    if (count <= limit) {
+        return true;
+    }
+    stream.setStatus(QDataStream::ReadCorruptData);
+    return false;
+}
+
+bool validateCollection(QDataStream& stream, quint32 count, quint32 limit,
+                        quint32 minimumItemBytes) {
+    if (!validateCount(stream, count, limit) || stream.status() != QDataStream::Ok ||
+        !stream.device() ||
+        static_cast<quint64>(count) * minimumItemBytes >
+            static_cast<quint64>(std::max<qint64>(0, stream.device()->bytesAvailable()))) {
+        stream.setStatus(QDataStream::ReadCorruptData);
+        return false;
+    }
+    return true;
+}
+
+} // namespace
 
 // DocumentError
 QDataStream& operator<<(QDataStream& out, const DocumentError& err) {
@@ -34,6 +67,9 @@ QDataStream& operator>>(QDataStream& in, OpenResult& res) {
     quint32 sizeCount = 0;
     in >> sizeCount;
     res.pageSizes.clear();
+    if (!validateCollection(in, sizeCount, MAX_PAGE_COUNT, 16)) {
+        return in;
+    }
     res.pageSizes.reserve(sizeCount);
     for (quint32 i = 0; i < sizeCount; ++i) {
         double w = 0.0, h = 0.0;
@@ -125,6 +161,17 @@ QDataStream& operator<<(QDataStream& out, const OutlineItem& item) {
 }
 
 QDataStream& operator>>(QDataStream& in, OutlineItem& item) {
+    static thread_local int depth = 0;
+    if (depth >= MAX_OUTLINE_DEPTH) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    if (outlineNodeCount >= MAX_OUTLINE_ITEMS) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    ++depth;
+    ++outlineNodeCount;
     in >> item.title;
     qint32 page = 0;
     in >> page;
@@ -134,12 +181,23 @@ QDataStream& operator>>(QDataStream& in, OutlineItem& item) {
     quint32 childCount = 0;
     in >> childCount;
     item.children.clear();
+    if (!validateCollection(in, childCount, MAX_OUTLINE_ITEMS, MIN_OUTLINE_ITEM_BYTES)) {
+        --outlineNodeCount;
+        --depth;
+        return in;
+    }
     item.children.reserve(childCount);
     for (quint32 i = 0; i < childCount; ++i) {
         OutlineItem child;
         in >> child;
+        if (in.status() != QDataStream::Ok) {
+            --outlineNodeCount;
+            --depth;
+            return in;
+        }
         item.children.push_back(std::move(child));
     }
+    --depth;
     return in;
 }
 
@@ -180,6 +238,9 @@ QDataStream& operator>>(QDataStream& in, PageText& text) {
     quint32 count = 0;
     in >> count;
     text.chars.clear();
+    if (!validateCollection(in, count, MAX_PAGE_CHARACTERS, 36)) {
+        return in;
+    }
     text.chars.reserve(count);
     for (quint32 i = 0; i < count; ++i) {
         PageCharBox box;
@@ -210,6 +271,9 @@ QDataStream& operator>>(QDataStream& in, SearchMatch& match) {
     quint32 count = 0;
     in >> count;
     match.rects.clear();
+    if (!validateCollection(in, count, MAX_MATCH_RECTS, 36)) {
+        return in;
+    }
     match.rects.reserve(count);
     for (quint32 i = 0; i < count; ++i) {
         PageCharBox box;
@@ -292,12 +356,20 @@ QDataStream& operator>>(QDataStream& in, GetOutlineResponse& res) {
     quint32 count = 0;
     in >> count;
     res.outline.clear();
+    if (!validateCollection(in, count, MAX_OUTLINE_ITEMS, MIN_OUTLINE_ITEM_BYTES)) {
+        return in;
+    }
+    outlineNodeCount = 0;
     res.outline.reserve(count);
     for (quint32 i = 0; i < count; ++i) {
         OutlineItem item;
         in >> item;
+        if (in.status() != QDataStream::Ok) {
+            break;
+        }
         res.outline.push_back(std::move(item));
     }
+    outlineNodeCount = 0;
     return in;
 }
 
@@ -476,6 +548,9 @@ QDataStream& operator>>(QDataStream& in, SearchMatchesFoundResponse& res) {
     quint32 count = 0;
     in >> count;
     res.matches.clear();
+    if (!validateCollection(in, count, IPC_MAX_SEARCH_MATCHES, 16)) {
+        return in;
+    }
     res.matches.reserve(count);
     for (quint32 i = 0; i < count; ++i) {
         SearchMatch m;
@@ -560,6 +635,45 @@ QDataStream& operator>>(QDataStream& in, WorkerErrorResponse& res) {
     qint64 id = 0;
     in >> id >> res.errorMessage;
     res.documentId = id;
+    return in;
+}
+
+QDataStream& operator<<(QDataStream& out, const SharedMemoryAck& ack) {
+    out << ack.shmKey;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, SharedMemoryAck& ack) {
+    in >> ack.shmKey;
+    return in;
+}
+
+QDataStream& operator<<(QDataStream& out, const WorkerControlRequest& request) {
+    out << request.requestId
+        << static_cast<qint32>(request.renderDelayMs)
+        << static_cast<qint32>(request.openDelayMs)
+        << request.waitForIdle
+        << request.queryStatus;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, WorkerControlRequest& request) {
+    in >> request.requestId;
+    qint32 renderDelay = -1;
+    qint32 openDelay = -1;
+    in >> renderDelay >> openDelay >> request.waitForIdle >> request.queryStatus;
+    request.renderDelayMs = renderDelay;
+    request.openDelayMs = openDelay;
+    return in;
+}
+
+QDataStream& operator<<(QDataStream& out, const WorkerControlResponse& response) {
+    out << response.requestId << response.pendingCount << response.cachedPageCount;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, WorkerControlResponse& response) {
+    in >> response.requestId >> response.pendingCount >> response.cachedPageCount;
     return in;
 }
 

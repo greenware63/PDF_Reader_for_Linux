@@ -1,10 +1,12 @@
 #include <QCoreApplication>
 #include <QProcess>
 #include <QLocalSocket>
+#include <QSharedMemory>
 #include <QElapsedTimer>
 #include <QThread>
 #include <iostream>
 #include <functional>
+#include <algorithm>
 #include "ipc/IpcProtocol.h"
 #include "ipc/IpcMessages.h"
 
@@ -181,14 +183,35 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (tileResp.width != 512 || tileResp.height != 512 || tileResp.pixelData.isEmpty()) {
+    if (tileResp.width != 512 || tileResp.height != 512 || !tileResp.isShm ||
+        !tileResp.pixelData.isEmpty() || tileResp.shmKey.isEmpty()) {
         std::cerr << "[FAIL] Invalid tile buffer returned: width=" << tileResp.width
-                  << " height=" << tileResp.height << " bytes=" << tileResp.pixelData.size() << std::endl;
+                  << " height=" << tileResp.height << " shared-memory=" << tileResp.isShm << std::endl;
         worker.kill();
         return 1;
     }
-    std::cout << "  -> Passed: 512x512 tile successfully rendered and received ("
-              << tileResp.pixelData.size() << " bytes)." << std::endl;
+    QSharedMemory tileMemory(tileResp.shmKey);
+    if (!tileMemory.attach(QSharedMemory::ReadOnly) ||
+        tileMemory.size() < tileResp.stride * tileResp.height) {
+        std::cerr << "[FAIL] Could not map the shared-memory tile buffer." << std::endl;
+        worker.kill();
+        return 1;
+    }
+    const size_t tileByteCount = static_cast<size_t>(tileResp.stride) *
+                                 static_cast<size_t>(tileResp.height);
+    const auto* pixels = static_cast<const unsigned char*>(tileMemory.constData());
+    const bool hasPixels = pixels &&
+        std::any_of(pixels, pixels + tileByteCount, [](unsigned char value) { return value != 0; });
+    tileMemory.detach();
+    if (!hasPixels) {
+        std::cerr << "[FAIL] Shared-memory tile has no readable pixel data." << std::endl;
+        worker.kill();
+        return 1;
+    }
+    sendPacket(pdf::ipc::MessageType::SharedMemoryAck,
+               pdf::ipc::serialize(pdf::ipc::SharedMemoryAck{tileResp.shmKey}));
+    std::cout << "  -> Passed: 512x512 tile received through shared memory ("
+              << tileResp.stride * tileResp.height << " bytes)." << std::endl;
 
     // --- TEST 4: Page Text Extraction over IPC ---
     std::cout << "[TEST 4] Testing asynchronous page text extraction over IPC..." << std::endl;

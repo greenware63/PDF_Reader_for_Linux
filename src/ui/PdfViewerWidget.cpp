@@ -1,6 +1,5 @@
 #include "PdfViewerWidget.h"
 #include "ImageUtils.h"
-#include "engine/SearchText.h"
 #include <QPainter>
 #include <QFont>
 #include <QFontMetrics>
@@ -33,14 +32,29 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, &PdfViewerWidget::onScrollValueChanged);
     connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, &PdfViewerWidget::onScrollValueChanged);
 
-    connect(&m_renderWorker, &pdf::RenderWorker::tileReady, this, &PdfViewerWidget::onTileReady, Qt::QueuedConnection);
-    connect(&m_renderWorker, &pdf::RenderWorker::tileFailed, this, &PdfViewerWidget::onTileFailed, Qt::QueuedConnection);
-    connect(&m_renderWorker, &pdf::RenderWorker::documentOpened, this, &PdfViewerWidget::onDocumentOpened, Qt::QueuedConnection);
-    connect(&m_renderWorker, &pdf::RenderWorker::documentOutlineReady, this, &PdfViewerWidget::onDocumentOutlineReady, Qt::QueuedConnection);
-    connect(&m_renderWorker, &pdf::RenderWorker::pageTextReady, this, &PdfViewerWidget::onPageTextReady, Qt::QueuedConnection);
-    connect(&m_renderWorker, &pdf::RenderWorker::searchMatchesFound, this, &PdfViewerWidget::onSearchMatchesFound, Qt::QueuedConnection);
-    connect(&m_renderWorker, &pdf::RenderWorker::searchProgress, this, &PdfViewerWidget::onSearchProgress, Qt::QueuedConnection);
-    connect(&m_renderWorker, &pdf::RenderWorker::searchCompleted, this, &PdfViewerWidget::onSearchCompleted, Qt::QueuedConnection);
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::tileReady, this, &PdfViewerWidget::onTileReady);
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::tileFailed, this, &PdfViewerWidget::onTileFailed);
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::documentOpened, this, &PdfViewerWidget::onDocumentOpened);
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::documentOutlineReady, this, &PdfViewerWidget::onDocumentOutlineReady);
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::pageTextReady, this, &PdfViewerWidget::onPageTextReady);
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::searchMatchesFound, this, &PdfViewerWidget::onSearchMatchesFound);
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::searchProgress, this, &PdfViewerWidget::onSearchProgress);
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::searchCompleted, this, &PdfViewerWidget::onSearchCompleted);
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::workerFailed, this, [this](const QString& message) {
+        const QString failedPath = m_pendingOpenPath;
+        if (m_loading) {
+            m_loading = false;
+            m_pendingOpenId = 0;
+            m_pendingOpenPath.clear();
+            Q_EMIT loadingChanged(false, QFileInfo(failedPath).fileName());
+            Q_EMIT documentOpenFailed(failedPath, pdf::DocumentError::InvalidFormat);
+        }
+        m_hasDocument = false;
+        m_pageCount = 0;
+        m_inFlightKeys.clear();
+        Q_EMIT loadError(message);
+        viewport()->update();
+    });
 
     setStyleSheet(QStringLiteral("QAbstractScrollArea { background-color: #323639; border: none; }"));
 }

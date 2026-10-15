@@ -6,6 +6,7 @@ namespace pdf::ipc {
 
 constexpr uint32_t IPC_MAGIC = 0x50444657; // 'PDFW'
 constexpr uint32_t IPC_PROTOCOL_VERSION = 1;
+constexpr uint32_t MAX_IPC_PAYLOAD_SIZE = 32 * 1024 * 1024;
 
 enum class MessageType : uint32_t {
     // Control / Lifecycle
@@ -38,6 +39,9 @@ enum class MessageType : uint32_t {
     SearchMatchesFoundResponse = 52,
     SearchProgressResponse = 53,
     SearchCompletedResponse = 54,
+    SharedMemoryAck = 55,
+    WorkerControlRequest = 56,
+    WorkerControlResponse = 57,
 
     // Error / Diagnostic
     WorkerError = 99

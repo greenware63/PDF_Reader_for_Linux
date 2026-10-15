@@ -148,6 +148,8 @@ add_library(pdf_ipc STATIC
     include/ipc/IpcProtocol.h
     include/ipc/IpcMessages.h
     src/ipc/IpcMessages.cpp
+    src/ipc/WorkerClient.h
+    src/ipc/WorkerClient.cpp
 )
 
 target_include_directories(pdf_ipc PUBLIC
@@ -162,7 +164,7 @@ target_link_libraries(pdf_ipc PUBLIC
     Qt6::Network
 )
 
-# Sandboxed PDFium rendering engine worker process
+# Isolated PDFium rendering engine worker process
 add_executable(pdf_worker
     src/worker/main.cpp
     src/worker/WorkerServer.h
@@ -200,8 +202,9 @@ target_include_directories(pdf-reader PRIVATE
 
 target_link_libraries(pdf-reader PRIVATE
     Qt6::Widgets
-    pdf_engine
+    pdf_ipc
 )
+add_dependencies(pdf-reader pdf_worker)
 
 # Backward-compatibility alias for CLion workspace
 add_executable(PDf_Reader_for_Linux ALIAS pdf-reader)
@@ -251,6 +254,7 @@ target_include_directories(test_widget PRIVATE
 target_link_libraries(test_widget PRIVATE
     Qt6::Widgets
     pdf_engine
+    pdf_ipc
 )
 
 # Headless tests for the encrypted-PDF password prompt workflow.
@@ -271,9 +275,10 @@ target_include_directories(test_password_prompt PRIVATE
 target_link_libraries(test_password_prompt PRIVATE
     Qt6::Widgets
     pdf_engine
+    pdf_ipc
 )
 
-# Unit test for sandboxed worker IPC, lifecycle, and crash isolation
+# Unit test for worker IPC, lifecycle, and process isolation
 add_executable(test_worker_ipc
     test_worker_ipc.cpp
 )
@@ -360,12 +365,6 @@ endif()
 
 # Deployment & RPATH handling
 if(WIN32)
-    add_custom_command(TARGET pdf-reader POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${pdfium_binaries_SOURCE_DIR}/bin/pdfium.dll"
-            "$<TARGET_FILE_DIR:pdf-reader>"
-        COMMENT "Deploying pdfium.dll next to pdf-reader"
-    )
     add_custom_command(TARGET test_render POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${pdfium_binaries_SOURCE_DIR}/bin/pdfium.dll"
@@ -391,10 +390,6 @@ if(WIN32)
         COMMENT "Deploying pdfium.dll next to pdf_worker"
     )
 elseif(UNIX AND NOT APPLE)
-    set_target_properties(pdf-reader PROPERTIES
-        BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
-        INSTALL_RPATH "$ORIGIN/../lib"
-    )
     set_target_properties(test_render PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../lib"

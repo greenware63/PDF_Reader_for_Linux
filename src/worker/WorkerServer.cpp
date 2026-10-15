@@ -1,8 +1,36 @@
 #include "WorkerServer.h"
 #include <QCoreApplication>
+#include <QRandomGenerator>
+#include <algorithm>
 #include <iostream>
+#include <cstring>
 
 namespace pdf::worker {
+namespace {
+
+constexpr uint64_t MAX_OUTSTANDING_TILE_BYTES = 128ULL * 1024 * 1024;
+
+bool isRequestType(uint32_t type) {
+    switch (static_cast<ipc::MessageType>(type)) {
+        case ipc::MessageType::Ping:
+        case ipc::MessageType::OpenDocumentRequest:
+        case ipc::MessageType::CloseDocumentRequest:
+        case ipc::MessageType::GetOutlineRequest:
+        case ipc::MessageType::RenderTileRequest:
+        case ipc::MessageType::CancelRenderRequest:
+        case ipc::MessageType::SetGenerationRequest:
+        case ipc::MessageType::PageTextRequest:
+        case ipc::MessageType::StartSearchRequest:
+        case ipc::MessageType::CancelSearchRequest:
+        case ipc::MessageType::SharedMemoryAck:
+        case ipc::MessageType::WorkerControlRequest:
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace
 
 WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
     : QObject(parent)
@@ -62,6 +90,7 @@ void WorkerServer::onNewConnection() {
 
     connect(m_clientSocket, &QLocalSocket::readyRead, this, &WorkerServer::onReadyRead);
     connect(m_clientSocket, &QLocalSocket::disconnected, this, &WorkerServer::onSocketDisconnected);
+    m_clientSocket->setReadBufferSize(static_cast<qint64>(ipc::MAX_IPC_PAYLOAD_SIZE + sizeof(ipc::PacketHeader)));
 }
 
 void WorkerServer::onSocketDisconnected() {
@@ -78,22 +107,33 @@ void WorkerServer::onReadyRead() {
         return;
     }
 
-    m_incomingBuffer.append(m_clientSocket->readAll());
-
-    while (static_cast<size_t>(m_incomingBuffer.size()) >= sizeof(ipc::PacketHeader)) {
+    while (true) {
+        if (static_cast<size_t>(m_incomingBuffer.size()) < sizeof(ipc::PacketHeader)) {
+            const qint64 needed = static_cast<qint64>(sizeof(ipc::PacketHeader)) - m_incomingBuffer.size();
+            m_incomingBuffer.append(m_clientSocket->read(std::min(needed, m_clientSocket->bytesAvailable())));
+            if (static_cast<size_t>(m_incomingBuffer.size()) < sizeof(ipc::PacketHeader)) {
+                return;
+            }
+        }
         ipc::PacketHeader header;
         std::memcpy(&header, m_incomingBuffer.constData(), sizeof(ipc::PacketHeader));
 
-        if (header.magic != ipc::IPC_MAGIC) {
-            std::cerr << "[WorkerServer] Protocol error: Invalid magic header received. Disconnecting." << std::endl;
+        if (header.magic != ipc::IPC_MAGIC ||
+            header.version != ipc::IPC_PROTOCOL_VERSION ||
+            header.payloadSize > ipc::MAX_IPC_PAYLOAD_SIZE ||
+            !isRequestType(header.type)) {
+            std::cerr << "[WorkerServer] Protocol error: Invalid header received. Disconnecting." << std::endl;
             m_clientSocket->disconnectFromServer();
             return;
         }
 
         const size_t totalPacketSize = sizeof(ipc::PacketHeader) + header.payloadSize;
         if (static_cast<size_t>(m_incomingBuffer.size()) < totalPacketSize) {
-            // Incomplete packet; wait for further chunks
-            break;
+            const qint64 needed = static_cast<qint64>(totalPacketSize - static_cast<size_t>(m_incomingBuffer.size()));
+            m_incomingBuffer.append(m_clientSocket->read(std::min(needed, m_clientSocket->bytesAvailable())));
+            if (static_cast<size_t>(m_incomingBuffer.size()) < totalPacketSize) {
+                return;
+            }
         }
 
         QByteArray payload;
@@ -127,7 +167,10 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
         }
 
         case ipc::MessageType::CloseDocumentRequest: {
-            m_engineWorker.closeDocumentSync();
+            ipc::CloseDocumentRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.closeDocumentSync();
+            }
             break;
         }
 
@@ -148,7 +191,10 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
         }
 
         case ipc::MessageType::CancelRenderRequest: {
-            m_engineWorker.cancelAll();
+            ipc::CancelRenderRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.cancelAll();
+            }
             break;
         }
 
@@ -178,7 +224,47 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
         }
 
         case ipc::MessageType::CancelSearchRequest: {
-            m_engineWorker.cancelSearch();
+            ipc::CancelSearchRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.cancelSearch();
+            }
+            break;
+        }
+
+        case ipc::MessageType::SharedMemoryAck: {
+            ipc::SharedMemoryAck ack;
+            if (ipc::deserialize(payload, ack)) {
+                const auto it = m_sharedTiles.find(ack.shmKey);
+                if (it != m_sharedTiles.end()) {
+                    it->second->detach();
+                    m_sharedTiles.erase(it);
+                }
+            }
+            break;
+        }
+
+        case ipc::MessageType::WorkerControlRequest: {
+            ipc::WorkerControlRequest request;
+            if (!ipc::deserialize(payload, request)) {
+                break;
+            }
+            if (request.renderDelayMs >= 0) {
+                m_engineWorker.setRenderDelayForTesting(std::chrono::milliseconds(request.renderDelayMs));
+            }
+            if (request.openDelayMs >= 0) {
+                m_engineWorker.setOpenDelayForTesting(std::chrono::milliseconds(request.openDelayMs));
+            }
+            if (request.waitForIdle) {
+                m_engineWorker.waitForIdle();
+                QCoreApplication::processEvents();
+            }
+            ipc::WorkerControlResponse response;
+            response.requestId = request.requestId;
+            if (request.queryStatus) {
+                response.pendingCount = m_engineWorker.pendingCount();
+                response.cachedPageCount = m_engineWorker.cachedPageCount();
+            }
+            sendPacket(ipc::MessageType::WorkerControlResponse, ipc::serialize(response));
             break;
         }
 
@@ -195,6 +281,11 @@ void WorkerServer::sendPacket(ipc::MessageType type, const QByteArray& payload) 
     }
 
     QByteArray packet = ipc::buildPacket(type, payload);
+    if (packet.isEmpty()) {
+        std::cerr << "[WorkerServer] Refusing oversized IPC payload." << std::endl;
+        m_clientSocket->disconnectFromServer();
+        return;
+    }
     m_clientSocket->write(packet);
     m_clientSocket->flush();
 }
@@ -214,9 +305,30 @@ void WorkerServer::onTileReady(int64_t documentId, uint64_t generation, const pd
         resp.height = buffer.height();
         resp.stride = buffer.stride();
         resp.format = static_cast<uint32_t>(buffer.format());
-        resp.isShm = false;
-        resp.pixelData = QByteArray(reinterpret_cast<const char*>(buffer.data()),
-                                    static_cast<qsizetype>(buffer.sizeBytes()));
+        uint64_t outstandingBytes = 0;
+        for (const auto& entry : m_sharedTiles) {
+            outstandingBytes += static_cast<uint64_t>(entry.second->size());
+        }
+        if (buffer.sizeBytes() > MAX_OUTSTANDING_TILE_BYTES ||
+            outstandingBytes > MAX_OUTSTANDING_TILE_BYTES - buffer.sizeBytes()) {
+            if (m_clientSocket) {
+                m_clientSocket->disconnectFromServer();
+            }
+            return;
+        }
+        const QString shmKey = QStringLiteral("pdf-tile-%1-%2")
+                                   .arg(QCoreApplication::applicationPid())
+                                   .arg(QRandomGenerator::global()->generate64(), 0, 16);
+        auto memory = std::make_unique<QSharedMemory>(shmKey);
+        if (!memory->create(static_cast<int>(buffer.sizeBytes()))) {
+            sendPacket(ipc::MessageType::TileFailedResponse,
+                       ipc::serialize(ipc::TileFailedResponse{documentId, generation, key}));
+            return;
+        }
+        std::memcpy(memory->data(), buffer.data(), buffer.sizeBytes());
+        resp.isShm = true;
+        resp.shmKey = shmKey;
+        m_sharedTiles.emplace(shmKey, std::move(memory));
     }
     sendPacket(ipc::MessageType::TileRenderedResponse, ipc::serialize(resp));
 }

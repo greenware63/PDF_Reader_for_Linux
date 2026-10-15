@@ -11,7 +11,7 @@
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
 #include "cache/TileCache.h"
-#include "engine/RenderWorker.h"
+#include "ipc/WorkerClient.h"
 #include "engine/PageText.h"
 #include "engine/SearchTypes.h"
 
@@ -23,7 +23,7 @@ namespace ui {
  * compressed scrollbar mapping, sub-pixel rounding-safe fit-width, asynchronous background rendering,
  * background text extraction with cursor hit-testing, selection highlighting, clipboard copy,
  * and background asynchronous page-by-page text search with match highlighting and cycling.
- * PDFium operations run strictly on the background RenderWorker thread; 0 PDFium calls occur on UI thread.
+ * All PDFium operations run in the separate pdf_worker process; the UI process never loads PDFium.
  */
 class PdfViewerWidget : public QAbstractScrollArea {
     Q_OBJECT
@@ -97,7 +97,7 @@ public:
      */
     void waitForRendering();
 
-    pdf::RenderWorker& renderWorker() noexcept { return m_renderWorker; }
+    pdf::ipc::WorkerClient& renderWorker() noexcept { return m_renderWorker; }
     pdf::TileCache& cache() noexcept { return m_cache; }
     const layout::DocumentLayout& layout() const noexcept { return m_layout; }
     size_t inFlightCount() const noexcept { return m_inFlightKeys.size(); }
@@ -200,7 +200,7 @@ private:
     layout::DocumentLayout m_layout;
     layout::ScrollMapper m_scrollMapper;
     pdf::TileCache m_cache;
-    pdf::RenderWorker m_renderWorker;
+    pdf::ipc::WorkerClient m_renderWorker;
 
     // Asynchronous open state (UI thread only)
     bool m_loading{false};
