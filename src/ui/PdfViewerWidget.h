@@ -92,8 +92,7 @@ public:
     double effectiveDpr() const;
 
     /**
-     * @brief Blocks until the background render worker has finished all pending requests and in-flight renders.
-     * Useful for deterministic testing and flush operations.
+     * @brief Blocks until the background render worker has finished all pending requests and in-flight renders.\n     * Useful for deterministic testing and flush operations.
      */
     void waitForRendering();
 
@@ -128,6 +127,8 @@ public:
     int currentSearchMatchIndex() const noexcept { return m_currentMatchIndex; }
     const std::vector<pdf::SearchMatch>& searchMatches() const noexcept { return m_searchMatches; }
     const std::vector<pdf::OutlineItem>& outline() const noexcept { return m_outline; }
+    bool hasWorkerError() const noexcept { return !m_workerErrorMessage.isEmpty(); }
+    QString workerErrorMessage() const noexcept { return m_workerErrorMessage; }
 
 Q_SIGNALS:
     void documentLoaded(const QString& title, int pages);

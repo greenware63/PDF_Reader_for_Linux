@@ -2290,9 +2290,27 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        if (!viewer->hasWorkerError() || viewer->workerErrorMessage().isEmpty()) {
+            std::cerr << "[FAIL] Viewer did not register worker error state." << std::endl;
+            return 1;
+        }
+
         // Repaint verifying paintEvent renders drawWorkerErrorBanner without crash
         viewer->viewport()->repaint();
         QCoreApplication::processEvents();
+
+        QImage renderTarget(viewer->viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+        renderTarget.fill(Qt::transparent);
+        QPainter p(&renderTarget);
+        viewer->viewport()->render(&p);
+        p.end();
+
+        QRgb centerPx = renderTarget.pixel(renderTarget.width() / 2, renderTarget.height() / 2);
+        if (qRed(centerPx) != 40 || qGreen(centerPx) != 44 || qBlue(centerPx) != 48) {
+            std::cerr << "[FAIL] Error banner was not drawn in center of viewport! Got RGB("
+                      << qRed(centerPx) << "," << qGreen(centerPx) << "," << qBlue(centerPx) << ")" << std::endl;
+            return 1;
+        }
 
         std::cout << "  -> Passed: Worker crash cleanly contained; UI survived and rendered recovery banner." << std::endl;
     }
