@@ -8,6 +8,8 @@
 #include "ui/FindBar.h"
 #include <QApplication>
 #include <QImage>
+#include <QFile>
+#include <QFileInfo>
 #include <QPainter>
 #include <QScrollBar>
 #include <QThread>
@@ -2566,8 +2568,90 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Multi-tab opening, tab switching, active viewer sync, tab closure, and recent files persistence verified." << std::endl;
     }
 
+    // Test 37: Native Linux / CUPS Printing rasterization over IPC and Headless PDF Export
+    std::cout << "[TEST 37] Testing Native Printing rasterization over IPC and Headless PDF Export..." << std::endl;
+    {
+        ui::MainWindow window;
+        window.resize(1024, 768);
+        window.show();
+        QCoreApplication::processEvents();
+
+        std::string sampleDoc = "widget_test_export.pdf";
+        generateMultiPagePdf(sampleDoc, 4);
+
+        if (!window.openFile(QString::fromStdString(sampleDoc))) {
+            std::cerr << "[FAIL] Failed to open multi-page document for print/export testing" << std::endl;
+            return 1;
+        }
+
+        auto* viewer = window.currentViewer();
+        QElapsedTimer loadTimer;
+        loadTimer.start();
+        while (loadTimer.elapsed() < 5000 && (!viewer || !viewer->isDocumentOpen())) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (!viewer || !viewer->isDocumentOpen() || viewer->pageCount() != 4) {
+            std::cerr << "[FAIL] Document failed to open in print/export test" << std::endl;
+            return 1;
+        }
+
+        // 1. Direct print rasterization over IPC: renderPageForPrint
+        QImage printImg = viewer->renderPageForPrint(0, 1.0, 2.0);
+        if (printImg.isNull() || printImg.width() <= 0 || printImg.height() <= 0) {
+            std::cerr << "[FAIL] renderPageForPrint returned null or invalid image" << std::endl;
+            return 1;
+        }
+        if (printImg.devicePixelRatio() < 1.99) {
+            std::cerr << "[FAIL] renderPageForPrint image DPR expected ~2.0, got " << printImg.devicePixelRatio() << std::endl;
+            return 1;
+        }
+
+        // 2. Export page range (pages 1 to 2 -> 2 pages total) headlessly to a new PDF file
+        QString exportPath = QStringLiteral("exported_test_doc.pdf");
+        QFile::remove(exportPath);
+
+        bool exportSuccess = window.exportDocumentToPdf(exportPath, 1, 2);
+        if (!exportSuccess) {
+            std::cerr << "[FAIL] exportDocumentToPdf returned false" << std::endl;
+            return 1;
+        }
+
+        if (!QFileInfo::exists(exportPath) || QFileInfo(exportPath).size() == 0) {
+            std::cerr << "[FAIL] Exported PDF does not exist or is empty on disk" << std::endl;
+            return 1;
+        }
+
+        // 3. Open exported PDF in a new tab and verify page count
+        int exportTabIndex = window.openFileInNewTab(exportPath);
+        if (exportTabIndex < 0) {
+            std::cerr << "[FAIL] Failed to open exported PDF in new tab" << std::endl;
+            return 1;
+        }
+
+        auto* exportViewer = window.currentViewer();
+        QElapsedTimer exportLoadTimer;
+        exportLoadTimer.start();
+        while (exportLoadTimer.elapsed() < 5000 && (!exportViewer || !exportViewer->isDocumentOpen())) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+
+        if (!exportViewer || !exportViewer->isDocumentOpen() || exportViewer->pageCount() != 2) {
+            std::cerr << "[FAIL] Exported PDF page count expected 2, got "
+                      << (exportViewer ? exportViewer->pageCount() : -1) << std::endl;
+            return 1;
+        }
+
+        // Cleanup
+        window.closeCurrentTab();
+        QFile::remove(exportPath);
+
+        std::cout << "  -> Passed: High-resolution print rasterization over IPC and headless PDF export verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 36 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 37 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

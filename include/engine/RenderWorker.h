@@ -92,6 +92,12 @@ public:
     void requestThumbnail(int64_t documentId, int pageIndex, int targetWidth = 140);
 
     /**
+     * @brief Requests high-resolution rendering of a full page for printing or export.
+     * Delivered via printPageReady() or printPageFailed().
+     */
+    void requestPrintPage(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0);
+
+    /**
      * @brief Sets current request generation. Discards queued requests with older generations.
      */
     void setGeneration(uint64_t generation);
@@ -181,11 +187,14 @@ Q_SIGNALS:
     /// Emitted when thumbnail rendering completes.
     void thumbnailReady(int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer);
     void thumbnailFailed(int64_t documentId, int pageIndex);
+    /// Emitted when full page rendering for printing completes.
+    void printPageReady(int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer);
+    void printPageFailed(int64_t documentId, int pageIndex);
     /// Emitted when text extraction for a page completes on the worker thread.
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
     /// Emitted when search finds matches on a page.
     void searchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
-    /// Emitted as search progresses page-by-page.
+    /// Emitted as search progresses page-by-page.\n
     void searchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);
     /// Emitted when a search across all pages completes.
     void searchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated);

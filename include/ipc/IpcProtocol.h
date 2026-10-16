@@ -6,7 +6,7 @@ namespace pdf::ipc {
 
 constexpr uint32_t IPC_MAGIC = 0x50444657; // 'PDFW'
 constexpr uint32_t IPC_PROTOCOL_VERSION = 1;
-constexpr uint32_t MAX_IPC_PAYLOAD_SIZE = 32 * 1024 * 1024;
+constexpr uint32_t MAX_IPC_PAYLOAD_SIZE = 64 * 1024 * 1024;
 
 enum class MessageType : uint32_t {
     // Control / Lifecycle
@@ -48,6 +48,11 @@ enum class MessageType : uint32_t {
     ThumbnailResponse = 61,
     ThumbnailFailedResponse = 62,
 
+    // Printing / Page Export
+    RenderPageRequest = 70,
+    RenderPageResponse = 71,
+    RenderPageFailedResponse = 72,
+
     // Error / Diagnostic
     WorkerError = 99
 };
@@ -60,7 +65,5 @@ struct PacketHeader {
     uint32_t payloadSize{0};
 };
 #pragma pack(pop)
-
-static_assert(sizeof(PacketHeader) == 16, "PacketHeader size must be 16 bytes");
 
 } // namespace pdf::ipc

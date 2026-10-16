@@ -199,6 +199,32 @@ void RenderWorker::requestThumbnail(int64_t documentId, int pageIndex, int targe
     m_cv.notify_one();
 }
 
+void RenderWorker::requestPrintPage(int64_t documentId, int pageIndex, double scale, double dpr) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load()) {
+        Q_EMIT printPageFailed(documentId, pageIndex);
+        return;
+    }
+    m_controlQueue.push_back({[this, documentId, pageIndex, scale, dpr]() {
+        if (documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT printPageFailed(documentId, pageIndex);
+            return;
+        }
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (!page) {
+            Q_EMIT printPageFailed(documentId, pageIndex);
+            return;
+        }
+        PixelBuffer buf = page->renderWholePage(scale, dpr);
+        if (buf.isValid()) {
+            Q_EMIT printPageReady(documentId, pageIndex, buf);
+        } else {
+            Q_EMIT printPageFailed(documentId, pageIndex);
+        }
+    }});
+    m_cv.notify_one();
+}
+
 void RenderWorker::closeDocumentSync() {
     cancelSearch();
     auto promise = std::make_shared<std::promise<void>>();

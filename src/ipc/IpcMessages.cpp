@@ -751,4 +751,61 @@ QDataStream& operator>>(QDataStream& in, ThumbnailFailedResponse& res) {
     return in;
 }
 
+// RenderPageRequest
+QDataStream& operator<<(QDataStream& out, const RenderPageRequest& req) {
+    out << static_cast<qint64>(req.documentId)
+        << static_cast<qint32>(req.pageIndex)
+        << req.scale
+        << req.dpr;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, RenderPageRequest& req) {
+    qint64 docId = 0;
+    qint32 pIdx = 0;
+    in >> docId >> pIdx >> req.scale >> req.dpr;
+    req.documentId = docId;
+    req.pageIndex = pIdx;
+    return in;
+}
+
+// RenderPageResponse
+QDataStream& operator<<(QDataStream& out, const RenderPageResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << static_cast<qint32>(res.pageIndex)
+        << static_cast<qint32>(res.width)
+        << static_cast<qint32>(res.height)
+        << static_cast<qint32>(res.stride)
+        << res.pixelData;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, RenderPageResponse& res) {
+    qint64 docId = 0;
+    qint32 pIdx = 0, w = 0, h = 0, s = 0;
+    in >> docId >> pIdx >> w >> h >> s >> res.pixelData;
+    res.documentId = docId;
+    res.pageIndex = pIdx;
+    res.width = w;
+    res.height = h;
+    res.stride = s;
+    return in;
+}
+
+// RenderPageFailedResponse
+QDataStream& operator<<(QDataStream& out, const RenderPageFailedResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << static_cast<qint32>(res.pageIndex);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, RenderPageFailedResponse& res) {
+    qint64 docId = 0;
+    qint32 pIdx = 0;
+    in >> docId >> pIdx;
+    res.documentId = docId;
+    res.pageIndex = pIdx;
+    return in;
+}
+
 } // namespace pdf::ipc

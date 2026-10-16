@@ -61,6 +61,9 @@ public:
     /// PdfViewerWidget at specific tab index.
     PdfViewerWidget* viewerAt(int index) const;
 
+    /// Exports the currently active document to a PDF file. @return true on success.
+    bool exportDocumentToPdf(const QString& outputPath, int fromPage = -1, int toPage = -1);
+
     QTabWidget* documentTabs() const noexcept { return m_docTabs; }
     QDockWidget* sidebarDock() const noexcept { return m_sidebarDock; }
     QTabWidget* sidebarTabs() const noexcept { return m_sidebarTabs; }
@@ -77,6 +80,8 @@ public Q_SLOTS:
     void openFileDialog();
     void openFileInNewTabDialog();
     void showFindBar();
+    void printDocument();
+    void exportAsPdf();
 
 private Q_SLOTS:
     void onDocumentLoaded(const QString& title, int totalPages);

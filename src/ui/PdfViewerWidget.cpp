@@ -324,6 +324,14 @@ void PdfViewerWidget::previousPage() {
     }
 }
 
+QImage PdfViewerWidget::renderPageForPrint(int pageIndex, double scale, double dpr) {
+    if (!isDocumentOpen() || pageIndex < 0 || pageIndex >= m_pageCount) {
+        return {};
+    }
+    pdf::PixelBuffer buf = m_renderWorker.renderPageForPrintSync(m_currentDocumentId, pageIndex, scale, dpr);
+    return toQImage(buf, dpr).copy();
+}
+
 void PdfViewerWidget::goToPage(int pageIndex) {
     goToPageImpl(pageIndex, std::nullopt);
 }

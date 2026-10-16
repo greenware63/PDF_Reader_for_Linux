@@ -51,7 +51,8 @@ QDataStream& operator>>(QDataStream& in, SearchMatch& match);
 
 namespace pdf::ipc {
 
-// --- Message Structures ---\n
+// --- Message Structures ---
+
 struct OpenDocumentRequest {
     int64_t documentId{0};
     QString filePath;
@@ -204,6 +205,27 @@ struct ThumbnailFailedResponse {
     int pageIndex{0};
 };
 
+struct RenderPageRequest {
+    int64_t documentId{0};
+    int pageIndex{0};
+    double scale{1.0};
+    double dpr{2.0};
+};
+
+struct RenderPageResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+    int width{0};
+    int height{0};
+    int stride{0};
+    QByteArray pixelData;
+};
+
+struct RenderPageFailedResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+};
+
 // Message stream operators
 QDataStream& operator<<(QDataStream& out, const OpenDocumentRequest& req);
 QDataStream& operator>>(QDataStream& in, OpenDocumentRequest& req);
@@ -279,6 +301,15 @@ QDataStream& operator>>(QDataStream& in, ThumbnailResponse& res);
 
 QDataStream& operator<<(QDataStream& out, const ThumbnailFailedResponse& res);
 QDataStream& operator>>(QDataStream& in, ThumbnailFailedResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const RenderPageRequest& req);
+QDataStream& operator>>(QDataStream& in, RenderPageRequest& req);
+
+QDataStream& operator<<(QDataStream& out, const RenderPageResponse& res);
+QDataStream& operator>>(QDataStream& in, RenderPageResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const RenderPageFailedResponse& res);
+QDataStream& operator>>(QDataStream& in, RenderPageFailedResponse& res);
 
 // --- Serialization Templates ---
 

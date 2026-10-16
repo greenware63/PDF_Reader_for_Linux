@@ -81,6 +81,11 @@ public:
     void previousPage();
 
     /**
+     * @brief Renders a single page synchronously via the isolated worker for printing or export.
+     */
+    QImage renderPageForPrint(int pageIndex, double scale = 1.0, double dpr = 2.0);
+
+    /**
      * @brief Manually triggers retry of all currently failed tiles in the viewport.
      */
     void retryFailedTiles();

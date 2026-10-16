@@ -34,6 +34,8 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::SearchCompletedResponse:
         case MessageType::ThumbnailResponse:
         case MessageType::ThumbnailFailedResponse:
+        case MessageType::RenderPageResponse:
+        case MessageType::RenderPageFailedResponse:
         case MessageType::WorkerError:
         case MessageType::WorkerControlResponse:
             return true;
@@ -395,6 +397,51 @@ void WorkerClient::requestThumbnail(int64_t documentId, int pageIndex, int targe
                 serialize(ThumbnailRequest{documentId, pageIndex, targetWidth}));
 }
 
+void WorkerClient::requestPrintPage(int64_t documentId, int pageIndex, double scale, double dpr) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT printPageFailed(documentId, pageIndex);
+        return;
+    }
+    sendMessage(MessageType::RenderPageRequest,
+                serialize(RenderPageRequest{documentId, pageIndex, scale, dpr}));
+}
+
+pdf::PixelBuffer WorkerClient::renderPageForPrintSync(int64_t documentId, int pageIndex, double scale, double dpr, int timeoutMs) {
+    if (!ensureConnected()) {
+        return {};
+    }
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    pdf::PixelBuffer result;
+
+    const auto readyConn = connect(this, &WorkerClient::printPageReady, &loop,
+        [&](int64_t docId, int pIdx, const pdf::PixelBuffer& buf) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result = buf;
+                loop.quit();
+            }
+        });
+    const auto failConn = connect(this, &WorkerClient::printPageFailed, &loop,
+        [&](int64_t docId, int pIdx) {
+            if (docId == documentId && pIdx == pageIndex) {
+                loop.quit();
+            }
+        });
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestPrintPage(documentId, pageIndex, scale, dpr);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+
+    return result;
+}
+
 void WorkerClient::stop() {
     if (m_stopping) {
         return;
@@ -582,6 +629,33 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
             ThumbnailFailedResponse response;
             if (deserialize(payload, response)) {
                 Q_EMIT thumbnailFailed(response.documentId, response.pageIndex);
+            }
+            break;
+        }
+        case MessageType::RenderPageResponse: {
+            RenderPageResponse response;
+            if (deserialize(payload, response)) {
+                if (response.width > 0 && response.height > 0 &&
+                    response.width <= 16384 && response.height <= 16384 &&
+                    response.stride >= response.width * 4 &&
+                    response.pixelData.size() >= response.stride * response.height) {
+                    PixelBuffer buf = PixelBuffer::allocate(response.width, response.height, PixelFormat::BGRX8888);
+                    if (buf.isValid()) {
+                        std::memcpy(buf.data(), response.pixelData.constData(), buf.sizeBytes());
+                        Q_EMIT printPageReady(response.documentId, response.pageIndex, buf);
+                    } else {
+                        Q_EMIT printPageFailed(response.documentId, response.pageIndex);
+                    }
+                } else {
+                    Q_EMIT printPageFailed(response.documentId, response.pageIndex);
+                }
+            }
+            break;
+        }
+        case MessageType::RenderPageFailedResponse: {
+            RenderPageFailedResponse response;
+            if (deserialize(payload, response)) {
+                Q_EMIT printPageFailed(response.documentId, response.pageIndex);
             }
             break;
         }

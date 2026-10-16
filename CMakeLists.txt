@@ -46,7 +46,7 @@ if(WIN32 AND NOT DEFINED CMAKE_PREFIX_PATH AND NOT DEFINED ENV{CMAKE_PREFIX_PATH
     endif()
 endif()
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network PrintSupport)
 
 # Fetch prebuilt PDFium binaries with cryptographic SHA256 hash verification
 include(FetchContent)
@@ -204,6 +204,7 @@ target_include_directories(pdf-reader PRIVATE
 
 target_link_libraries(pdf-reader PRIVATE
     Qt6::Widgets
+    Qt6::PrintSupport
     pdf_ipc
 )
 add_dependencies(pdf-reader pdf_worker)
@@ -257,6 +258,7 @@ target_include_directories(test_widget PRIVATE
 
 target_link_libraries(test_widget PRIVATE
     Qt6::Widgets
+    Qt6::PrintSupport
     pdf_engine
     pdf_ipc
 )
@@ -280,6 +282,7 @@ target_include_directories(test_password_prompt PRIVATE
 
 target_link_libraries(test_password_prompt PRIVATE
     Qt6::Widgets
+    Qt6::PrintSupport
     pdf_engine
     pdf_ipc
 )

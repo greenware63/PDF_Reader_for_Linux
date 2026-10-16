@@ -21,6 +21,10 @@
 #include <QVBoxLayout>
 #include <QSettings>
 #include <QDir>
+#include <QPrinter>
+#include <QPrintDialog>
+#include <QProgressDialog>
+#include <QPainter>
 #include <cmath>
 
 namespace ui {
@@ -293,6 +297,14 @@ void MainWindow::setupActions() {
 
     m_recentFilesMenu = fileMenu->addMenu(tr("Open &Recent"));
 
+    fileMenu->addSeparator();
+    QAction* printAction = fileMenu->addAction(tr("&Print..."), this, &MainWindow::printDocument);
+    printAction->setShortcut(QKeySequence::Print);
+
+    QAction* exportPdfAction = fileMenu->addAction(tr("&Export as PDF..."), this, &MainWindow::exportAsPdf);
+    exportPdfAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P));
+
+    fileMenu->addSeparator();
     QAction* closeAction = fileMenu->addAction(tr("&Close Tab"), this, &MainWindow::closeCurrentTab);
     closeAction->setShortcut(QKeySequence::Close);
 
@@ -342,6 +354,8 @@ void MainWindow::setupActions() {
     toolbar->setMovable(false);
 
     toolbar->addAction(openAction);
+    QAction* printToolbarAction = toolbar->addAction(tr("\U0001f5b6 Print"), this, &MainWindow::printDocument);
+    printToolbarAction->setToolTip(tr("Print Document (Ctrl+P)"));
     toolbar->addSeparator();
 
     // Page navigation controls
@@ -649,6 +663,143 @@ void MainWindow::openFileInNewTabDialog() {
 
     if (!file.isEmpty()) {
         openFile(file, true);
+    }
+}
+
+bool MainWindow::exportDocumentToPdf(const QString& outputPath, int fromPage, int toPage) {
+    auto* viewer = currentViewer();
+    if (!viewer || !viewer->isDocumentOpen() || viewer->pageCount() <= 0) {
+        return false;
+    }
+    if (outputPath.isEmpty()) {
+        return false;
+    }
+
+    QPrinter printer(QPrinter::HighResolution);
+    printer.setOutputFormat(QPrinter::PdfFormat);
+    printer.setOutputFileName(outputPath);
+
+    const int totalPages = viewer->pageCount();
+    int start = (fromPage >= 0) ? std::clamp(fromPage, 0, totalPages - 1) : 0;
+    int end = (toPage >= 0) ? std::clamp(toPage, start, totalPages - 1) : (totalPages - 1);
+
+    QPainter painter;
+    if (!painter.begin(&printer)) {
+        return false;
+    }
+
+    for (int p = start; p <= end; ++p) {
+        if (p > start) {
+            printer.newPage();
+        }
+        QImage pageImg = viewer->renderPageForPrint(p, 1.0, 2.0);
+        if (pageImg.isNull()) {
+            continue;
+        }
+        const QRect targetRect = printer.pageLayout().paintRectPixels(printer.resolution());
+        QImage scaled = pageImg.scaled(targetRect.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        int x = targetRect.left() + (targetRect.width() - scaled.width()) / 2;
+        int y = targetRect.top() + (targetRect.height() - scaled.height()) / 2;
+        painter.drawImage(x, y, scaled);
+    }
+    painter.end();
+    return true;
+}
+
+void MainWindow::printDocument() {
+    auto* viewer = currentViewer();
+    if (!viewer || !viewer->isDocumentOpen() || viewer->pageCount() <= 0) {
+        return;
+    }
+
+    QPrinter printer(QPrinter::HighResolution);
+    printer.setDocName(QFileInfo(viewer->currentFilePath()).fileName());
+    printer.setFromTo(1, viewer->pageCount());
+
+    QPrintDialog dialog(&printer, this);
+    dialog.setWindowTitle(tr("Print Document"));
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    int fromPage = 0;
+    int toPage = viewer->pageCount() - 1;
+    if (printer.printRange() == QPrinter::PageRange) {
+        fromPage = std::clamp(printer.fromPage() - 1, 0, viewer->pageCount() - 1);
+        toPage = std::clamp(printer.toPage() - 1, fromPage, viewer->pageCount() - 1);
+    } else if (printer.printRange() == QPrinter::CurrentPage) {
+        fromPage = viewer->currentPage();
+        toPage = viewer->currentPage();
+    }
+
+    const int numPages = toPage - fromPage + 1;
+    QProgressDialog progress(tr("Printing document..."), tr("Cancel"), 0, numPages, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(200);
+
+    QPainter painter;
+    if (!painter.begin(&printer)) {
+        statusBar()->showMessage(tr("Printing failed: Could not initialize printer."), 5000);
+        return;
+    }
+
+    int step = 0;
+    for (int p = fromPage; p <= toPage; ++p) {
+        progress.setValue(step++);
+        progress.setLabelText(tr("Printing page %1 of %2...").arg(p + 1).arg(viewer->pageCount()));
+        QCoreApplication::processEvents();
+        if (progress.wasCanceled()) {
+            break;
+        }
+
+        if (p > fromPage) {
+            printer.newPage();
+        }
+
+        QImage pageImg = viewer->renderPageForPrint(p, 1.0, 2.0);
+        if (pageImg.isNull()) {
+            continue;
+        }
+
+        const QRect targetRect = printer.pageLayout().paintRectPixels(printer.resolution());
+        QImage scaled = pageImg.scaled(targetRect.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        int x = targetRect.left() + (targetRect.width() - scaled.width()) / 2;
+        int y = targetRect.top() + (targetRect.height() - scaled.height()) / 2;
+        painter.drawImage(x, y, scaled);
+    }
+    painter.end();
+    progress.setValue(numPages);
+    statusBar()->showMessage(tr("Document printed successfully."), 4000);
+}
+
+void MainWindow::exportAsPdf() {
+    auto* viewer = currentViewer();
+    if (!viewer || !viewer->isDocumentOpen() || viewer->pageCount() <= 0) {
+        return;
+    }
+
+    QString defaultName = QFileInfo(viewer->currentFilePath()).completeBaseName() + QStringLiteral("_export.pdf");
+    QString savePath = QFileDialog::getSaveFileName(
+        this,
+        tr("Export as PDF"),
+        defaultName,
+        tr("PDF Files (*.pdf)")
+    );
+
+    if (savePath.isEmpty()) {
+        return;
+    }
+
+    if (!savePath.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
+        savePath += QStringLiteral(".pdf");
+    }
+
+    statusBar()->showMessage(tr("Exporting to '%1'â€¦").arg(QFileInfo(savePath).fileName()));
+    bool ok = exportDocumentToPdf(savePath);
+    if (ok) {
+        statusBar()->showMessage(tr("Successfully exported PDF to '%1'").arg(savePath), 5000);
+    } else {
+        statusBar()->showMessage(tr("Export failed."), 5000);
     }
 }
 
