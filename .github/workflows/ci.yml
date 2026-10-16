@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ main, greenware63-pdf-search-fixes ]
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     name: Ubuntu 24.04 (${{ matrix.build_type }})
