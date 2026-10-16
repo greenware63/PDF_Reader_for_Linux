@@ -28,6 +28,8 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
     viewport()->setAttribute(Qt::WA_OpaquePaintEvent);
     viewport()->setAttribute(Qt::WA_NoSystemBackground);
     viewport()->setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
+    viewport()->setFocusPolicy(Qt::StrongFocus);
 
     connect(verticalScrollBar(), &QScrollBar::valueChanged, this, &PdfViewerWidget::onScrollValueChanged);
     connect(horizontalScrollBar(), &QScrollBar::valueChanged, this, &PdfViewerWidget::onScrollValueChanged);
@@ -66,7 +68,7 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
         }
         m_workerErrorMessage = message;
         m_hasDocument = false;
-    m_currentFilePath.clear();
+        m_currentFilePath.clear();
         m_pageCount = 0;
         m_inFlightKeys.clear();
         Q_EMIT loadError(message);
@@ -299,6 +301,34 @@ void PdfViewerWidget::closeDocument() {
     Q_EMIT outlineReady(m_outline);
 }
 
+void PdfViewerWidget::setDarkMode(bool enabled) {
+    if (m_darkMode == enabled) {
+        return;
+    }
+    m_darkMode = enabled;
+    Q_EMIT darkModeChanged(m_darkMode);
+    viewport()->update();
+}
+
+void PdfViewerWidget::toggleDarkMode() {
+    setDarkMode(!m_darkMode);
+}
+
+void PdfViewerWidget::restoreReadingPosition(int pageIndex, double zoom, int64_t scrollX, int64_t scrollY) {
+    if (!isDocumentOpen()) {
+        return;
+    }
+    if (zoom >= 0.1 && zoom <= 10.0) {
+        setZoom(zoom);
+    }
+    if (scrollY > 0 || scrollX > 0) {
+        setDocScrollPosition(scrollX, scrollY);
+        viewport()->update();
+    } else if (pageIndex >= 0 && pageIndex < pageCount()) {
+        goToPage(pageIndex);
+    }
+}
+
 QString PdfViewerWidget::pageLabel(int pageIndex) const {
     if (pageIndex >= 0 && pageIndex < static_cast<int>(m_pageLabels.size())) {
         return m_pageLabels[static_cast<size_t>(pageIndex)];
@@ -429,14 +459,14 @@ void PdfViewerWidget::setZoom(double zoom, const QPoint* anchorWidgetPos) {
     m_layout.updateLayout(qNewScale, dpr, vpW);
     updateScrollBars();
 
-    int64_t newScrollX = 0;
-    int64_t newScrollY = 0;
-    m_layout.resolveAnchor(anchor, widgetAnchorX, widgetAnchorY, vpW, vpH, newScrollX, newScrollY);
+    int64_t newDocX = 0;
+    int64_t newDocY = 0;
+    m_layout.resolveAnchor(anchor, widgetAnchorX, widgetAnchorY, vpW, vpH, newDocX, newDocY);
 
-    setDocScrollPosition(newScrollX, newScrollY);
+    setDocScrollPosition(newDocX, newDocY);
 
-    Q_EMIT zoomChanged(m_scale / DESKTOP_100_PERCENT_SCALE);
     viewport()->update();
+    Q_EMIT zoomChanged(m_scale / DESKTOP_100_PERCENT_SCALE);
 }
 
 void PdfViewerWidget::zoomIn() {
@@ -568,7 +598,7 @@ void PdfViewerWidget::trimPageTextCache() {
     evictable.reserve(m_pageTextCache.size());
     for (const auto& [page, text] : m_pageTextCache) {
         if (text && (page < keepFirst || page > keepLast)) {
-            evictable.push_back(page);
+            evictable.push_back(page);\
         }
     }
     std::sort(evictable.begin(), evictable.end(), [this](int a, int b) {
@@ -636,6 +666,28 @@ void PdfViewerWidget::setDocScrollPosition(int64_t docX, int64_t docY) {
 
     verticalScrollBar()->setValue(m_scrollMapper.docToSlider(m_docScrollY, m_layout.totalDocumentHeight(), vpH));
     horizontalScrollBar()->setValue(m_scrollMapper.docToSlider(m_docScrollX, m_layout.maxDocumentWidth(), vpW));
+
+    if (!m_navigating) {
+        auto visPages = m_layout.getVisiblePages(m_docScrollY, vpH);
+        if (visPages.isValid()) {
+            int bestPage = -1;
+            int64_t maxOverlap = 0;
+            for (int p = visPages.firstVisiblePage; p <= visPages.lastVisiblePage; ++p) {
+                const auto& pl = m_layout.getPageLayout(p);
+                int64_t overlapTop = std::max(m_docScrollY, pl.topPixel);
+                int64_t overlapBottom = std::min(m_docScrollY + vpH, pl.bottomPixel());
+                int64_t overlap = overlapBottom - overlapTop;
+                if (overlap > maxOverlap) {
+                    maxOverlap = overlap;
+                    bestPage = p;
+                }
+            }
+            if (bestPage >= 0 && bestPage != m_currentPage) {
+                m_currentPage = bestPage;
+                Q_EMIT pageChanged(m_currentPage + 1, pageCount());
+            }
+        }
+    }
 }
 
 void PdfViewerWidget::updateScrollBars() {
@@ -691,15 +743,15 @@ void PdfViewerWidget::updateLayoutGeometry() {
 }
 
 void PdfViewerWidget::drawErrorPlaceholder(QPainter& painter, const QRectF& rect) {
-    painter.fillRect(rect, QColor(245, 225, 225));
+    painter.fillRect(rect, m_darkMode ? QColor(60, 20, 20) : QColor(245, 225, 225));
     painter.setPen(QPen(QColor(220, 60, 60), 1, Qt::DashLine));
     painter.drawRect(rect);
-    painter.setPen(QColor(180, 30, 30));
+    painter.setPen(m_darkMode ? QColor(255, 120, 120) : QColor(180, 30, 30));
     painter.drawText(rect, Qt::AlignCenter, tr("Page display error"));
 }
 
 void PdfViewerWidget::drawPendingPlaceholder(QPainter& painter, const QRectF& rect) {
-    painter.fillRect(rect, QColor(252, 252, 252));
+    painter.fillRect(rect, m_darkMode ? QColor("#1e1e1e") : QColor(252, 252, 252));
 }
 
 void PdfViewerWidget::drawWorkerErrorBanner(QPainter& painter) {
@@ -819,7 +871,13 @@ bool PdfViewerWidget::drawFallbackTile(QPainter& painter, const layout::VisibleT
                                  tileRect.y() + (iy0 / r - t.tileYOnPage),
                                  (ix1 - ix0) / r,
                                  (iy1 - iy0) / r);
-                painter.drawImage(dst, toQImage(*buf), src);
+                if (m_darkMode) {
+                    QImage inv = toQImage(*buf).copy();
+                    inv.invertPixels(QImage::InvertRgb);
+                    painter.drawImage(dst, inv, src);
+                } else {
+                    painter.drawImage(dst, toQImage(*buf), src);
+                }
                 drawnAny = true;
             }
         }
@@ -861,7 +919,7 @@ void PdfViewerWidget::drawSelection(QPainter& painter, int pageIndex, const layo
     int endChar = (pageIndex == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
 
     auto rects = pt.getSelectionRects(startChar, endChar);
-    QColor highlightColor(0, 120, 215, 90); // translucent selection overlay
+    QColor highlightColor = m_darkMode ? QColor(0, 140, 255, 120) : QColor(0, 120, 215, 90);
 
     for (const auto& r : rects) {
         QRectF selRect(
@@ -916,6 +974,7 @@ void PdfViewerWidget::clearSelection() {
     if (m_selectionStart.isValid() || m_selectionEnd.isValid()) {
         m_selectionStart = {};
         m_selectionEnd = {};
+        m_isSelecting = false;
         viewport()->update();
         Q_EMIT selectionChanged();
     }
@@ -1290,12 +1349,82 @@ void PdfViewerWidget::keyPressEvent(QKeyEvent* event) {
         event->accept();
         return;
     }
+
+    if (!isDocumentOpen()) {
+        QAbstractScrollArea::keyPressEvent(event);
+        return;
+    }
+
+    const int key = event->key();
+    const Qt::KeyboardModifiers mods = event->modifiers();
+
+    const int singleStepY = verticalScrollBar()->singleStep() > 0 ? verticalScrollBar()->singleStep() : 40;
+    const int singleStepX = horizontalScrollBar()->singleStep() > 0 ? horizontalScrollBar()->singleStep() : 40;
+    const int pageStepY = verticalScrollBar()->pageStep() > 0 ? verticalScrollBar()->pageStep() : viewport()->height();
+
+    // 1. Home / End bounds navigation
+    if (key == Qt::Key_Home && (mods == Qt::NoModifier || mods == Qt::ControlModifier)) {
+        goToPage(0);
+        event->accept();
+        return;
+    }
+    if (key == Qt::Key_End && (mods == Qt::NoModifier || mods == Qt::ControlModifier)) {
+        if (pageCount() > 0) {
+            goToPage(pageCount() - 1);
+        }
+        event->accept();
+        return;
+    }
+
+    // 2. PageDown / Space (forward) and PageUp / Shift+Space (backward)
+    if (key == Qt::Key_PageDown) {
+        verticalScrollBar()->setValue(verticalScrollBar()->value() + pageStepY);
+        event->accept();
+        return;
+    }
+    if (key == Qt::Key_PageUp) {
+        verticalScrollBar()->setValue(verticalScrollBar()->value() - pageStepY);
+        event->accept();
+        return;
+    }
+    if (key == Qt::Key_Space) {
+        if (mods & Qt::ShiftModifier) {
+            verticalScrollBar()->setValue(verticalScrollBar()->value() - pageStepY);
+        } else {
+            verticalScrollBar()->setValue(verticalScrollBar()->value() + pageStepY);
+        }
+        event->accept();
+        return;
+    }
+
+    // 3. Arrow keys & Vim navigation (J / K / L / H)
+    if (key == Qt::Key_Down || (key == Qt::Key_J && (mods == Qt::NoModifier || mods == Qt::KeypadModifier))) {
+        verticalScrollBar()->setValue(verticalScrollBar()->value() + singleStepY);
+        event->accept();
+        return;
+    }
+    if (key == Qt::Key_Up || (key == Qt::Key_K && (mods == Qt::NoModifier || mods == Qt::KeypadModifier))) {
+        verticalScrollBar()->setValue(verticalScrollBar()->value() - singleStepY);
+        event->accept();
+        return;
+    }
+    if (key == Qt::Key_Right || (key == Qt::Key_L && (mods == Qt::NoModifier || mods == Qt::KeypadModifier))) {
+        horizontalScrollBar()->setValue(horizontalScrollBar()->value() + singleStepX);
+        event->accept();
+        return;
+    }
+    if (key == Qt::Key_Left || (key == Qt::Key_H && (mods == Qt::NoModifier || mods == Qt::KeypadModifier))) {
+        horizontalScrollBar()->setValue(horizontalScrollBar()->value() - singleStepX);
+        event->accept();
+        return;
+    }
+
     QAbstractScrollArea::keyPressEvent(event);
 }
 
 void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     QPainter painter(viewport());
-    painter.fillRect(viewport()->rect(), QColor("#323639"));
+    painter.fillRect(viewport()->rect(), m_darkMode ? QColor("#181818") : QColor("#323639"));
 
     if (!isDocumentOpen()) {
         if (!m_workerErrorMessage.isEmpty()) {
@@ -1336,13 +1465,13 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
 
             // Drop shadow
             QRectF shadowRect = pageRect.adjusted(3, 3, 5, 5);
-            painter.fillRect(shadowRect, QColor(0, 0, 0, 80));
+            painter.fillRect(shadowRect, m_darkMode ? QColor(0, 0, 0, 140) : QColor(0, 0, 0, 80));
 
-            // White paper
-            painter.fillRect(pageRect, Qt::white);
+            // Paper background
+            painter.fillRect(pageRect, m_darkMode ? QColor("#1e1e1e") : Qt::white);
 
             // Subtle border
-            painter.setPen(QColor(180, 180, 180));
+            painter.setPen(m_darkMode ? QColor(50, 50, 50) : QColor(180, 180, 180));
             painter.drawRect(pageRect);
         }
     }
@@ -1378,8 +1507,14 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
         auto cachedBuf = m_cache.get(key);
         if (cachedBuf.has_value()) {
             m_inFlightKeys.erase(key);
-            QImage img = toQImage(*cachedBuf);
-            painter.drawImage(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), img);
+            if (m_darkMode) {
+                QImage img = toQImage(*cachedBuf).copy();
+                img.invertPixels(QImage::InvertRgb);
+                painter.drawImage(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), img);
+            } else {
+                QImage img = toQImage(*cachedBuf);
+                painter.drawImage(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), img);
+            }
         } else if (m_cache.isFailed(key)) {
             if (m_cache.canRetry(key)) {
                 if (m_inFlightKeys.find(key) != m_inFlightKeys.end()) {

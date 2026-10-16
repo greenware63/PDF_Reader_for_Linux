@@ -22,7 +22,8 @@ namespace ui {
  * Implements continuous document scrolling, smooth zooming, exact 64-bit coordinate space,
  * compressed scrollbar mapping, sub-pixel rounding-safe fit-width, asynchronous background rendering,
  * background text extraction with cursor hit-testing, selection highlighting, clipboard copy,
- * and background asynchronous page-by-page text search with match highlighting and cycling.
+ * background asynchronous page-by-page text search with match highlighting and cycling,
+ * reversible Dark Mode night inversion shader, and comprehensive keyboard navigation.
  * All PDFium operations run in the separate pdf_worker process; the UI process never loads PDFium.
  */
 class PdfViewerWidget : public QAbstractScrollArea {
@@ -80,6 +81,15 @@ public:
     void nextPage();
     void previousPage();
 
+    /// Dark mode / night inversion APIs
+    bool isDarkMode() const noexcept { return m_darkMode; }
+    void setDarkMode(bool enabled);
+    void toggleDarkMode();
+
+    /// Reading position restoration & scroll positioning
+    void restoreReadingPosition(int pageIndex, double zoom, int64_t scrollX, int64_t scrollY);
+    void setDocScrollPosition(int64_t docX, int64_t docY);
+
     /**
      * @brief Renders a single page synchronously via the isolated worker for printing or export.
      */
@@ -98,7 +108,8 @@ public:
     double effectiveDpr() const;
 
     /**
-     * @brief Blocks until the background render worker has finished all pending requests and in-flight renders.\n     * Useful for deterministic testing and flush operations.
+     * @brief Blocks until the background render worker has finished all pending requests and in-flight renders.
+     * Useful for deterministic testing and flush operations.
      */
     void waitForRendering();
 
@@ -154,6 +165,7 @@ Q_SIGNALS:
     void searchProgressChanged(int pagesSearched, int totalPages);
     void searchFinished(bool truncated);
     void outlineReady(const std::vector<pdf::OutlineItem>& outline);
+    void darkModeChanged(bool isDark);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -191,7 +203,6 @@ private:
     void updateLayoutGeometry();
     void updateScrollBars();
 
-    void setDocScrollPosition(int64_t docX, int64_t docY);
     void goToPageImpl(int pageIndex, std::optional<double> targetYFraction);
 
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
@@ -273,6 +284,9 @@ private:
     QString m_workerErrorMessage;
     std::vector<QString> m_pageLabels;
     QString m_currentFilePath;
+
+    // Dark mode / night inversion state
+    bool m_darkMode{false};
 };
 
 } // namespace ui

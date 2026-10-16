@@ -22,6 +22,7 @@
 #include <QVBoxLayout>
 #include <QSettings>
 #include <QDir>
+#include <QDateTime>
 #include <QPrinter>
 #include <QPrintDialog>
 #include <QProgressDialog>
@@ -92,10 +93,24 @@ static QStandardItem* findBestOutlineItem(QStandardItem* parent, int currentPage
     return best;
 }
 
+static QString readingPositionKey(const QString& filePath) {
+    if (filePath.isEmpty()) {
+        return QString();
+    }
+    QString canonical = QFileInfo(filePath).canonicalFilePath();
+    if (canonical.isEmpty()) {
+        canonical = QDir::cleanPath(filePath);
+    }
+    return QString::fromUtf8(canonical.toUtf8().toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
+    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    m_darkMode = settings.value(QStringLiteral("darkMode"), false).toBool();
+
     setupUi();
     setupActions();
     loadRecentFiles();
@@ -105,6 +120,13 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+    if (m_docTabs) {
+        for (int i = 0; i < m_docTabs->count(); ++i) {
+            if (auto* v = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(i))) {
+                saveReadingPosition(v);
+            }
+        }
+    }
     // The dock and tabs are destroyed by ~QMainWindow, after this object's own destructor has finished.
     if (m_sidebarDock) {
         QObject::disconnect(m_sidebarDock, nullptr, this, nullptr);
@@ -112,6 +134,17 @@ MainWindow::~MainWindow() {
     if (m_docTabs) {
         QObject::disconnect(m_docTabs, nullptr, this, nullptr);
     }
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    if (m_docTabs) {
+        for (int i = 0; i < m_docTabs->count(); ++i) {
+            if (auto* v = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(i))) {
+                saveReadingPosition(v);
+            }
+        }
+    }
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::setupUi() {
@@ -233,6 +266,7 @@ void MainWindow::setupUi() {
 
 PdfViewerWidget* MainWindow::createViewerTab(const QString& title) {
     auto* viewer = new PdfViewerWidget(m_docTabs);
+    viewer->setDarkMode(m_darkMode);
     connectViewer(viewer);
     const QString tabTitle = title.isEmpty() ? tr("Untitled") : title;
     m_docTabs->addTab(viewer, tabTitle);
@@ -339,6 +373,13 @@ void MainWindow::setupActions() {
     });
     m_toggleSidebarAction->setShortcut(QKeySequence(Qt::Key_F4));
 
+    m_darkModeAction = viewMenu->addAction(tr("&Dark Mode / Invert"), this, [this]() {
+        setDarkMode(!m_darkMode);
+    });
+    m_darkModeAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
+    m_darkModeAction->setCheckable(true);
+    m_darkModeAction->setChecked(m_darkMode);
+
     // Tab navigation shortcuts
     auto* nextTabAction = new QAction(this);
     nextTabAction->setShortcut(QKeySequence::NextChild);
@@ -395,6 +436,74 @@ void MainWindow::setupActions() {
     toolbar->addAction(tr("100%"), this, [this]() {
         if (auto* v = currentViewer()) v->zoomReset();
     });
+
+    toolbar->addSeparator();
+    QAction* darkToolbarAction = toolbar->addAction(tr("🌙 Dark"), this, [this]() {
+        setDarkMode(!m_darkMode);
+    });
+    darkToolbarAction->setToolTip(tr("Toggle Dark Mode / Invert Colors (Ctrl+I)"));
+}
+
+void MainWindow::setDarkMode(bool enabled) {
+    m_darkMode = enabled;
+    if (m_darkModeAction) {
+        m_darkModeAction->setChecked(enabled);
+    }
+    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    settings.setValue(QStringLiteral("darkMode"), m_darkMode);
+
+    for (int i = 0; i < tabCount(); ++i) {
+        if (auto* v = viewerAt(i)) {
+            v->setDarkMode(enabled);
+        }
+    }
+}
+
+void MainWindow::saveReadingPosition(PdfViewerWidget* viewer) {
+    if (!viewer || !viewer->isDocumentOpen() || viewer->currentFilePath().isEmpty()) {
+        return;
+    }
+    const QString key = readingPositionKey(viewer->currentFilePath());
+    if (key.isEmpty()) {
+        return;
+    }
+    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    settings.beginGroup(QStringLiteral("readingHistory/") + key);
+    settings.setValue(QStringLiteral("filePath"), viewer->currentFilePath());
+    settings.setValue(QStringLiteral("page"), viewer->currentPage());
+    settings.setValue(QStringLiteral("zoom"), viewer->currentZoom());
+    settings.setValue(QStringLiteral("scrollX"), static_cast<qlonglong>(viewer->currentDocScrollX()));
+    settings.setValue(QStringLiteral("scrollY"), static_cast<qlonglong>(viewer->currentDocScrollY()));
+    settings.setValue(QStringLiteral("timestamp"), QDateTime::currentSecsSinceEpoch());
+    settings.endGroup();
+}
+
+void MainWindow::restoreReadingPosition(PdfViewerWidget* viewer, const QString& filePath) {
+    if (!viewer || filePath.isEmpty()) {
+        return;
+    }
+    const QString key = readingPositionKey(filePath);
+    if (key.isEmpty()) {
+        return;
+    }
+    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    const QString group = QStringLiteral("readingHistory/") + key;
+    if (!settings.contains(group + QStringLiteral("/page"))) {
+        return;
+    }
+    settings.beginGroup(group);
+    int savedPage = settings.value(QStringLiteral("page"), 0).toInt();
+    double savedZoom = settings.value(QStringLiteral("zoom"), viewer->currentZoom()).toDouble();
+    int64_t scrollX = settings.value(QStringLiteral("scrollX"), 0).toLongLong();
+    int64_t scrollY = settings.value(QStringLiteral("scrollY"), 0).toLongLong();
+    settings.endGroup();
+
+    viewer->restoreReadingPosition(savedPage, savedZoom, scrollX, scrollY);
+}
+
+void MainWindow::clearReadingHistory() {
+    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    settings.remove(QStringLiteral("readingHistory"));
 }
 
 PdfViewerWidget* MainWindow::currentViewer() const {
@@ -471,6 +580,9 @@ void MainWindow::closeTab(int index) {
         return;
     }
     auto* viewer = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(index));
+    if (viewer) {
+        saveReadingPosition(viewer);
+    }
     if (m_docTabs->count() > 1) {
         if (viewer) {
             viewer->closeDocument();
@@ -505,6 +617,9 @@ void MainWindow::selectPreviousTab() {
 void MainWindow::onCurrentTabChanged(int index) {
     if (index < 0 || !m_docTabs) {
         return;
+    }
+    if (m_viewer && m_viewer->isDocumentOpen()) {
+        saveReadingPosition(m_viewer);
     }
     m_viewer = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(index));
     if (!m_viewer) {
@@ -795,7 +910,7 @@ void MainWindow::exportAsPdf() {
         savePath += QStringLiteral(".pdf");
     }
 
-    statusBar()->showMessage(tr("Exporting to '%1'â€¦").arg(QFileInfo(savePath).fileName()));
+    statusBar()->showMessage(tr("Exporting to '%1'…").arg(QFileInfo(savePath).fileName()));
     bool ok = exportDocumentToPdf(savePath);
     if (ok) {
         statusBar()->showMessage(tr("Successfully exported PDF to '%1'").arg(savePath), 5000);
@@ -819,9 +934,10 @@ void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
         }
     }
 
-    // Record into recent files
+    // Record into recent files & restore reading position
     if (senderViewer && !senderViewer->currentFilePath().isEmpty()) {
         addRecentFile(senderViewer->currentFilePath());
+        restoreReadingPosition(senderViewer, senderViewer->currentFilePath());
     }
 
     if (senderViewer == currentViewer()) {
@@ -841,6 +957,13 @@ void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
         }
         if (m_thumbnailWidget) {
             m_thumbnailWidget->setDocument(totalPages, senderViewer->pageLabels());
+            m_thumbnailWidget->setCurrentPage(senderViewer->currentPage());
+        }
+        if (m_pageStatusLabel) {
+            onPageChanged(senderViewer->currentPage() + 1, totalPages);
+        }
+        if (m_zoomStatusLabel) {
+            onZoomChanged(senderViewer->currentZoom());
         }
         setWindowTitle(tr("%1 - PDF Reader").arg(title));
         statusBar()->showMessage(tr("Loaded '%1' (%2 pages)").arg(title).arg(totalPages));

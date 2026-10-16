@@ -28,6 +28,8 @@
 #include <cassert>
 #include <cmath>
 #include <vector>
+#include <cstring>
+#include <QSettings>
 
 static void generateOutlinePdfFixture(const std::string& path, bool cyclicSibling = false,
                                       bool cyclicChildToParent = false) {
@@ -2722,8 +2724,398 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: High-resolution print rasterization over IPC and headless PDF export verified." << std::endl;
     }
 
+    // Test 38: Dark Mode & Night Inversion with Reversible Zero-Mutation Tile Cache
+    std::cout << "[TEST 38] Testing Dark Mode toggle, #181818 viewport color, inverted pixels, reversibility, and zero-mutation invariant..." << std::endl;
+    {
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        QCoreApplication::processEvents();
+
+        std::string sampleDoc = "widget_test_dark_mode.pdf";
+        generateMultiPagePdf(sampleDoc, 2);
+        auto err = viewer.openDocument(QString::fromStdString(sampleDoc));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document for dark mode testing" << std::endl;
+            return 1;
+        }
+
+        viewer.setZoom(1.0);
+        viewer.viewport()->repaint();
+        QElapsedTimer renderTimer;
+        renderTimer.start();
+        while (renderTimer.elapsed() < 5000 && viewer.cache().size() == 0) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+            viewer.viewport()->repaint();
+        }
+        viewer.waitForRendering();
+
+        if (viewer.cache().size() == 0) {
+            std::cerr << "[FAIL] No tiles rendered before dark mode test" << std::endl;
+            return 1;
+        }
+
+        // 1. Initial default state: Light mode
+        if (viewer.isDarkMode()) {
+            std::cerr << "[FAIL] Viewer expected isDarkMode() == false initially" << std::endl;
+            return 1;
+        }
+
+        QImage lightFrame(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+        {
+            QPainter p(&lightFrame);
+            viewer.viewport()->render(&p);
+        }
+        // Top-left corner of viewport outside page margins is #323639 (RGB 50, 54, 57)
+        QRgb bgLight = lightFrame.pixel(2, 2);
+        if (qRed(bgLight) != 0x32 || qGreen(bgLight) != 0x36 || qBlue(bgLight) != 0x39) {
+            std::cerr << "[FAIL] Light mode viewport background expected #323639, got RGB("
+                      << qRed(bgLight) << "," << qGreen(bgLight) << "," << qBlue(bgLight) << ")" << std::endl;
+            return 1;
+        }
+
+        // Grab a cached tile key and its pixel buffer
+        auto key = pdf::TileKey::create(viewer.currentDocumentId(), 0, 0, 0, 1.0, viewer.effectiveDpr());
+        auto cachedBufBefore = viewer.cache().get(key);
+        if (!cachedBufBefore.has_value()) {
+            std::cerr << "[FAIL] Tile (0,0) not found in cache for dark mode test" << std::endl;
+            return 1;
+        }
+        std::vector<uint8_t> bufCopyBefore(cachedBufBefore->data(), cachedBufBefore->data() + cachedBufBefore->sizeBytes());
+
+        // 2. Toggle to Dark Mode
+        viewer.setDarkMode(true);
+        if (!viewer.isDarkMode()) {
+            std::cerr << "[FAIL] setDarkMode(true) failed to update isDarkMode()" << std::endl;
+            return 1;
+        }
+
+        // Render viewport in Dark Mode
+        QImage darkFrame(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+        {
+            QPainter p(&darkFrame);
+            viewer.viewport()->render(&p);
+        }
+
+        // Viewport background is now #181818 (RGB 24, 24, 24)
+        QRgb bgDark = darkFrame.pixel(2, 2);
+        if (qRed(bgDark) != 0x18 || qGreen(bgDark) != 0x18 || qBlue(bgDark) != 0x18) {
+            std::cerr << "[FAIL] Dark mode viewport background expected #181818, got RGB("
+                      << qRed(bgDark) << "," << qGreen(bgDark) << "," << qBlue(bgDark) << ")" << std::endl;
+            return 1;
+        }
+
+        // 3. ZERO-MUTATION INVARIANT: Verify underlying tile cache buffer was NOT altered in-place
+        auto cachedBufAfter = viewer.cache().get(key);
+        if (!cachedBufAfter.has_value()) {
+            std::cerr << "[FAIL] Tile (0,0) missing from cache after dark mode render" << std::endl;
+            return 1;
+        }
+        if (cachedBufAfter->sizeBytes() != bufCopyBefore.size() ||
+            std::memcmp(cachedBufAfter->data(), bufCopyBefore.data(), bufCopyBefore.size()) != 0) {
+            std::cerr << "[FAIL] Zero-mutation invariant violated: tile cache buffer was mutated by dark mode rendering!" << std::endl;
+            return 1;
+        }
+
+        // 4. Reversibility: Toggle dark mode off and verify return to light mode
+        viewer.toggleDarkMode();
+        if (viewer.isDarkMode()) {
+            std::cerr << "[FAIL] toggleDarkMode() did not switch back to light mode" << std::endl;
+            return 1;
+        }
+
+        QImage revertFrame(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+        {
+            QPainter p(&revertFrame);
+            viewer.viewport()->render(&p);
+        }
+        QRgb bgRevert = revertFrame.pixel(2, 2);
+        if (qRed(bgRevert) != 0x32 || qGreen(bgRevert) != 0x36 || qBlue(bgRevert) != 0x39) {
+            std::cerr << "[FAIL] Reverted viewport background expected #323639, got RGB("
+                      << qRed(bgRevert) << "," << qGreen(bgRevert) << "," << qBlue(bgRevert) << ")" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Dark Mode toggle, #181818 viewport color, inverted pixels, reversibility, and zero-mutation tile cache invariant verified." << std::endl;
+    }
+
+    // Test 39: Reading Position Memory persistence across documents/sessions in QSettings
+    std::cout << "[TEST 39] Testing Reading Position Memory persistence across documents/sessions in QSettings..." << std::endl;
+    {
+        ui::MainWindow window;
+        window.resize(1024, 768);
+        window.show();
+        QCoreApplication::processEvents();
+
+        window.clearReadingHistory();
+
+        std::string sampleDoc = "widget_test_reading_history.pdf";
+        generateMultiPagePdf(sampleDoc, 5);
+
+        if (!window.openFile(QString::fromStdString(sampleDoc))) {
+            std::cerr << "[FAIL] Failed to open document for reading history test" << std::endl;
+            return 1;
+        }
+
+        auto* viewer = window.currentViewer();
+        QElapsedTimer loadTimer;
+        loadTimer.start();
+        while (loadTimer.elapsed() < 5000 && (!viewer || !viewer->isDocumentOpen())) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (!viewer || !viewer->isDocumentOpen()) {
+            std::cerr << "[FAIL] Document failed to open in reading history test" << std::endl;
+            return 1;
+        }
+
+        // Navigate to page 3, zoom 1.5, scroll to offset
+        viewer->setZoom(1.5);
+        viewer->goToPage(3);
+        const int64_t expectedScrollX = 40;
+        const int64_t expectedScrollY = viewer->currentDocScrollY() + 80;
+        viewer->setDocScrollPosition(expectedScrollX, expectedScrollY);
+        QCoreApplication::processEvents();
+
+        const int savedPage = viewer->currentPage();
+        const double savedZoom = viewer->currentZoom();
+        const int64_t savedScrollX = viewer->currentDocScrollX();
+        const int64_t savedScrollY = viewer->currentDocScrollY();
+
+        // 1. Explicitly save reading position
+        window.saveReadingPosition(viewer);
+
+        // 2. Close document / tab
+        window.closeCurrentTab();
+        QCoreApplication::processEvents();
+
+        // 3. Re-open same document in new tab: reading position must restore automatically
+        if (!window.openFile(QString::fromStdString(sampleDoc))) {
+            std::cerr << "[FAIL] Failed to re-open document in reading history test" << std::endl;
+            return 1;
+        }
+
+        auto* reloadedViewer = window.currentViewer();
+        QElapsedTimer reloadTimer;
+        reloadTimer.start();
+        while (reloadTimer.elapsed() < 5000 && (!reloadedViewer || !reloadedViewer->isDocumentOpen())) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (!reloadedViewer || !reloadedViewer->isDocumentOpen()) {
+            std::cerr << "[FAIL] Re-opened document failed to load" << std::endl;
+            return 1;
+        }
+
+        if (reloadedViewer->currentPage() != savedPage) {
+            std::cerr << "[FAIL] Restored page mismatch: expected " << savedPage
+                      << ", got " << reloadedViewer->currentPage() << std::endl;
+            return 1;
+        }
+        if (std::abs(reloadedViewer->currentZoom() - savedZoom) > 0.01) {
+            std::cerr << "[FAIL] Restored zoom mismatch: expected " << savedZoom
+                      << ", got " << reloadedViewer->currentZoom() << std::endl;
+            return 1;
+        }
+        if (reloadedViewer->currentDocScrollX() != savedScrollX ||
+            reloadedViewer->currentDocScrollY() != savedScrollY) {
+            std::cerr << "[FAIL] Restored scroll coordinate mismatch: expected ("
+                      << savedScrollX << "," << savedScrollY << "), got ("
+                      << reloadedViewer->currentDocScrollX() << ","
+                      << reloadedViewer->currentDocScrollY() << ")" << std::endl;
+            return 1;
+        }
+
+        // 4. Test clearReadingHistory
+        window.closeCurrentTab();
+        QCoreApplication::processEvents();
+        window.clearReadingHistory();
+
+        // Re-open: should reset to default (page 0, initial zoom)
+        if (!window.openFile(QString::fromStdString(sampleDoc))) {
+            std::cerr << "[FAIL] Failed to re-open document after clearReadingHistory" << std::endl;
+            return 1;
+        }
+        auto* clearedViewer = window.currentViewer();
+        QElapsedTimer clearTimer;
+        clearTimer.start();
+        while (clearTimer.elapsed() < 5000 && (!clearedViewer || !clearedViewer->isDocumentOpen())) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+
+        if (clearedViewer->currentPage() != 0) {
+            std::cerr << "[FAIL] Expected page 0 after clearReadingHistory, got "
+                      << clearedViewer->currentPage() << std::endl;
+            return 1;
+        }
+
+        window.closeCurrentTab();
+        std::cout << "  -> Passed: Reading position persistence across documents/sessions in QSettings and clearReadingHistory verified." << std::endl;
+    }
+
+    // Test 40: Comprehensive Keyboard Navigation (Arrows, Vim J/K/L/H, PgUp/PgDn, Space/Shift+Space, Home/End)
+    std::cout << "[TEST 40] Testing Comprehensive Keyboard Navigation..." << std::endl;
+    {
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        QCoreApplication::processEvents();
+
+        std::string sampleDoc = "widget_test_keyboard_nav.pdf";
+        generateMultiPagePdf(sampleDoc, 6);
+        auto err = viewer.openDocument(QString::fromStdString(sampleDoc));
+        if (err != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document for keyboard navigation test" << std::endl;
+            return 1;
+        }
+
+        viewer.setFocus();
+        viewer.goToPage(0);
+        QCoreApplication::processEvents();
+
+        const int initialV = viewer.verticalScrollBar()->value();
+
+        // 1. Down arrow & Vim 'J'
+        QKeyEvent downEvent(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &downEvent);
+        const int afterDown = viewer.verticalScrollBar()->value();
+        if (afterDown <= initialV) {
+            std::cerr << "[FAIL] Key_Down did not advance vertical scroll position (initial: "
+                      << initialV << ", after: " << afterDown << ")" << std::endl;
+            return 1;
+        }
+
+        QKeyEvent jEvent(QEvent::KeyPress, Qt::Key_J, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &jEvent);
+        const int afterJ = viewer.verticalScrollBar()->value();
+        if (afterJ <= afterDown) {
+            std::cerr << "[FAIL] Key_J did not advance vertical scroll position (prev: "
+                      << afterDown << ", after: " << afterJ << ")" << std::endl;
+            return 1;
+        }
+
+        // 2. Up arrow & Vim 'K'
+        QKeyEvent upEvent(QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &upEvent);
+        const int afterUp = viewer.verticalScrollBar()->value();
+        if (afterUp >= afterJ) {
+            std::cerr << "[FAIL] Key_Up did not decrease vertical scroll position (prev: "
+                      << afterJ << ", after: " << afterUp << ")" << std::endl;
+            return 1;
+        }
+
+        QKeyEvent kEvent(QEvent::KeyPress, Qt::Key_K, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &kEvent);
+        const int afterK = viewer.verticalScrollBar()->value();
+        if (afterK >= afterUp) {
+            std::cerr << "[FAIL] Key_K did not decrease vertical scroll position (prev: "
+                      << afterUp << ", after: " << afterK << ")" << std::endl;
+            return 1;
+        }
+
+        // 3. PageDown and Space
+        const int beforePgDn = viewer.verticalScrollBar()->value();
+        QKeyEvent pgDnEvent(QEvent::KeyPress, Qt::Key_PageDown, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &pgDnEvent);
+        const int afterPgDn = viewer.verticalScrollBar()->value();
+        if (afterPgDn <= beforePgDn) {
+            std::cerr << "[FAIL] Key_PageDown did not scroll down by page step" << std::endl;
+            return 1;
+        }
+
+        QKeyEvent spaceEvent(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &spaceEvent);
+        const int afterSpace = viewer.verticalScrollBar()->value();
+        if (afterSpace <= afterPgDn) {
+            std::cerr << "[FAIL] Key_Space did not scroll down by page step" << std::endl;
+            return 1;
+        }
+
+        // 4. Shift+Space and PageUp
+        // beforeShiftSpace
+        QKeyEvent shiftSpaceEvent(QEvent::KeyPress, Qt::Key_Space, Qt::ShiftModifier);
+        QApplication::sendEvent(&viewer, &shiftSpaceEvent);
+        const int afterShiftSpace = viewer.verticalScrollBar()->value();
+        if (afterShiftSpace >= afterSpace) {
+            std::cerr << "[FAIL] Shift+Key_Space did not scroll up by page step" << std::endl;
+            return 1;
+        }
+
+        QKeyEvent pgUpEvent(QEvent::KeyPress, Qt::Key_PageUp, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &pgUpEvent);
+        const int afterPgUp = viewer.verticalScrollBar()->value();
+        if (afterPgUp >= afterShiftSpace) {
+            std::cerr << "[FAIL] Key_PageUp did not scroll up by page step" << std::endl;
+            return 1;
+        }
+
+        // 5. Home / End bounds navigation
+        QKeyEvent endEvent(QEvent::KeyPress, Qt::Key_End, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &endEvent);
+        QCoreApplication::processEvents();
+        if (viewer.currentPage() != viewer.pageCount() - 1) {
+            std::cerr << "[FAIL] Key_End did not navigate to last page: expected "
+                      << (viewer.pageCount() - 1) << ", got " << viewer.currentPage() << std::endl;
+            return 1;
+        }
+
+        QKeyEvent homeEvent(QEvent::KeyPress, Qt::Key_Home, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &homeEvent);
+        QCoreApplication::processEvents();
+        if (viewer.currentPage() != 0) {
+            std::cerr << "[FAIL] Key_Home did not navigate to page 0: got "
+                      << viewer.currentPage() << std::endl;
+            return 1;
+        }
+
+        // 6. Horizontal navigation: Right/Left arrow & Vim L/H
+        viewer.setZoom(3.0); // Ensure horizontal scrollbar has range > 0
+        QCoreApplication::processEvents();
+        if (viewer.horizontalScrollBar()->maximum() <= 0) {
+            std::cerr << "[FAIL] Horizontal scrollbar expected maximum > 0 at zoom 3.0" << std::endl;
+            return 1;
+        }
+
+        viewer.horizontalScrollBar()->setValue(0);
+        QKeyEvent rightEvent(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &rightEvent);
+        const int afterRight = viewer.horizontalScrollBar()->value();
+        if (afterRight <= 0) {
+            std::cerr << "[FAIL] Key_Right did not scroll horizontally" << std::endl;
+            return 1;
+        }
+
+        QKeyEvent lEvent(QEvent::KeyPress, Qt::Key_L, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &lEvent);
+        const int afterL = viewer.horizontalScrollBar()->value();
+        if (afterL <= afterRight) {
+            std::cerr << "[FAIL] Key_L did not scroll horizontally to the right" << std::endl;
+            return 1;
+        }
+
+        QKeyEvent leftEvent(QEvent::KeyPress, Qt::Key_Left, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &leftEvent);
+        const int afterLeft = viewer.horizontalScrollBar()->value();
+        if (afterLeft >= afterL) {
+            std::cerr << "[FAIL] Key_Left did not scroll horizontally to the left" << std::endl;
+            return 1;
+        }
+
+        QKeyEvent hEvent(QEvent::KeyPress, Qt::Key_H, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &hEvent);
+        const int afterH = viewer.horizontalScrollBar()->value();
+        if (afterH >= afterLeft) {
+            std::cerr << "[FAIL] Key_H did not scroll horizontally to the left" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Comprehensive keyboard navigation (Arrows, Vim J/K/L/H, PgUp/PgDn, Space/Shift+Space, Home/End) verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 37 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 40 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

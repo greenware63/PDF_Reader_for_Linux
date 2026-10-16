@@ -64,6 +64,15 @@ public:
     /// Exports the currently active document to a PDF file. @return true on success.
     bool exportDocumentToPdf(const QString& outputPath, int fromPage = -1, int toPage = -1);
 
+    /// Dark mode / night inversion status.
+    bool isDarkMode() const noexcept { return m_darkMode; }
+    void setDarkMode(bool enabled);
+
+    /// Reading position persistence across documents and sessions.
+    void saveReadingPosition(PdfViewerWidget* viewer);
+    void restoreReadingPosition(PdfViewerWidget* viewer, const QString& filePath);
+    void clearReadingHistory();
+
     QTabWidget* documentTabs() const noexcept { return m_docTabs; }
     QDockWidget* sidebarDock() const noexcept { return m_sidebarDock; }
     QTabWidget* sidebarTabs() const noexcept { return m_sidebarTabs; }
@@ -82,6 +91,9 @@ public Q_SLOTS:
     void showFindBar();
     void printDocument();
     void exportAsPdf();
+
+protected:
+    void closeEvent(QCloseEvent* event) override;
 
 private Q_SLOTS:
     void onDocumentLoaded(const QString& title, int totalPages);
@@ -121,9 +133,11 @@ private:
     QStandardItemModel* m_outlineModel{nullptr};
     QLabel* m_outlineEmptyLabel{nullptr};
     QAction* m_toggleSidebarAction{nullptr};
+    QAction* m_darkModeAction{nullptr};
     QMenu* m_recentFilesMenu{nullptr};
     QStringList m_recentFiles;
     bool m_sidebarUserHidden{false};
+    bool m_darkMode{false};
 };
 
 } // namespace ui
