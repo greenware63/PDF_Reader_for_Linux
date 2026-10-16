@@ -3,6 +3,7 @@
 #include <QPainter>
 #include <QScrollBar>
 #include <QTimer>
+#include <algorithm>
 #include <cmath>
 
 namespace ui {
@@ -172,20 +173,43 @@ void ThumbnailListWidget::onThumbnailFailed(int pageIndex) {
 }
 
 void ThumbnailListWidget::requestVisibleThumbnails() {
-    if (!m_viewer || count() == 0) {
+    if (!m_viewer || count() == 0 || !isVisible()) {
         return;
     }
 
     const QRect vpRect = viewport()->rect();
-    const bool hasLayout = vpRect.isValid() && vpRect.width() > 0 && vpRect.height() > 0;
-    const QRect prefetchRect = hasLayout
-        ? vpRect.adjusted(0, -250, 0, 250)
-        : QRect(0, 0, 200, 800);
+    if (!vpRect.isValid() || vpRect.width() <= 0 || vpRect.height() <= 0) {
+        return;
+    }
 
-    for (int i = 0; i < count(); ++i) {
+    const int gridWidth = std::max(1, gridSize().width());
+    const int gridHeight = std::max(1, gridSize().height());
+    int firstVisible = count();
+    int lastVisible = -1;
+    for (int y = 0; y < vpRect.height(); y += gridHeight) {
+        for (int x = 0; x < vpRect.width(); x += gridWidth) {
+            const QPoint samplePoint(std::min(x + gridWidth / 2, vpRect.width() - 1),
+                                     std::min(y + gridHeight / 2, vpRect.height() - 1));
+            const QModelIndex index = indexAt(samplePoint);
+            if (index.isValid()) {
+                firstVisible = std::min(firstVisible, index.row());
+                lastVisible = std::max(lastVisible, index.row());
+            }
+        }
+    }
+    if (lastVisible < firstVisible) {
+        return;
+    }
+
+    const int columns = std::max(1, (vpRect.width() + gridWidth - 1) / gridWidth);
+    const int prefetchItems = columns * (2 + 1);
+    const int firstIndex = std::max(0, firstVisible - prefetchItems);
+    const int lastIndex = std::min(count() - 1, lastVisible + prefetchItems);
+
+    for (int i = firstIndex; i <= lastIndex; ++i) {
         auto* it = item(i);
         const QRect rect = visualItemRect(it);
-        if (!hasLayout || rect.intersects(prefetchRect)) {
+        if (rect.intersects(vpRect.adjusted(0, -250, 0, 250))) {
             const int pageIndex = it->data(Qt::UserRole).toInt();
             if (m_loadedPages.find(pageIndex) == m_loadedPages.end() &&
                 m_requestedPages.insert(pageIndex).second) {

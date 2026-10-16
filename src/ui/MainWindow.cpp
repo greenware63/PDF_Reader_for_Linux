@@ -971,7 +971,6 @@ void MainWindow::onOutlineReady(const std::vector<pdf::OutlineItem>& outline) {
 
     addOutlineItemsRecursive(m_outlineModel->invisibleRootItem(), outline);
     m_sidebarStack->setCurrentWidget(m_outlineView);
-    m_sidebarTabs->setCurrentWidget(m_sidebarStack);
     m_outlineView->expandToDepth(0);
     if (auto* v = currentViewer()) {
         if (v->pageCount() > 0) {

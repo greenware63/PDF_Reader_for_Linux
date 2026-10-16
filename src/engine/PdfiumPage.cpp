@@ -184,7 +184,15 @@ PixelBuffer PdfiumPage::renderThumbnail(int targetWidth) {
 
     const int targetW = std::clamp(targetWidth, 16, 1024);
     const double scale = static_cast<double>(targetW) / m_width;
-    const int targetH = std::max(1, static_cast<int>(std::round(m_height * scale)));
+    const double scaledHeight = m_height * scale;
+    constexpr int MAX_THUMBNAIL_DIM = 2048;
+    constexpr int64_t MAX_THUMBNAIL_PIXELS = 4 * 1024 * 1024;
+    if (!std::isfinite(scaledHeight) || scaledHeight <= 0.0 ||
+        scaledHeight > MAX_THUMBNAIL_DIM ||
+        static_cast<int64_t>(targetW) * static_cast<int64_t>(std::ceil(scaledHeight)) > MAX_THUMBNAIL_PIXELS) {
+        return {};
+    }
+    const int targetH = std::max(1, static_cast<int>(std::round(scaledHeight)));
 
     PixelBuffer buffer = PixelBuffer::allocate(targetW, targetH, PixelFormat::BGRX8888);
     if (!buffer.isValid()) {

@@ -608,13 +608,29 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
         case MessageType::ThumbnailResponse: {
             ThumbnailResponse response;
             if (deserialize(payload, response)) {
+                constexpr size_t MAX_THUMBNAIL_BYTES = 16 * 1024 * 1024;
                 if (response.width > 0 && response.height > 0 &&
                     response.width <= 2048 && response.height <= 2048 &&
-                    response.stride >= response.width * 4 &&
-                    response.pixelData.size() >= response.stride * response.height) {
+                    response.stride > 0) {
+                    const size_t width = static_cast<size_t>(response.width);
+                    const size_t height = static_cast<size_t>(response.height);
+                    const size_t stride = static_cast<size_t>(response.stride);
+                    const size_t rowBytes = width * 4;
+                    const bool validSize = stride >= rowBytes &&
+                        height <= MAX_THUMBNAIL_BYTES / stride &&
+                        stride * height <= static_cast<size_t>(response.pixelData.size());
+                    if (!validSize) {
+                        Q_EMIT thumbnailFailed(response.documentId, response.pageIndex);
+                        break;
+                    }
+
                     PixelBuffer buf = PixelBuffer::allocate(response.width, response.height, PixelFormat::BGRX8888);
                     if (buf.isValid()) {
-                        std::memcpy(buf.data(), response.pixelData.constData(), buf.sizeBytes());
+                        for (int row = 0; row < response.height; ++row) {
+                            std::memcpy(buf.data() + static_cast<size_t>(row) * buf.stride(),
+                                        response.pixelData.constData() + static_cast<size_t>(row) * stride,
+                                        rowBytes);
+                        }
                         Q_EMIT thumbnailReady(response.documentId, response.pageIndex, buf);
                     } else {
                         Q_EMIT thumbnailFailed(response.documentId, response.pageIndex);
