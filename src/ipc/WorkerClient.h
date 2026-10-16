@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "ipc/IpcMessages.h"
 
@@ -43,6 +43,8 @@ public:
     void killWorkerForTesting();
     void requestThumbnail(int64_t documentId, int pageIndex, int targetWidth = 140);
     void requestPrintPage(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0);
+    void requestExtractPages(int64_t documentId, int firstPage, int lastPage);
+    QByteArray extractPagesSync(int64_t documentId, int firstPage, int lastPage, int timeoutMs = 60000);
     pdf::PixelBuffer renderPageForPrintSync(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0, int timeoutMs = 10000);
 
 Q_SIGNALS:
@@ -62,6 +64,8 @@ Q_SIGNALS:
     void thumbnailFailed(int64_t documentId, int pageIndex);
     void printPageReady(int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer);
     void printPageFailed(int64_t documentId, int pageIndex);
+    void extractPagesReady(int64_t documentId, int firstPage, int lastPage, const QByteArray& pdfBytes);
+    void extractPagesFailed(int64_t documentId, int firstPage, int lastPage);
 
 private Q_SLOTS:
     void onSocketConnected();

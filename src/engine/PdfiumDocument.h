@@ -23,6 +23,7 @@ public:
     std::string getPageLabel(int pageIndex) const override;
     std::vector<std::string> getPageLabels() const override;
     PixelBuffer renderThumbnail(int pageIndex, int targetWidth) override;
+    bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const override;
     void close() override;
     bool isOpen() const override { return m_doc != nullptr; }
     DocumentError lastError() const override { return m_lastError; }
@@ -31,7 +32,7 @@ private:
     static void ensureLibraryInitialized();
     static DocumentError mapPdfiumError(unsigned long fpdfError);
 
-    DocumentHandle m_doc{nullptr};
+    DocumentHandle m_doc{nullptr};\
     DocumentError m_lastError{DocumentError::None};
 };
 

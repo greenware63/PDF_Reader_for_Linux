@@ -1,7 +1,10 @@
-#include "PdfiumDocument.h"
+﻿#include "PdfiumDocument.h"
 #include <fpdf_doc.h>
 #include <fpdf_edit.h>
 #include <fpdf_transformpage.h>
+#include <fpdf_ppo.h>
+#include <fpdf_save.h>
+#include <string>
 #include "PdfiumMutex.h"
 #include <mutex>
 #include <cstring>
@@ -358,6 +361,55 @@ PixelBuffer PdfiumDocument::renderThumbnail(int pageIndex, int targetWidth) {
 void PdfiumDocument::close() {
     m_doc.reset();
     m_lastError = DocumentError::None;
+}
+
+namespace {
+struct MemoryWriter : FPDF_FILEWRITE {
+    std::vector<uint8_t> data;
+    bool failed{false};
+    static constexpr size_t kMaxBytes = 512u * 1024u * 1024u;
+    MemoryWriter() {
+        version = 1;
+        WriteBlock = &MemoryWriter::write;
+    }
+    static int write(FPDF_FILEWRITE* self, const void* buf, unsigned long size) {
+        auto* w = static_cast<MemoryWriter*>(self);
+        if (w->failed || w->data.size() + size > kMaxBytes) {
+            w->failed = true;
+            return 0;
+        }
+        const auto* p = static_cast<const uint8_t*>(buf);
+        w->data.insert(w->data.end(), p, p + size);
+        return 1;
+    }
+};
+} // namespace
+
+bool PdfiumDocument::extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const {
+    out.clear();
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+    if (!m_doc) {
+        return false;
+    }
+    const int total = FPDF_GetPageCount(m_doc.get());
+    if (firstPage < 0 || lastPage < firstPage || lastPage >= total) {
+        return false;
+    }
+    FPDF_DOCUMENT dest = FPDF_CreateNewDocument();
+    if (!dest) {
+        return false;
+    }
+    const std::string range = std::to_string(firstPage + 1) + "-" + std::to_string(lastPage + 1);
+    bool ok = FPDF_ImportPages(dest, m_doc.get(), range.c_str(), 0) != 0;
+    MemoryWriter writer;
+    if (ok) {
+        ok = FPDF_SaveAsCopy(dest, &writer, 0) != 0 && !writer.failed && !writer.data.empty();
+    }
+    FPDF_CloseDocument(dest);
+    if (ok) {
+        out = std::move(writer.data);
+    }
+    return ok;
 }
 
 std::unique_ptr<IDocument> createDocument() {

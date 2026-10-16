@@ -1,4 +1,4 @@
-#include "engine/RenderWorker.h"
+﻿#include "engine/RenderWorker.h"
 #include "engine/SearchText.h"
 #include <algorithm>
 
@@ -221,6 +221,29 @@ void RenderWorker::requestPrintPage(int64_t documentId, int pageIndex, double sc
         } else {
             Q_EMIT printPageFailed(documentId, pageIndex);
         }
+    }});
+    m_cv.notify_one();
+}
+
+void RenderWorker::requestExtractPages(int64_t documentId, int firstPage, int lastPage) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load()) {
+        Q_EMIT extractPagesFailed(documentId, firstPage, lastPage);
+        return;
+    }
+    m_controlQueue.push_back({[this, documentId, firstPage, lastPage]() {
+        if (documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT extractPagesFailed(documentId, firstPage, lastPage);
+            return;
+        }
+        std::vector<uint8_t> bytes;
+        if (!m_workerDocument->extractPages(firstPage, lastPage, bytes)) {
+            Q_EMIT extractPagesFailed(documentId, firstPage, lastPage);
+            return;
+        }
+        Q_EMIT extractPagesReady(documentId, firstPage, lastPage,
+                                 QByteArray(reinterpret_cast<const char*>(bytes.data()),
+                                            static_cast<qsizetype>(bytes.size())));
     }});
     m_cv.notify_one();
 }

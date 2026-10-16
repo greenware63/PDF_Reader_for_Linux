@@ -1,4 +1,4 @@
-#include "PdfViewerWidget.h"
+﻿#include "PdfViewerWidget.h"
 #include "ImageUtils.h"
 #include <QPainter>
 #include <QFont>
@@ -360,6 +360,13 @@ QImage PdfViewerWidget::renderPageForPrint(int pageIndex, double scale, double d
     }
     pdf::PixelBuffer buf = m_renderWorker.renderPageForPrintSync(m_currentDocumentId, pageIndex, scale, dpr);
     return toQImage(buf, dpr).copy();
+}
+
+QByteArray PdfViewerWidget::extractPagesPdf(int firstPage, int lastPage) {
+    if (!isDocumentOpen() || firstPage < 0 || lastPage < firstPage || lastPage >= m_pageCount) {
+        return {};
+    }
+    return m_renderWorker.extractPagesSync(m_currentDocumentId, firstPage, lastPage);
 }
 
 void PdfViewerWidget::goToPage(int pageIndex) {

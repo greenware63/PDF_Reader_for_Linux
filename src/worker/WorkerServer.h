@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <QObject>
 #include <QLocalServer>
@@ -43,6 +43,8 @@ private Q_SLOTS:
     void onThumbnailFailed(int64_t documentId, int pageIndex);
     void onPrintPageReady(int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer);
     void onPrintPageFailed(int64_t documentId, int pageIndex);
+    void onExtractPagesReady(int64_t documentId, int firstPage, int lastPage, const QByteArray& pdfBytes);
+    void onExtractPagesFailed(int64_t documentId, int firstPage, int lastPage);
 
 private:
     void dispatchMessage(ipc::MessageType type, const QByteArray& payload);

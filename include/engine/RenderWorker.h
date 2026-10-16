@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <QObject>
 #include <QMetaType>
@@ -98,6 +98,12 @@ public:
     void requestPrintPage(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0);
 
     /**
+     * @brief Extracts pages [firstPage, lastPage] into a standalone vector PDF on the worker thread.
+     * Delivered via extractPagesReady() or extractPagesFailed().
+     */
+    void requestExtractPages(int64_t documentId, int firstPage, int lastPage);
+
+    /**
      * @brief Sets current request generation. Discards queued requests with older generations.
      */
     void setGeneration(uint64_t generation);
@@ -190,6 +196,9 @@ Q_SIGNALS:
     /// Emitted when full page rendering for printing completes.
     void printPageReady(int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer);
     void printPageFailed(int64_t documentId, int pageIndex);
+    /// Emitted when a page-range extraction to a standalone PDF completes.
+    void extractPagesReady(int64_t documentId, int firstPage, int lastPage, const QByteArray& pdfBytes);
+    void extractPagesFailed(int64_t documentId, int firstPage, int lastPage);
     /// Emitted when text extraction for a page completes on the worker thread.
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
     /// Emitted when search finds matches on a page.

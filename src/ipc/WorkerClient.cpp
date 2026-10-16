@@ -1,4 +1,4 @@
-#include "WorkerClient.h"
+﻿#include "WorkerClient.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -36,6 +36,8 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::ThumbnailFailedResponse:
         case MessageType::RenderPageResponse:
         case MessageType::RenderPageFailedResponse:
+        case MessageType::ExtractPagesResponse:
+        case MessageType::ExtractPagesFailedResponse:
         case MessageType::WorkerError:
         case MessageType::WorkerControlResponse:
             return true;
@@ -442,6 +444,50 @@ pdf::PixelBuffer WorkerClient::renderPageForPrintSync(int64_t documentId, int pa
     return result;
 }
 
+void WorkerClient::requestExtractPages(int64_t documentId, int firstPage, int lastPage) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT extractPagesFailed(documentId, firstPage, lastPage);
+        return;
+    }
+    sendMessage(MessageType::ExtractPagesRequest,
+                serialize(ExtractPagesRequest{documentId, firstPage, lastPage}));
+}
+
+QByteArray WorkerClient::extractPagesSync(int64_t documentId, int firstPage, int lastPage, int timeoutMs) {
+    if (!ensureConnected()) {
+        return {};
+    }
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    QByteArray result;
+
+    const auto readyConn = connect(this, &WorkerClient::extractPagesReady, &loop,
+        [&](int64_t docId, int a, int b, const QByteArray& bytes) {
+            if (docId == documentId && a == firstPage && b == lastPage) {
+                result = bytes;
+                loop.quit();
+            }
+        });
+    const auto failConn = connect(this, &WorkerClient::extractPagesFailed, &loop,
+        [&](int64_t docId, int a, int b) {
+            if (docId == documentId && a == firstPage && b == lastPage) {
+                loop.quit();
+            }
+        });
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestExtractPages(documentId, firstPage, lastPage);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    return result;
+}
+
 void WorkerClient::stop() {
     if (m_stopping) {
         return;
@@ -672,6 +718,20 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
             RenderPageFailedResponse response;
             if (deserialize(payload, response)) {
                 Q_EMIT printPageFailed(response.documentId, response.pageIndex);
+            }
+            break;
+        }
+        case MessageType::ExtractPagesResponse: {
+            ExtractPagesResponse response;
+            if (deserialize(payload, response)) {
+                Q_EMIT extractPagesReady(response.documentId, response.firstPage, response.lastPage, response.pdfBytes);
+            }
+            break;
+        }
+        case MessageType::ExtractPagesFailedResponse: {
+            ExtractPagesFailedResponse response;
+            if (deserialize(payload, response)) {
+                Q_EMIT extractPagesFailed(response.documentId, response.firstPage, response.lastPage);
             }
             break;
         }

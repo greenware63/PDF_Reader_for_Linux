@@ -1,4 +1,4 @@
-#include "WorkerServer.h"
+﻿#include "WorkerServer.h"
 #include <QCoreApplication>
 #include <QRandomGenerator>
 #include <algorithm>
@@ -24,6 +24,7 @@ bool isRequestType(uint32_t type) {
         case ipc::MessageType::CancelSearchRequest:
         case ipc::MessageType::ThumbnailRequest:
         case ipc::MessageType::RenderPageRequest:
+        case ipc::MessageType::ExtractPagesRequest:
         case ipc::MessageType::SharedMemoryAck:
         case ipc::MessageType::WorkerControlRequest:
             return true;
@@ -62,6 +63,10 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
             this, &WorkerServer::onPrintPageReady, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::printPageFailed,
             this, &WorkerServer::onPrintPageFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::extractPagesReady,
+            this, &WorkerServer::onExtractPagesReady, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::extractPagesFailed,
+            this, &WorkerServer::onExtractPagesFailed, Qt::QueuedConnection);
 }
 
 WorkerServer::~WorkerServer() {
@@ -264,6 +269,14 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             break;
         }
 
+        case ipc::MessageType::ExtractPagesRequest: {
+            ipc::ExtractPagesRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestExtractPages(req.documentId, req.firstPage, req.lastPage);
+            }
+            break;
+        }
+
         case ipc::MessageType::SharedMemoryAck: {
             ipc::SharedMemoryAck ack;
             if (ipc::deserialize(payload, ack)) {
@@ -431,6 +444,22 @@ void WorkerServer::onPrintPageReady(int64_t documentId, int pageIndex, const pdf
 void WorkerServer::onPrintPageFailed(int64_t documentId, int pageIndex) {
     ipc::RenderPageFailedResponse resp{documentId, pageIndex};
     sendPacket(ipc::MessageType::RenderPageFailedResponse, ipc::serialize(resp));
+}
+
+void WorkerServer::onExtractPagesReady(int64_t documentId, int firstPage, int lastPage, const QByteArray& pdfBytes) {
+    // Leave headroom for the response header; oversized results are reported as failures
+    // instead of tripping the protocol payload cap.
+    if (pdfBytes.size() > static_cast<qsizetype>(ipc::MAX_IPC_PAYLOAD_SIZE - 1024)) {
+        onExtractPagesFailed(documentId, firstPage, lastPage);
+        return;
+    }
+    sendPacket(ipc::MessageType::ExtractPagesResponse,
+               ipc::serialize(ipc::ExtractPagesResponse{documentId, firstPage, lastPage, pdfBytes}));
+}
+
+void WorkerServer::onExtractPagesFailed(int64_t documentId, int firstPage, int lastPage) {
+    sendPacket(ipc::MessageType::ExtractPagesFailedResponse,
+               ipc::serialize(ipc::ExtractPagesFailedResponse{documentId, firstPage, lastPage}));
 }
 
 } // namespace pdf::worker

@@ -11,6 +11,7 @@
 #include <QHeaderView>
 #include <QToolBar>
 #include <QFileDialog>
+#include <QSaveFile>
 #include <QStatusBar>
 #include <QMenuBar>
 #include <QAction>
@@ -791,35 +792,41 @@ bool MainWindow::exportDocumentToPdf(const QString& outputPath, int fromPage, in
         return false;
     }
 
-    QPrinter printer(QPrinter::HighResolution);
-    printer.setOutputFormat(QPrinter::PdfFormat);
-    printer.setOutputFileName(outputPath);
-
     const int totalPages = viewer->pageCount();
-    int start = (fromPage >= 0) ? std::clamp(fromPage, 0, totalPages - 1) : 0;
-    int end = (toPage >= 0) ? std::clamp(toPage, start, totalPages - 1) : (totalPages - 1);
+    const int start = (fromPage >= 0) ? std::clamp(fromPage, 0, totalPages - 1) : 0;
+    const int end = (toPage >= 0) ? std::clamp(toPage, start, totalPages - 1) : (totalPages - 1);
 
-    QPainter painter;
-    if (!painter.begin(&printer)) {
+    QSaveFile out(outputPath);
+    if (!out.open(QIODevice::WriteOnly)) {
         return false;
     }
 
-    for (int p = start; p <= end; ++p) {
-        if (p > start) {
-            printer.newPage();
+    if (start == 0 && end == totalPages - 1 && !viewer->currentFilePath().isEmpty()) {
+        // Whole document: copy the original bytes. This is lossless (outlines, forms, metadata,
+        // encryption) and avoids pushing the entire file through the IPC channel.
+        const QString source = viewer->currentFilePath();
+        if (QFileInfo(source).canonicalFilePath() == QFileInfo(outputPath).canonicalFilePath()) {
+            return false;
         }
-        QImage pageImg = viewer->renderPageForPrint(p, 1.0, 2.0);
-        if (pageImg.isNull()) {
-            continue;
+        QFile in(source);
+        if (!in.open(QIODevice::ReadOnly)) {
+            return false;
         }
-        const QRect targetRect = printer.pageLayout().paintRectPixels(printer.resolution());
-        QImage scaled = pageImg.scaled(targetRect.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        int x = targetRect.left() + (targetRect.width() - scaled.width()) / 2;
-        int y = targetRect.top() + (targetRect.height() - scaled.height()) / 2;
-        painter.drawImage(x, y, scaled);
+        while (!in.atEnd()) {
+            const QByteArray chunk = in.read(1 << 20);
+            if (chunk.isEmpty() || out.write(chunk) != chunk.size()) {
+                return false;
+            }
+        }
+    } else {
+        // Page subset: PDFium copies the selected pages into a new document in the sandboxed worker.
+        // The worker cannot write to user-chosen paths (Landlock), so the bytes come back over IPC.
+        const QByteArray pdfBytes = viewer->extractPagesPdf(start, end);
+        if (pdfBytes.isEmpty() || out.write(pdfBytes) != pdfBytes.size()) {
+            return false;
+        }
     }
-    painter.end();
-    return true;
+    return out.commit();
 }
 
 void MainWindow::printDocument() {

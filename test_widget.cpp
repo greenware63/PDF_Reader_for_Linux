@@ -2696,6 +2696,27 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        // 5. Whole-document export is a lossless copy of the source and keeps the page count
+        {
+            QString fullPath = QStringLiteral("exported_full_doc.pdf");
+            QFile::remove(fullPath);
+            if (!window.exportDocumentToPdf(fullPath) || !QFileInfo::exists(fullPath)) {
+                std::cerr << "[FAIL] Full-document export failed" << std::endl;
+                return 1;
+            }
+            QFile a(QString::fromStdString(sampleDoc)), b(fullPath);
+            if (!a.open(QIODevice::ReadOnly) || !b.open(QIODevice::ReadOnly) || a.readAll() != b.readAll()) {
+                std::cerr << "[FAIL] Full-document export is not a byte-identical copy" << std::endl;
+                return 1;
+            }
+            // Exporting onto the source itself must be refused and must not corrupt it
+            if (window.exportDocumentToPdf(QString::fromStdString(sampleDoc))) {
+                std::cerr << "[FAIL] Export over the source file should be refused" << std::endl;
+                return 1;
+            }
+            QFile::remove(fullPath);
+        }
+
         // 3. Open exported PDF in a new tab and verify page count
         int exportTabIndex = window.openFileInNewTab(exportPath);
         if (exportTabIndex < 0) {
@@ -2715,6 +2736,24 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Exported PDF page count expected 2, got "
                       << (exportViewer ? exportViewer->pageCount() : -1) << std::endl;
             return 1;
+        }
+
+        // 4. Export must be vector: no embedded raster images, and far smaller than a page bitmap export
+        {
+            QFile ef(exportPath);
+            if (!ef.open(QIODevice::ReadOnly)) {
+                std::cerr << "[FAIL] Cannot reopen exported PDF" << std::endl;
+                return 1;
+            }
+            const QByteArray bytes = ef.readAll();
+            if (!bytes.startsWith("%PDF-") || bytes.contains("/Subtype/Image") || bytes.contains("/Subtype /Image")) {
+                std::cerr << "[FAIL] Exported PDF is not a vector PDF (contains raster image XObject)" << std::endl;
+                return 1;
+            }
+            if (bytes.size() > 100 * 1024) {
+                std::cerr << "[FAIL] Exported PDF unexpectedly large: " << bytes.size() << " bytes" << std::endl;
+                return 1;
+            }
         }
 
         // Cleanup

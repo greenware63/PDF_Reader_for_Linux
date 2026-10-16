@@ -1,4 +1,4 @@
-#include "ipc/IpcMessages.h"
+﻿#include "ipc/IpcMessages.h"
 #include <algorithm>
 
 namespace pdf {
@@ -805,6 +805,39 @@ QDataStream& operator>>(QDataStream& in, RenderPageFailedResponse& res) {
     in >> docId >> pIdx;
     res.documentId = docId;
     res.pageIndex = pIdx;
+    return in;
+}
+
+// ExtractPagesRequest / Response / Failed
+QDataStream& operator<<(QDataStream& out, const ExtractPagesRequest& req) {
+    out << static_cast<qint64>(req.documentId) << static_cast<qint32>(req.firstPage) << static_cast<qint32>(req.lastPage);
+    return out;
+}
+QDataStream& operator>>(QDataStream& in, ExtractPagesRequest& req) {
+    qint64 docId = 0; qint32 a = 0, b = 0;
+    in >> docId >> a >> b;
+    req.documentId = docId; req.firstPage = a; req.lastPage = b;
+    return in;
+}
+QDataStream& operator<<(QDataStream& out, const ExtractPagesResponse& res) {
+    out << static_cast<qint64>(res.documentId) << static_cast<qint32>(res.firstPage)
+        << static_cast<qint32>(res.lastPage) << res.pdfBytes;
+    return out;
+}
+QDataStream& operator>>(QDataStream& in, ExtractPagesResponse& res) {
+    qint64 docId = 0; qint32 a = 0, b = 0;
+    in >> docId >> a >> b >> res.pdfBytes;
+    res.documentId = docId; res.firstPage = a; res.lastPage = b;
+    return in;
+}
+QDataStream& operator<<(QDataStream& out, const ExtractPagesFailedResponse& res) {
+    out << static_cast<qint64>(res.documentId) << static_cast<qint32>(res.firstPage) << static_cast<qint32>(res.lastPage);
+    return out;
+}
+QDataStream& operator>>(QDataStream& in, ExtractPagesFailedResponse& res) {
+    qint64 docId = 0; qint32 a = 0, b = 0;
+    in >> docId >> a >> b;
+    res.documentId = docId; res.firstPage = a; res.lastPage = b;
     return in;
 }
 

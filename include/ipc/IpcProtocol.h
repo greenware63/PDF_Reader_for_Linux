@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 
@@ -52,6 +52,9 @@ enum class MessageType : uint32_t {
     RenderPageRequest = 70,
     RenderPageResponse = 71,
     RenderPageFailedResponse = 72,
+    ExtractPagesRequest = 73,
+    ExtractPagesResponse = 74,
+    ExtractPagesFailedResponse = 75,
 
     // Error / Diagnostic
     WorkerError = 99

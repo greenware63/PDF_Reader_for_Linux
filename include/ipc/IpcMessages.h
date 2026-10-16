@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "ipc/IpcProtocol.h"
 #include "engine/IDocument.h"
@@ -225,6 +225,33 @@ struct RenderPageFailedResponse {
     int64_t documentId{0};
     int pageIndex{0};
 };
+
+struct ExtractPagesRequest {
+    int64_t documentId{0};
+    int firstPage{0};
+    int lastPage{0};
+};
+
+struct ExtractPagesResponse {
+    int64_t documentId{0};
+    int firstPage{0};
+    int lastPage{0};
+    QByteArray pdfBytes;
+};
+
+struct ExtractPagesFailedResponse {
+    int64_t documentId{0};
+    int firstPage{0};
+    int lastPage{0};
+};
+
+// Message stream operators
+QDataStream& operator<<(QDataStream& out, const ExtractPagesRequest& req);
+QDataStream& operator>>(QDataStream& in, ExtractPagesRequest& req);
+QDataStream& operator<<(QDataStream& out, const ExtractPagesResponse& res);
+QDataStream& operator>>(QDataStream& in, ExtractPagesResponse& res);
+QDataStream& operator<<(QDataStream& out, const ExtractPagesFailedResponse& res);
+QDataStream& operator>>(QDataStream& in, ExtractPagesFailedResponse& res);
 
 // Message stream operators
 QDataStream& operator<<(QDataStream& out, const OpenDocumentRequest& req);

@@ -96,6 +96,16 @@ public:
     virtual PixelBuffer renderThumbnail(int pageIndex, int targetWidth) = 0;
 
     /**
+     * @brief Serializes pages [firstPage, lastPage] (0-based, inclusive) into a standalone PDF in memory.
+     * The output keeps text, fonts, vectors and links of the copied pages (no rasterization).
+     * @return true on success; the default implementation does not support extraction.
+     */
+    virtual bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const {
+        (void)firstPage; (void)lastPage; (void)out;
+        return false;
+    }
+
+    /**
      * @brief Closes the open document and releases engine resources.
      */
     virtual void close() = 0;
