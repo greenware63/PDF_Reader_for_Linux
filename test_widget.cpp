@@ -71,6 +71,47 @@ static void generateOutlinePdfFixture(const std::string& path, bool cyclicSiblin
     out.write(pdf.data(), pdf.size());
 }
 
+static void generatePageLabelsPdfFixture(const std::string& path) {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    auto addObj = [&](int num, const std::string& content) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(num) + " 0 obj\n" + content + "\nendobj\n";
+    };
+
+    // 1: Catalog with /PageLabels dictionary
+    // Page 0..1: Roman lower (/r) -> "i", "ii"
+    // Page 2..3: Decimal with prefix "A-" (/P (A-) /S /D) -> "A-1", "A-2"
+    addObj(1, "<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [ 0 << /S /r >> 2 << /P (A-) /S /D >> ] >> >>");
+
+    // 2: Pages
+    addObj(2, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R] /Count 4 >>");
+
+    // 3: Page 0
+    addObj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    // 4: Page 1
+    addObj(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    // 5: Page 2
+    addObj(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    // 6: Page 3
+    addObj(6, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size " + std::to_string(offsets.size() + 1) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
+
 static void generateMultiPagePdf(const std::string& path, int count = 5) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
@@ -2460,7 +2501,38 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::cout << "  -> Passed: ThumbnailListWidget creation, page labels, IPC thumbnail delivery, two-way viewport sync, and teardown verified." << std::endl;
+        // 7. Verify document WITH /PageLabels dictionary displays custom page labels on thumbnail badges
+        std::string labelsDoc = "widget_test_page_labels.pdf";
+        generatePageLabelsPdfFixture(labelsDoc);
+        if (!window.openFile(QString::fromStdString(labelsDoc))) {
+            std::cerr << "[FAIL] Failed to open document with page labels in thumbnail test" << std::endl;
+            return 1;
+        }
+
+        QElapsedTimer labelsTimer;
+        labelsTimer.start();
+        while (labelsTimer.elapsed() < 5000 && !viewer->isDocumentOpen()) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+
+        if (!viewer->isDocumentOpen() || viewer->pageCount() != 4 || thumbWidget->count() != 4) {
+            std::cerr << "[FAIL] Document with page labels failed to open properly" << std::endl;
+            return 1;
+        }
+
+        const QStringList expectedLabels = {"i", "ii", "A-1", "A-2"};
+        for (int i = 0; i < 4; ++i) {
+            auto* it = thumbWidget->item(i);
+            if (it->text() != expectedLabels[i]) {
+                std::cerr << "[FAIL] Custom page label for page " << i << " expected '"
+                          << expectedLabels[i].toStdString() << "', got '" << it->text().toStdString() << "'" << std::endl;
+                return 1;
+            }
+        }
+        viewer->closeDocument();
+
+        std::cout << "  -> Passed: ThumbnailListWidget creation, page labels (with and without dictionary), IPC thumbnail delivery, two-way viewport sync, and teardown verified." << std::endl;
     }
 
     // Test 36: Multi-Document Tabs and Recent Files Session Management

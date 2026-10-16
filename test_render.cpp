@@ -81,6 +81,47 @@ static void generateOutlinePdfFixture(const std::string& path, bool cyclicSiblin
     out.write(pdf.data(), pdf.size());
 }
 
+static void generatePageLabelsPdfFixture(const std::string& path) {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    auto addObj = [&](int num, const std::string& content) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(num) + " 0 obj\n" + content + "\nendobj\n";
+    };
+
+    // 1: Catalog with /PageLabels dictionary
+    // Page 0..1: Roman lower (/r) -> "i", "ii"
+    // Page 2..3: Decimal with prefix "A-" (/P (A-) /S /D) -> "A-1", "A-2"
+    addObj(1, "<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [ 0 << /S /r >> 2 << /P (A-) /S /D >> ] >> >>");
+
+    // 2: Pages
+    addObj(2, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R] /Count 4 >>");
+
+    // 3: Page 0
+    addObj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    // 4: Page 1
+    addObj(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    // 5: Page 2
+    addObj(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+    // 6: Page 3
+    addObj(6, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>");
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size " + std::to_string(offsets.size() + 1) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
+
 static void generateMultiPageFixture(const std::string& path) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
@@ -1553,8 +1594,55 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Document Outline hierarchy, destination validity, and cyclic-link safety verified." << std::endl;
     }
 
+    std::cout << "[TEST 19] Testing PDF page labels with and without /PageLabels dictionaries..." << std::endl;
+    {
+        // 1. Without /PageLabels dictionary: default 1-based decimal labels ("1", "2", "3", "4")
+        std::string noLabelsPdf = "render_no_page_labels.pdf";
+        generateMultiPageFixture(noLabelsPdf);
+        auto docNoLabels = pdf::createDocument();
+        if (docNoLabels->loadFromFile(noLabelsPdf) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document without page labels." << std::endl;
+            return 1;
+        }
+        auto labelsNoDict = docNoLabels->getPageLabels();
+        if (labelsNoDict.size() != 4) {
+            std::cerr << "[FAIL] Expected 4 page labels, got: " << labelsNoDict.size() << std::endl;
+            return 1;
+        }
+        for (int i = 0; i < 4; ++i) {
+            std::string expected = std::to_string(i + 1);
+            if (labelsNoDict[i] != expected) {
+                std::cerr << "[FAIL] Default label mismatch for page " << i << ": expected " << expected << ", got " << labelsNoDict[i] << std::endl;
+                return 1;
+            }
+        }
+
+        // 2. With /PageLabels dictionary: Roman numerals ("i", "ii") and prefixed decimal ("A-1", "A-2")
+        std::string withLabelsPdf = "render_with_page_labels.pdf";
+        generatePageLabelsPdfFixture(withLabelsPdf);
+        auto docWithLabels = pdf::createDocument();
+        if (docWithLabels->loadFromFile(withLabelsPdf) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document with page labels." << std::endl;
+            return 1;
+        }
+        auto labelsWithDict = docWithLabels->getPageLabels();
+        if (labelsWithDict.size() != 4) {
+            std::cerr << "[FAIL] Expected 4 page labels, got: " << labelsWithDict.size() << std::endl;
+            return 1;
+        }
+        const std::vector<std::string> expectedWithDict = {"i", "ii", "A-1", "A-2"};
+        for (size_t i = 0; i < expectedWithDict.size(); ++i) {
+            if (labelsWithDict[i] != expectedWithDict[i]) {
+                std::cerr << "[FAIL] Dictionary label mismatch for page " << i << ": expected " << expectedWithDict[i] << ", got " << labelsWithDict[i] << std::endl;
+                return 1;
+            }
+        }
+
+        std::cout << "  -> Passed: Page label extraction verified with and without /PageLabels dictionaries." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 18 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 19 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
