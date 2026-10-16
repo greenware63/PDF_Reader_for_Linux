@@ -1,5 +1,6 @@
 ﻿#include "MainWindow.h"
 #include "ThumbnailListWidget.h"
+#include <QCoreApplication>
 #include <QDockWidget>
 #include <QTabWidget>
 #include <QTabBar>

@@ -1,29 +1,29 @@
-name: Linux CI & Sanitizers
+name: Linux CI (Release & Sanitizers)
 
 on:
   push:
-    branches: ["main", "greenware63-pdf-search-fixes"]
+    branches: [ main, greenware63-pdf-search-fixes ]
   pull_request:
-    branches: ["main"]
-
-permissions:
-  contents: read
+    branches: [ main, greenware63-pdf-search-fixes ]
 
 jobs:
   build-and-test:
+    name: Ubuntu 24.04 (${{ matrix.build_type }})
     runs-on: ubuntu-24.04
+
     strategy:
+      fail-fast: false
       matrix:
-        build_type: [Release, Sanitizer, ThreadSanitizer]
+        build_type: [ Release, AddressSanitizer, ThreadSanitizer ]
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Qt 6 and Build Tools
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get install -y \
             build-essential \
             cmake \
             ninja-build \
@@ -37,11 +37,11 @@ jobs:
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release
 
-      - name: Configure CMake (Sanitizer)
-        if: matrix.build_type == 'Sanitizer'
+      - name: Configure CMake (AddressSanitizer / UndefinedBehaviorSanitizer)
+        if: matrix.build_type == 'AddressSanitizer'
         run: |
           cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
@@ -62,4 +62,12 @@ jobs:
           ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
           TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1:suppressions=${{ github.workspace }}/ci/tsan_suppressions.txt"
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          if [ "${{ matrix.build_type }}" = "ThreadSanitizer" ]; then
+            # TSan aborts inside its fork handler when Qt launches the sandboxed pdf_worker process
+            # (CHECK failed in tsan_rtl.cpp), so only suites that run in a single process go through TSan.
+            # The multi-process suites are covered by the Release and ASan/UBSan jobs.
+            ctest --test-dir build --output-on-failure -R "EngineRenderTestSuite|DocumentLayoutTestSuite|TileCacheTestSuite"
+          else
+            ctest --test-dir build --output-on-failure
+          fi
