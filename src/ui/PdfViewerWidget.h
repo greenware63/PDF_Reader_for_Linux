@@ -74,6 +74,12 @@ public:
     void zoomOut();
     void zoomReset();
     void zoomFitWidth();
+    /// Fits the whole current page (or spread, in the two-page modes) into the viewport.
+    void zoomFitPage();
+
+    /// Page arrangement: continuous, single page, two-page spreads (optionally with a stand-alone cover).
+    void setViewMode(layout::ViewMode mode);
+    layout::ViewMode viewMode() const noexcept { return m_layout.viewMode(); }
 
     void goToPage(int pageIndex);
     /// Navigates to a normalized vertical position in the displayed page.
@@ -169,6 +175,7 @@ Q_SIGNALS:
     void searchFinished(bool truncated);
     void outlineReady(const std::vector<pdf::OutlineItem>& outline);
     void darkModeChanged(bool isDark);
+    void viewModeChanged(layout::ViewMode mode);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -207,6 +214,10 @@ private:
     void updateScrollBars();
 
     void goToPageImpl(int pageIndex, std::optional<double> targetYFraction);
+    /// SinglePage mode: makes `pageIndex` the focus page (relayout) so it is reachable. No-op otherwise.
+    void ensurePageShown(int pageIndex);
+    /// Page-flip accumulator for wheel scrolling past the edge in SinglePage mode.
+    int m_pageFlipAccumulator{0};
 
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
     void drawPendingPlaceholder(QPainter& painter, const QRectF& rect);

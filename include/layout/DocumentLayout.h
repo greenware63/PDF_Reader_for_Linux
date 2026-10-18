@@ -69,12 +69,21 @@ struct Rect64 {
     bool isValid() const { return width > 0 && height > 0; }
 };
 
+/// How pages are arranged in document space.
+enum class ViewMode {
+    Continuous,    ///< One page per row, scrolling continuously through the whole document
+    SinglePage,    ///< Only the focus page is reachable; navigation changes the focus page
+    TwoPage,       ///< Spreads (1-2, 3-4, ...) scrolling continuously
+    TwoPageCover   ///< Like TwoPage, but page 1 stands alone (book style: 1, 2-3, 4-5, ...)
+};
+
 struct PageLayout {
     int pageIndex{0};
     int64_t leftPixel{0};    // X offset from left in document coordinates
     int64_t topPixel{0};     // Y offset from top in document coordinates
     int64_t widthPixel{0};   // Page width in device pixels
     int64_t heightPixel{0};  // Page height in device pixels
+    int64_t rowBottomPixel{0}; // Bottom edge of the row this page sits in (non-decreasing over page index)
     double widthPoints{0.0};
     double heightPoints{0.0};
 
@@ -135,6 +144,38 @@ public:
     void updateLayout(double scale, double dpr, int64_t viewportWidth = 0,
                       int64_t pageGapPixels = 16, int64_t horizontalMarginPixels = 16);
 
+    /**
+     * @brief Selects how pages are arranged. Takes effect on the next updateLayout()/setPageSizes().
+     */
+    void setViewMode(ViewMode mode) { m_viewMode = mode; }
+    ViewMode viewMode() const { return m_viewMode; }
+
+    /**
+     * @brief In SinglePage mode the only page that is shown; ignored in other modes. Clamped to a valid page.
+     * Takes effect on the next updateLayout().
+     */
+    void setFocusPage(int pageIndex) { m_focusPage = pageIndex; }
+    int focusPage() const { return m_focusPage; }
+
+    /// Number of pages sharing a row with `pageIndex` (1 or 2) and the row's first page index.
+    int rowFirstPage(int pageIndex) const;
+    int rowPageCount(int pageIndex) const;
+
+    /**
+     * @brief Width and height, in PDF points, of the row containing `pageIndex`
+     * (sum of widths / max of heights in two-page modes). Used by fit-page.
+     */
+    std::pair<double, double> rowSizePoints(int pageIndex) const;
+
+    /**
+     * @brief Widest row in PDF points (summed page widths for spreads), the focus page in SinglePage mode.
+     * Used by fit-width.
+     */
+    double widestRowPoints() const;
+
+    /// Horizontal gap between the two pages of a spread, in device pixels.
+    int64_t columnGapPixels() const { return m_pageGap; }
+
     int pageCount() const { return static_cast<int>(m_pages.size()); }
     int64_t totalDocumentHeight() const { return m_totalHeight; }
     int64_t maxDocumentWidth() const { return m_maxWidth; }
@@ -188,6 +229,8 @@ private:
     int64_t m_pageGap{16};
     int64_t m_horizontalMargin{16};
     int64_t m_viewportWidth{0};
+    ViewMode m_viewMode{ViewMode::Continuous};
+    int m_focusPage{0};
     double m_scale{1.0};
     double m_dpr{1.0};
 };

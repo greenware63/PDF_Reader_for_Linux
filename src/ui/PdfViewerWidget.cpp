@@ -139,6 +139,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_hasDocument = true;
     m_currentFilePath = filePath;
     m_pageCount = openResult.pageCount;
+    m_layout.setFocusPage(0);
     m_layout.setPageSizes(openResult.pageSizes);
     m_pageLabels.clear();
     m_pageLabels.reserve(m_pageCount);
@@ -321,7 +322,8 @@ void PdfViewerWidget::restoreReadingPosition(int pageIndex, double zoom, int64_t
     if (zoom >= 0.1 && zoom <= 10.0) {
         setZoom(zoom);
     }
-    if (scrollY > 0 || scrollX > 0) {
+    // Saved scroll offsets are in continuous-layout coordinates; other modes restore by page.
+    if ((scrollY > 0 || scrollX > 0) && m_layout.viewMode() == layout::ViewMode::Continuous) {
         setDocScrollPosition(scrollX, scrollY);
         viewport()->update();
     } else if (pageIndex >= 0 && pageIndex < pageCount()) {
@@ -343,15 +345,57 @@ void PdfViewerWidget::requestThumbnail(int pageIndex, int targetWidth) {
 }
 
 void PdfViewerWidget::nextPage() {
-    if (m_currentPage + 1 < pageCount()) {
-        goToPage(m_currentPage + 1);
+    // In the two-page modes a "page" step moves by a whole spread.
+    const int target = m_layout.rowFirstPage(m_currentPage) + m_layout.rowPageCount(m_currentPage);
+    if (target < pageCount()) {
+        goToPage(target);
     }
 }
 
 void PdfViewerWidget::previousPage() {
-    if (m_currentPage > 0) {
-        goToPage(m_currentPage - 1);
+    const int rowFirst = m_layout.rowFirstPage(m_currentPage);
+    if (rowFirst > 0) {
+        goToPage(m_layout.rowFirstPage(rowFirst - 1));
+    } else if (m_currentPage > rowFirst) {
+        goToPage(rowFirst);
     }
+}
+
+void PdfViewerWidget::ensurePageShown(int pageIndex) {
+    if (m_layout.viewMode() != layout::ViewMode::SinglePage || m_layout.focusPage() == pageIndex) {
+        return;
+    }
+    const double dpr = effectiveDpr();
+    const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
+    m_layout.setFocusPage(pageIndex);
+    m_layout.updateLayout(pdf::quantizeScale(m_scale), dpr, vpW);
+    updateScrollBars();
+    // Document coordinates changed meaning; drop work queued for the previous page position.
+    ++m_currentGeneration;
+    m_inFlightKeys.clear();
+    m_renderWorker.setGeneration(m_currentGeneration);
+}
+
+void PdfViewerWidget::setViewMode(layout::ViewMode mode) {
+    if (mode == m_layout.viewMode()) {
+        return;
+    }
+    const int page = std::clamp(m_currentPage, 0, std::max(0, pageCount() - 1));
+    m_layout.setViewMode(mode);
+    m_layout.setFocusPage(page);
+    m_pageFlipAccumulator = 0;
+    if (isDocumentOpen()) {
+        const double dpr = effectiveDpr();
+        const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
+        m_layout.updateLayout(pdf::quantizeScale(m_scale), dpr, vpW);
+        updateScrollBars();
+        ++m_currentGeneration;
+        m_inFlightKeys.clear();
+        m_renderWorker.setGeneration(m_currentGeneration);
+        goToPage(page);
+    }
+    Q_EMIT viewModeChanged(mode);
+    viewport()->update();
 }
 
 QImage PdfViewerWidget::renderPageForPrint(int pageIndex, double scale, double dpr) {
@@ -385,6 +429,7 @@ void PdfViewerWidget::goToPageImpl(int pageIndex, std::optional<double> targetYF
         return;
     }
 
+    ensurePageShown(pageIndex);
     const auto& pl = m_layout.getPageLayout(pageIndex);
 
     const int64_t oldScrollX = m_docScrollX;
@@ -496,21 +541,48 @@ void PdfViewerWidget::zoomFitWidth() {
     const double dpr = effectiveDpr();
     const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
     constexpr int64_t HORIZONTAL_MARGIN = 16;
-    const int64_t availableWidth = vpW - (2 * HORIZONTAL_MARGIN);
+    const bool twoUp = m_layout.viewMode() == layout::ViewMode::TwoPage ||
+                       m_layout.viewMode() == layout::ViewMode::TwoPageCover;
+    const int64_t availableWidth = vpW - (2 * HORIZONTAL_MARGIN) - (twoUp ? m_layout.columnGapPixels() : 0);
 
     if (availableWidth <= 0) {
         return;
     }
 
-    double maxPageWidthPoints = 0.0;
-    for (int i = 0; i < pageCount(); ++i) {
-        maxPageWidthPoints = std::max(maxPageWidthPoints, m_layout.getPageLayout(i).widthPoints);
-    }
-
-    if (maxPageWidthPoints > 0.0) {
-        double fitScale = static_cast<double>(availableWidth) / (maxPageWidthPoints * dpr);
+    // Widest page (continuous), widest spread (two-page modes) or the shown page (single page)
+    const double widestPoints = m_layout.widestRowPoints();
+    if (widestPoints > 0.0) {
+        double fitScale = static_cast<double>(availableWidth) / (widestPoints * dpr);
         setZoom(fitScale);
     }
+}
+
+void PdfViewerWidget::zoomFitPage() {
+    if (!isDocumentOpen() || pageCount() == 0) {
+        return;
+    }
+
+    const double dpr = effectiveDpr();
+    const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
+    const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
+    constexpr int64_t MARGIN = 16;
+    const bool twoUp = m_layout.viewMode() == layout::ViewMode::TwoPage ||
+                       m_layout.viewMode() == layout::ViewMode::TwoPageCover;
+    const int64_t availW = vpW - (2 * MARGIN) - (twoUp ? m_layout.columnGapPixels() : 0);
+    const int64_t availH = vpH - (2 * m_layout.columnGapPixels());
+    if (availW <= 0 || availH <= 0) {
+        return;
+    }
+
+    const int page = m_currentPage;
+    const auto [rowW, rowH] = m_layout.rowSizePoints(page);
+    if (rowW <= 0.0 || rowH <= 0.0) {
+        return;
+    }
+    const double fitScale = std::min(static_cast<double>(availW) / (rowW * dpr),
+                                     static_cast<double>(availH) / (rowH * dpr));
+    setZoom(fitScale);
+    goToPage(page);
 }
 
 void PdfViewerWidget::onScrollValueChanged() {
@@ -649,6 +721,33 @@ void PdfViewerWidget::wheelEvent(QWheelEvent* event) {
             m_wheelDeltaAccumulator += DELTA_THRESHOLD;
         }
         event->accept();
+    } else if (m_layout.viewMode() == layout::ViewMode::SinglePage && isDocumentOpen() &&
+               event->angleDelta().y() != 0) {
+        // Scrolling past the top/bottom edge of the page flips to the neighbouring page after two wheel notches
+        auto* vbar = verticalScrollBar();
+        const int dy = event->angleDelta().y();
+        const bool atBottom = vbar->value() >= vbar->maximum();
+        const bool atTop = vbar->value() <= vbar->minimum();
+        if (dy < 0 && atBottom) {
+            m_pageFlipAccumulator = std::max(0, m_pageFlipAccumulator) - dy;
+        } else if (dy > 0 && atTop) {
+            m_pageFlipAccumulator = std::min(0, m_pageFlipAccumulator) - dy;
+        } else {
+            m_pageFlipAccumulator = 0;
+        }
+        constexpr int FLIP_THRESHOLD = 240;
+        if (m_pageFlipAccumulator >= FLIP_THRESHOLD && m_currentPage + 1 < pageCount()) {
+            m_pageFlipAccumulator = 0;
+            goToPage(m_currentPage + 1);
+            event->accept();
+        } else if (m_pageFlipAccumulator <= -FLIP_THRESHOLD && m_currentPage > 0) {
+            m_pageFlipAccumulator = 0;
+            goToPage(m_currentPage - 1);
+            vbar->setValue(vbar->maximum()); // arrive at the bottom of the previous page
+            event->accept();
+        } else {
+            QAbstractScrollArea::wheelEvent(event);
+        }
     } else {
         QAbstractScrollArea::wheelEvent(event);
     }
@@ -1037,6 +1136,7 @@ void PdfViewerWidget::scrollToMatch(const pdf::SearchMatch& match) {
     if (!isDocumentOpen() || match.pageIndex < 0 || match.pageIndex >= pageCount()) {
         return;
     }
+    ensurePageShown(match.pageIndex);
     const auto& pl = m_layout.getPageLayout(match.pageIndex);
     const double dpr = effectiveDpr();
     const double effScale = pdf::quantizeScale(m_scale) * dpr;
@@ -1368,6 +1468,38 @@ void PdfViewerWidget::keyPressEvent(QKeyEvent* event) {
     const int singleStepY = verticalScrollBar()->singleStep() > 0 ? verticalScrollBar()->singleStep() : 40;
     const int singleStepX = horizontalScrollBar()->singleStep() > 0 ? horizontalScrollBar()->singleStep() : 40;
     const int pageStepY = verticalScrollBar()->pageStep() > 0 ? verticalScrollBar()->pageStep() : viewport()->height();
+
+    // 1b. SinglePage mode: paging past the edge of the page flips to the neighbouring page,
+    //     and Left/Right flip when the page has no horizontal scroll range.
+    if (m_layout.viewMode() == layout::ViewMode::SinglePage) {
+        const bool forward = (key == Qt::Key_PageDown) || (key == Qt::Key_Space && !(mods & Qt::ShiftModifier));
+        const bool backward = (key == Qt::Key_PageUp) || (key == Qt::Key_Space && (mods & Qt::ShiftModifier));
+        auto* vbar = verticalScrollBar();
+        if (forward && vbar->value() >= vbar->maximum()) {
+            nextPage();
+            event->accept();
+            return;
+        }
+        if (backward && vbar->value() <= vbar->minimum()) {
+            if (m_currentPage > 0) {
+                goToPage(m_currentPage - 1);
+                vbar->setValue(vbar->maximum());
+            }
+            event->accept();
+            return;
+        }
+        const bool noHScroll = horizontalScrollBar()->maximum() == 0;
+        if (noHScroll && mods == Qt::NoModifier && key == Qt::Key_Right) {
+            nextPage();
+            event->accept();
+            return;
+        }
+        if (noHScroll && mods == Qt::NoModifier && key == Qt::Key_Left) {
+            previousPage();
+            event->accept();
+            return;
+        }
+    }
 
     // 1. Home / End bounds navigation
     if (key == Qt::Key_Home && (mods == Qt::NoModifier || mods == Qt::ControlModifier)) {

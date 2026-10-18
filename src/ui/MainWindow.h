@@ -66,6 +66,9 @@ public:
 
     /// Dark mode / night inversion status.
     bool isDarkMode() const noexcept { return m_darkMode; }
+    layout::ViewMode viewMode() const noexcept { return m_viewMode; }
+    /// Applies the page arrangement to every open tab and to tabs opened later; remembered across sessions.
+    void setViewMode(layout::ViewMode mode);
     void setDarkMode(bool enabled);
 
     /// Reading position persistence across documents and sessions.
@@ -138,6 +141,8 @@ private:
     QStringList m_recentFiles;
     bool m_sidebarUserHidden{false};
     bool m_darkMode{false};
+    layout::ViewMode m_viewMode{layout::ViewMode::Continuous};
+    QAction* m_viewModeActions[4]{nullptr, nullptr, nullptr, nullptr};
 };
 
 } // namespace ui

@@ -545,8 +545,152 @@ int main() {
         std::cout << "  -> Passed: Compressed-scroll resize remapping edge case accurately verified." << std::endl;
     }
 
+    // Test 11: View modes (single page, two-page, two-page with cover)
+    std::cout << "[TEST 11] Testing view modes: row structure, no overlap, visible-page search vs brute force..." << std::endl;
+    {
+        std::mt19937 rng(12345);
+        std::uniform_real_distribution<double> wd(200.0, 900.0), hd(200.0, 1200.0);
+        for (int count : {1, 2, 3, 4, 5, 8, 9, 40}) {
+            std::vector<std::pair<double, double>> sizes;
+            for (int i = 0; i < count; ++i) sizes.push_back({wd(rng), hd(rng)});
+
+            for (auto mode : {layout::ViewMode::Continuous, layout::ViewMode::SinglePage,
+                              layout::ViewMode::TwoPage, layout::ViewMode::TwoPageCover}) {
+                layout::DocumentLayout l;
+                l.setViewMode(mode);
+                l.setFocusPage(count / 2);
+                l.setPageSizes(sizes);
+                l.updateLayout(1.0, 1.0, 1000);
+
+                // Row structure
+                for (int i = 0; i < count; ++i) {
+                    const int first = l.rowFirstPage(i);
+                    const int rc = l.rowPageCount(i);
+                    bool ok = first <= i && i < first + rc && first >= 0 && first + rc <= count;
+                    if (mode == layout::ViewMode::TwoPage) {
+                        ok = ok && (first % 2 == 0) && rc == ((first + 1 < count) ? 2 : 1);
+                    } else if (mode == layout::ViewMode::TwoPageCover) {
+                        ok = ok && ((first == 0 && rc == 1) || (first % 2 == 1 && rc == ((first + 1 < count) ? 2 : 1)));
+                    } else {
+                        ok = ok && rc == 1 && first == i;
+                    }
+                    if (!ok) {
+                        std::cerr << "[FAIL] Row structure wrong: mode=" << static_cast<int>(mode)
+                                  << " count=" << count << " page=" << i << std::endl;
+                        return 1;
+                    }
+                }
+
+                // Pages in the same row share a top and sit side by side without overlapping;
+                // different rows never overlap vertically; everything stays inside the content width.
+                for (int i = 0; i < count; ++i) {
+                    const auto& p = l.getPageLayout(i);
+                    if (mode != layout::ViewMode::SinglePage &&
+                        (p.leftPixel < 0 || p.rightPixel() > l.maxDocumentWidth())) {
+                        std::cerr << "[FAIL] Page outside content width in mode " << static_cast<int>(mode) << std::endl;
+                        return 1;
+                    }
+                    for (int j = i + 1; j < count; ++j) {
+                        const auto& q = l.getPageLayout(j);
+                        const bool sameRow = l.rowFirstPage(i) == l.rowFirstPage(j);
+                        const bool hOverlap = p.leftPixel < q.rightPixel() && q.leftPixel < p.rightPixel();
+                        const bool vOverlap = p.topPixel < q.bottomPixel() && q.topPixel < p.bottomPixel();
+                        if (sameRow && (p.topPixel != q.topPixel || hOverlap)) {
+                            std::cerr << "[FAIL] Pages in a spread overlap or are misaligned" << std::endl;
+                            return 1;
+                        }
+                        if (!sameRow && hOverlap && vOverlap) {
+                            std::cerr << "[FAIL] Pages of different rows overlap (mode " << static_cast<int>(mode) << ")" << std::endl;
+                            return 1;
+                        }
+                    }
+                }
+
+                // Binary-search visibility matches brute force over random viewports
+                const int64_t total = l.totalDocumentHeight();
+                for (int q = 0; q < 300; ++q) {
+                    const int64_t vpH = 50 + static_cast<int64_t>(rng() % 1500);
+                    const int64_t maxTop = std::max<int64_t>(0, total - vpH);
+                    const int64_t vpTop = static_cast<int64_t>(rng() % static_cast<uint64_t>(maxTop + 1));
+                    const auto fast = l.getVisiblePages(vpTop, vpH);
+                    const auto slow = bruteForceVisiblePages(l, vpTop, vpH);
+                    if (fast.firstVisiblePage != slow.firstVisiblePage || fast.lastVisiblePage != slow.lastVisiblePage) {
+                        std::cerr << "[FAIL] getVisiblePages mismatch: mode=" << static_cast<int>(mode)
+                                  << " count=" << count << " top=" << vpTop << " h=" << vpH
+                                  << " fast=[" << fast.firstVisiblePage << "," << fast.lastVisiblePage << "]"
+                                  << " slow=[" << slow.firstVisiblePage << "," << slow.lastVisiblePage << "]" << std::endl;
+                        return 1;
+                    }
+                }
+
+                // Single page: exactly the focus page is reachable
+                if (mode == layout::ViewMode::SinglePage) {
+                    const int f = l.focusPage();
+                    const auto vis = l.getVisiblePages(0, total);
+                    if (vis.firstVisiblePage != f || vis.lastVisiblePage != f) {
+                        std::cerr << "[FAIL] SinglePage shows pages [" << vis.firstVisiblePage << ","
+                                  << vis.lastVisiblePage << "] instead of " << f << std::endl;
+                        return 1;
+                    }
+                    if (l.getPageLayout(f).topPixel != 16) {
+                        std::cerr << "[FAIL] SinglePage focus page not at top gap" << std::endl;
+                        return 1;
+                    }
+                }
+
+                // Anchors round-trip onto the page they were taken from
+                for (int i = 0; i < count; ++i) {
+                    const auto& p = l.getPageLayout(i);
+                    if (!p.widthPixel || !p.heightPixel) continue;
+                    const auto a = l.createAnchor(p.leftPixel + p.widthPixel / 2, p.topPixel + p.heightPixel / 2);
+                    if (mode != layout::ViewMode::SinglePage && a.pageIndex != i) {
+                        std::cerr << "[FAIL] createAnchor picked page " << a.pageIndex << " instead of " << i
+                                  << " in mode " << static_cast<int>(mode) << std::endl;
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        // Spread geometry and fit helpers
+        layout::DocumentLayout l;
+        l.setViewMode(layout::ViewMode::TwoPageCover);
+        l.setPageSizes({{500, 700}, {400, 800}, {600, 600}, {300, 500}});
+        l.updateLayout(1.0, 1.0, 2000);
+        const auto size = l.rowSizePoints(1);
+        if (size.first != 1000.0 || size.second != 800.0) {
+            std::cerr << "[FAIL] rowSizePoints for spread wrong: " << size.first << "x" << size.second << std::endl;
+            return 1;
+        }
+        const auto cover = l.rowSizePoints(0);
+        if (cover.first != 1000.0 || cover.second != 700.0) {
+            std::cerr << "[FAIL] cover row should occupy a half-spread slot: " << cover.first << std::endl;
+            return 1;
+        }
+        if (l.widestRowPoints() != 1000.0) {
+            std::cerr << "[FAIL] widestRowPoints wrong: " << l.widestRowPoints() << std::endl;
+            return 1;
+        }
+        // Cover sits on the right half, the trailing single page on the left half
+        const auto& c0 = l.getPageLayout(0);
+        if (c0.leftPixel < l.maxDocumentWidth() / 2) {
+            std::cerr << "[FAIL] Cover page should sit right of the spine" << std::endl;
+            return 1;
+        }
+        l.setViewMode(layout::ViewMode::TwoPage);
+        l.setPageSizes({{500, 700}, {400, 800}, {600, 600}});
+        l.updateLayout(1.0, 1.0, 2000);
+        const auto& last = l.getPageLayout(2);
+        if (last.rightPixel() > l.maxDocumentWidth() / 2) {
+            std::cerr << "[FAIL] Trailing odd page should sit left of the spine" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: View-mode layouts verified against brute force across page counts and modes." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 10 DOCUMENT LAYOUT TESTS PASSED!   " << std::endl;
+    std::cout << " ALL 11 DOCUMENT LAYOUT TESTS PASSED!   " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

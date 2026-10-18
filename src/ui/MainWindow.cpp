@@ -15,6 +15,7 @@
 #include <QStatusBar>
 #include <QMenuBar>
 #include <QAction>
+#include <QActionGroup>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QCloseEvent>
@@ -111,6 +112,12 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
     QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
     m_darkMode = settings.value(QStringLiteral("darkMode"), false).toBool();
+    {
+        const int savedMode = settings.value(QStringLiteral("viewMode"), 0).toInt();
+        if (savedMode >= 0 && savedMode <= static_cast<int>(layout::ViewMode::TwoPageCover)) {
+            m_viewMode = static_cast<layout::ViewMode>(savedMode);
+        }
+    }
 
     setupUi();
     setupActions();
@@ -268,6 +275,7 @@ void MainWindow::setupUi() {
 PdfViewerWidget* MainWindow::createViewerTab(const QString& title) {
     auto* viewer = new PdfViewerWidget(m_docTabs);
     viewer->setDarkMode(m_darkMode);
+    viewer->setViewMode(m_viewMode);
     connectViewer(viewer);
     const QString tabTitle = title.isEmpty() ? tr("Untitled") : title;
     m_docTabs->addTab(viewer, tabTitle);
@@ -381,6 +389,40 @@ void MainWindow::setupActions() {
     m_darkModeAction->setCheckable(true);
     m_darkModeAction->setChecked(m_darkMode);
 
+    viewMenu->addSeparator();
+    {
+        struct ModeEntry { layout::ViewMode mode; const char* text; int key; };
+        const ModeEntry entries[] = {
+            {layout::ViewMode::Continuous,    QT_TR_NOOP("&Continuous"),                 Qt::Key_1},
+            {layout::ViewMode::SinglePage,    QT_TR_NOOP("Single &Page"),                Qt::Key_2},
+            {layout::ViewMode::TwoPage,       QT_TR_NOOP("&Two Pages"),                  Qt::Key_3},
+            {layout::ViewMode::TwoPageCover,  QT_TR_NOOP("Two Pages with Co&ver Page"),  Qt::Key_4},
+        };
+        auto* group = new QActionGroup(this);
+        group->setExclusive(true);
+        for (const auto& e : entries) {
+            QAction* a = viewMenu->addAction(tr(e.text));
+            a->setCheckable(true);
+            a->setShortcut(QKeySequence(Qt::CTRL | static_cast<Qt::Key>(e.key)));
+            a->setChecked(e.mode == m_viewMode);
+            group->addAction(a);
+            m_viewModeActions[static_cast<int>(e.mode)] = a;
+            const layout::ViewMode mode = e.mode;
+            connect(a, &QAction::triggered, this, [this, mode]() { setViewMode(mode); });
+        }
+    }
+    viewMenu->addSeparator();
+    {
+        QAction* fitWidth = viewMenu->addAction(tr("Fit &Width"), this, [this]() {
+            if (auto* v = currentViewer()) v->zoomFitWidth();
+        });
+        fitWidth->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_8));
+        QAction* fitPage = viewMenu->addAction(tr("&Fit Page"), this, [this]() {
+            if (auto* v = currentViewer()) v->zoomFitPage();
+        });
+        fitPage->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_9));
+    }
+
     // Tab navigation shortcuts
     auto* nextTabAction = new QAction(this);
     nextTabAction->setShortcut(QKeySequence::NextChild);
@@ -434,6 +476,9 @@ void MainWindow::setupActions() {
     toolbar->addAction(tr("Fit Width"), this, [this]() {
         if (auto* v = currentViewer()) v->zoomFitWidth();
     });
+    toolbar->addAction(tr("Fit Page"), this, [this]() {
+        if (auto* v = currentViewer()) v->zoomFitPage();
+    });
     toolbar->addAction(tr("100%"), this, [this]() {
         if (auto* v = currentViewer()) v->zoomReset();
     });
@@ -460,6 +505,21 @@ void MainWindow::setDarkMode(bool enabled) {
     }
 }
 
+void MainWindow::setViewMode(layout::ViewMode mode) {
+    m_viewMode = mode;
+    const int idx = static_cast<int>(mode);
+    if (idx >= 0 && idx < 4 && m_viewModeActions[idx] && !m_viewModeActions[idx]->isChecked()) {
+        m_viewModeActions[idx]->setChecked(true);
+    }
+    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    settings.setValue(QStringLiteral("viewMode"), idx);
+    for (int i = 0; i < tabCount(); ++i) {
+        if (auto* v = viewerAt(i)) {
+            v->setViewMode(mode);
+        }
+    }
+}
+
 void MainWindow::saveReadingPosition(PdfViewerWidget* viewer) {
     if (!viewer || !viewer->isDocumentOpen() || viewer->currentFilePath().isEmpty()) {
         return;
@@ -473,8 +533,10 @@ void MainWindow::saveReadingPosition(PdfViewerWidget* viewer) {
     settings.setValue(QStringLiteral("filePath"), viewer->currentFilePath());
     settings.setValue(QStringLiteral("page"), viewer->currentPage());
     settings.setValue(QStringLiteral("zoom"), viewer->currentZoom());
-    settings.setValue(QStringLiteral("scrollX"), static_cast<qlonglong>(viewer->currentDocScrollX()));
-    settings.setValue(QStringLiteral("scrollY"), static_cast<qlonglong>(viewer->currentDocScrollY()));
+    // Scroll offsets are only meaningful in the continuous layout; other view modes restore by page.
+    const bool continuous = viewer->viewMode() == layout::ViewMode::Continuous;
+    settings.setValue(QStringLiteral("scrollX"), static_cast<qlonglong>(continuous ? viewer->currentDocScrollX() : 0));
+    settings.setValue(QStringLiteral("scrollY"), static_cast<qlonglong>(continuous ? viewer->currentDocScrollY() : 0));
     settings.setValue(QStringLiteral("timestamp"), QDateTime::currentSecsSinceEpoch());
     settings.endGroup();
 }

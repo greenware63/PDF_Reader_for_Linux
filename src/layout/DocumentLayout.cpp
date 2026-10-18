@@ -44,19 +44,152 @@ void DocumentLayout::updateLayout(double scale, double dpr, int64_t viewportWidt
         }
     }
 
-    // Scrollable content width is at least the viewport, or wide enough to fit the widest page with margins
-    int64_t contentWidth = std::max(m_viewportWidth, widestPage + (2 * m_horizontalMargin));
-    m_maxWidth = contentWidth;
+    const int n = static_cast<int>(m_pages.size());
+    const bool twoUp = (m_viewMode == ViewMode::TwoPage || m_viewMode == ViewMode::TwoPageCover);
 
-    // Second pass: position all pages centered within contentWidth
-    int64_t currentTop = m_pageGap;
-    for (auto& page : m_pages) {
-        page.topPixel = currentTop;
-        page.leftPixel = (contentWidth - page.widthPixel) / 2;
-        currentTop += page.heightPixel + m_pageGap;
+    // Rows: one page each, or (first, second) pairs in the two-page modes.
+    struct Row { int first; int count; };
+    std::vector<Row> rows;
+    if (twoUp) {
+        int i = 0;
+        if (m_viewMode == ViewMode::TwoPageCover && n > 0) {
+            rows.push_back({0, 1});
+            i = 1;
+        }
+        for (; i < n; i += 2) {
+            rows.push_back({i, (i + 1 < n) ? 2 : 1});
+        }
+    } else {
+        for (int i = 0; i < n; ++i) {
+            rows.push_back({i, 1});
+        }
     }
 
+    auto rowWidth = [&](const Row& r) {
+        int64_t w = m_pages[r.first].widthPixel;
+        if (r.count == 2) {
+            w += m_pageGap + m_pages[r.first + 1].widthPixel;
+        } else if (twoUp) {
+            // A lone page keeps the width of a half spread so it sits where a spread page would
+            w = w * 2 + m_pageGap;
+        }
+        return w;
+    };
+
+    // Content width: the viewport, or wide enough for the widest row (SinglePage: only the focus page counts)
+    const int focus = std::clamp(m_focusPage, 0, n - 1);
+    int64_t widestRow = 0;
+    if (m_viewMode == ViewMode::SinglePage) {
+        widestRow = m_pages[focus].widthPixel;
+    } else {
+        for (const auto& r : rows) {
+            widestRow = std::max(widestRow, rowWidth(r));
+        }
+    }
+    const int64_t contentWidth = std::max(m_viewportWidth, widestRow + (2 * m_horizontalMargin));
+    m_maxWidth = contentWidth;
+
+    // Position rows top to bottom, each row centered within contentWidth
+    int64_t currentTop = m_pageGap;
+    for (const auto& r : rows) {
+        int64_t rowHeight = 0;
+        for (int k = 0; k < r.count; ++k) {
+            rowHeight = std::max(rowHeight, m_pages[r.first + k].heightPixel);
+        }
+        const int64_t center = contentWidth / 2;
+        if (!twoUp) {
+            auto& p = m_pages[r.first];
+            p.topPixel = currentTop;
+            p.leftPixel = (contentWidth - p.widthPixel) / 2;
+        } else if (r.count == 2) {
+            auto& l = m_pages[r.first];
+            auto& rt = m_pages[r.first + 1];
+            const int64_t total = l.widthPixel + m_pageGap + rt.widthPixel;
+            const int64_t left = (contentWidth - total) / 2;
+            l.topPixel = rt.topPixel = currentTop;
+            l.leftPixel = left;
+            rt.leftPixel = left + l.widthPixel + m_pageGap;
+        } else {
+            auto& p = m_pages[r.first];
+            p.topPixel = currentTop;
+            // Cover sits on the right half (book style); a trailing odd page on the left half
+            const bool isCover = (m_viewMode == ViewMode::TwoPageCover && r.first == 0);
+            p.leftPixel = isCover ? center + m_pageGap / 2 : center - m_pageGap / 2 - p.widthPixel;
+        }
+        for (int k = 0; k < r.count; ++k) {
+            m_pages[r.first + k].rowBottomPixel = currentTop + rowHeight;
+        }
+        currentTop += rowHeight + m_pageGap;
+    }
     m_totalHeight = currentTop;
+
+    if (m_viewMode == ViewMode::SinglePage) {
+        // Shift so the focus page sits at the top of a document containing only that page.
+        // Neighbouring pages end up at negative / past-the-end coordinates and are never visible.
+        const int64_t shift = m_pages[focus].topPixel - m_pageGap;
+        for (auto& p : m_pages) {
+            p.topPixel -= shift;
+            p.rowBottomPixel -= shift;
+        }
+        m_totalHeight = m_pages[focus].heightPixel + 2 * m_pageGap;
+    }
+}
+
+int DocumentLayout::rowFirstPage(int pageIndex) const {
+    const int n = static_cast<int>(m_pages.size());
+    if (n == 0) return 0;
+    pageIndex = std::clamp(pageIndex, 0, n - 1);
+    switch (m_viewMode) {
+        case ViewMode::TwoPage:
+            return pageIndex & ~1;
+        case ViewMode::TwoPageCover:
+            return pageIndex == 0 ? 0 : ((pageIndex - 1) & ~1) + 1;
+        default:
+            return pageIndex;
+    }
+}
+
+int DocumentLayout::rowPageCount(int pageIndex) const {
+    const int n = static_cast<int>(m_pages.size());
+    if (n == 0) return 0;
+    const int first = rowFirstPage(pageIndex);
+    if (m_viewMode == ViewMode::TwoPage || m_viewMode == ViewMode::TwoPageCover) {
+        if (m_viewMode == ViewMode::TwoPageCover && first == 0) return 1;
+        return (first + 1 < n) ? 2 : 1;
+    }
+    return 1;
+}
+
+std::pair<double, double> DocumentLayout::rowSizePoints(int pageIndex) const {
+    const int n = static_cast<int>(m_pages.size());
+    if (n == 0) return {0.0, 0.0};
+    const int first = rowFirstPage(pageIndex);
+    const int count = rowPageCount(pageIndex);
+    double w = 0.0, h = 0.0;
+    for (int k = 0; k < count; ++k) {
+        const auto& p = m_pages[first + k];
+        const double pw = (p.widthPoints > 0.0) ? p.widthPoints : DEFAULT_PLACEHOLDER_WIDTH_POINTS;
+        const double ph = (p.heightPoints > 0.0) ? p.heightPoints : DEFAULT_PLACEHOLDER_HEIGHT_POINTS;
+        w += pw;
+        h = std::max(h, ph);
+    }
+    if (count == 1 && (m_viewMode == ViewMode::TwoPage || m_viewMode == ViewMode::TwoPageCover)) {
+        w *= 2.0; // a lone page occupies a half-spread slot
+    }
+    return {w, h};
+}
+
+double DocumentLayout::widestRowPoints() const {
+    const int n = static_cast<int>(m_pages.size());
+    if (n == 0) return 0.0;
+    if (m_viewMode == ViewMode::SinglePage) {
+        return rowSizePoints(std::clamp(m_focusPage, 0, n - 1)).first;
+    }
+    double widest = 0.0;
+    for (int i = 0; i < n; i += rowPageCount(i)) {
+        widest = std::max(widest, rowSizePoints(i).first);
+    }
+    return widest;
 }
 
 const PageLayout& DocumentLayout::getPageLayout(int pageIndex) const {
@@ -75,7 +208,7 @@ ViewportRange DocumentLayout::getVisiblePages(int64_t viewportTopPixel, int64_t 
     const int64_t viewportBottom = viewportTopPixel + viewportHeightPixel;
 
     // Viewport entirely above first page or entirely below last page
-    if (viewportBottom <= m_pages.front().topPixel || viewportTopPixel >= m_pages.back().bottomPixel()) {
+    if (viewportBottom <= m_pages.front().topPixel || viewportTopPixel >= m_pages.back().rowBottomPixel) {
         return {};
     }
 
@@ -85,7 +218,7 @@ ViewportRange DocumentLayout::getVisiblePages(int64_t viewportTopPixel, int64_t 
         m_pages.end(),
         viewportTopPixel,
         [](int64_t top, const PageLayout& page) {
-            return top < page.bottomPixel();
+            return top < page.rowBottomPixel;
         }
     );
 
@@ -202,12 +335,16 @@ ScrollAnchor DocumentLayout::createAnchor(int64_t docX, int64_t docY) const {
         m_pages.end(),
         docY,
         [](int64_t y, const PageLayout& page) {
-            return y < page.bottomPixel();
+            return y < page.rowBottomPixel;
         }
     );
 
     if (it == m_pages.end()) {
         it = m_pages.end() - 1;
+    }
+    // Two pages share a row: pick the one whose horizontal extent is closest to docX
+    if (it + 1 != m_pages.end() && (it + 1)->topPixel == it->topPixel && docX >= (it + 1)->leftPixel) {
+        ++it;
     }
 
     double normX = 0.5;

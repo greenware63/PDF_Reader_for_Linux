@@ -3153,8 +3153,203 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Comprehensive keyboard navigation (Arrows, Vim J/K/L/H, PgUp/PgDn, Space/Shift+Space, Home/End) verified." << std::endl;
     }
 
+    // Test 41: View modes (single page, two-page spreads, cover spreads), fit-page, page flipping, persistence
+    std::cout << "[TEST 41] Testing view modes, fit page and navigation per mode..." << std::endl;
+    {
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        QCoreApplication::processEvents();
+
+        std::string sampleDoc = "widget_test_view_modes.pdf";
+        generateMultiPagePdf(sampleDoc, 6);
+        if (viewer.openDocument(QString::fromStdString(sampleDoc)) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document for view mode test" << std::endl;
+            return 1;
+        }
+        QCoreApplication::processEvents();
+
+        auto fail = [](const char* msg) { std::cerr << "[FAIL] " << msg << std::endl; return 1; };
+
+        if (viewer.viewMode() != layout::ViewMode::Continuous) {
+            return fail("Default view mode should be Continuous");
+        }
+        const int continuousRange = viewer.verticalScrollBar()->maximum();
+
+        // --- Single page: only one page is reachable, navigation changes the focus page ---
+        viewer.setViewMode(layout::ViewMode::SinglePage);
+        QCoreApplication::processEvents();
+        if (viewer.viewMode() != layout::ViewMode::SinglePage) {
+            return fail("setViewMode(SinglePage) did not stick");
+        }
+        if (viewer.verticalScrollBar()->maximum() >= continuousRange) {
+            return fail("SinglePage scroll range should be smaller than the continuous range");
+        }
+        viewer.goToPage(3);
+        QCoreApplication::processEvents();
+        if (viewer.currentPage() != 3) {
+            std::cerr << "[FAIL] SinglePage goToPage(3) landed on page " << viewer.currentPage() << std::endl;
+            return 1;
+        }
+        viewer.nextPage();
+        if (viewer.currentPage() != 4) {
+            return fail("SinglePage nextPage should move to page 4");
+        }
+        viewer.previousPage();
+        if (viewer.currentPage() != 3) {
+            return fail("SinglePage previousPage should move back to page 3");
+        }
+
+        // PageDown at the bottom edge of the page flips to the next page
+        viewer.verticalScrollBar()->setValue(viewer.verticalScrollBar()->maximum());
+        QKeyEvent pgDown(QEvent::KeyPress, Qt::Key_PageDown, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &pgDown);
+        QCoreApplication::processEvents();
+        if (viewer.currentPage() != 4) {
+            std::cerr << "[FAIL] PageDown at page bottom should flip to page 4, got " << viewer.currentPage() << std::endl;
+            return 1;
+        }
+        // PageUp at the top edge flips back and arrives at the bottom of the previous page
+        viewer.verticalScrollBar()->setValue(viewer.verticalScrollBar()->minimum());
+        QKeyEvent pgUp(QEvent::KeyPress, Qt::Key_PageUp, Qt::NoModifier);
+        QApplication::sendEvent(&viewer, &pgUp);
+        QCoreApplication::processEvents();
+        if (viewer.currentPage() != 3) {
+            std::cerr << "[FAIL] PageUp at page top should flip to page 3, got " << viewer.currentPage() << std::endl;
+            return 1;
+        }
+
+        // Fit page: the whole page fits, so there is nothing left to scroll vertically
+        viewer.zoomFitPage();
+        QCoreApplication::processEvents();
+        if (viewer.verticalScrollBar()->maximum() > 2) {
+            std::cerr << "[FAIL] Fit Page left a vertical scroll range of " << viewer.verticalScrollBar()->maximum() << std::endl;
+            return 1;
+        }
+        if (viewer.currentPage() != 3) {
+            return fail("Fit Page must keep the current page");
+        }
+
+        // Last page boundaries
+        viewer.goToPage(5);
+        viewer.nextPage();
+        if (viewer.currentPage() != 5) {
+            return fail("nextPage on the last page must be a no-op");
+        }
+
+        // --- Two pages: spreads 0-1, 2-3, 4-5 ---
+        viewer.setViewMode(layout::ViewMode::TwoPage);
+        viewer.goToPage(0);
+        QCoreApplication::processEvents();
+        viewer.nextPage();
+        if (viewer.currentPage() != 2) {
+            std::cerr << "[FAIL] TwoPage nextPage from 0 should land on 2, got " << viewer.currentPage() << std::endl;
+            return 1;
+        }
+        viewer.nextPage();
+        if (viewer.currentPage() != 4) {
+            std::cerr << "[FAIL] TwoPage nextPage from 2 should land on 4, got " << viewer.currentPage() << std::endl;
+            return 1;
+        }
+        viewer.previousPage();
+        if (viewer.currentPage() != 2) {
+            std::cerr << "[FAIL] TwoPage previousPage from 4 should land on 2, got " << viewer.currentPage() << std::endl;
+            return 1;
+        }
+        // Fit width in a two-page spread must be narrower than fit width for a single page
+        viewer.zoomFitWidth();
+        const double twoUpZoom = viewer.currentZoom();
+        viewer.setViewMode(layout::ViewMode::Continuous);
+        viewer.zoomFitWidth();
+        const double oneUpZoom = viewer.currentZoom();
+        if (!(twoUpZoom < oneUpZoom * 0.6)) {
+            std::cerr << "[FAIL] Two-page fit width (" << twoUpZoom << ") should be about half of one-page fit width (" << oneUpZoom << ")" << std::endl;
+            return 1;
+        }
+
+        // --- Two pages with cover: 0 | 1-2 | 3-4 | 5 ---
+        viewer.setViewMode(layout::ViewMode::TwoPageCover);
+        viewer.goToPage(0);
+        QCoreApplication::processEvents();
+        const int expectedForward[] = {1, 3, 5};
+        for (int expected : expectedForward) {
+            viewer.nextPage();
+            if (viewer.currentPage() != expected) {
+                std::cerr << "[FAIL] TwoPageCover nextPage expected " << expected << ", got " << viewer.currentPage() << std::endl;
+                return 1;
+            }
+        }
+        const int expectedBack[] = {3, 1, 0};
+        for (int expected : expectedBack) {
+            viewer.previousPage();
+            if (viewer.currentPage() != expected) {
+                std::cerr << "[FAIL] TwoPageCover previousPage expected " << expected << ", got " << viewer.currentPage() << std::endl;
+                return 1;
+            }
+        }
+
+        // Switching modes keeps the page being read
+        viewer.setViewMode(layout::ViewMode::Continuous);
+        viewer.goToPage(4);
+        viewer.setViewMode(layout::ViewMode::SinglePage);
+        if (viewer.currentPage() != 4) {
+            return fail("Switching to SinglePage must keep the current page");
+        }
+        viewer.setViewMode(layout::ViewMode::Continuous);
+        QCoreApplication::processEvents();
+        if (viewer.currentPage() != 4 || viewer.verticalScrollBar()->maximum() < continuousRange / 2) {
+            return fail("Returning to Continuous must keep the page and restore the full scroll range");
+        }
+
+        // --- MainWindow: mode applies to open and future tabs and is remembered ---
+        {
+            QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+            const QVariant previous = settings.value(QStringLiteral("viewMode"));
+            {
+                ui::MainWindow window;
+                window.resize(1024, 768);
+                window.show();
+                window.setViewMode(layout::ViewMode::TwoPage);
+                if (!window.openFile(QString::fromStdString(sampleDoc))) {
+                    return fail("Could not open document in MainWindow for view mode test");
+                }
+                auto* v = window.currentViewer();
+                QElapsedTimer t;
+                t.start();
+                while (t.elapsed() < 5000 && (!v || !v->isDocumentOpen())) {
+                    QCoreApplication::processEvents();
+                    QThread::msleep(5);
+                }
+                if (!v || v->viewMode() != layout::ViewMode::TwoPage) {
+                    return fail("New tab did not inherit the window view mode");
+                }
+                window.setViewMode(layout::ViewMode::SinglePage);
+                if (v->viewMode() != layout::ViewMode::SinglePage) {
+                    return fail("Open tab did not follow the window view mode");
+                }
+            }
+            QSettings reread(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+            if (reread.value(QStringLiteral("viewMode")).toInt() != static_cast<int>(layout::ViewMode::SinglePage)) {
+                return fail("View mode was not persisted");
+            }
+            {
+                ui::MainWindow second;
+                if (second.viewMode() != layout::ViewMode::SinglePage) {
+                    return fail("View mode was not restored by a new window");
+                }
+            }
+            if (previous.isValid()) {
+                reread.setValue(QStringLiteral("viewMode"), previous);
+            } else {
+                reread.remove(QStringLiteral("viewMode"));
+            }
+        }
+
+        std::cout << "  -> Passed: View modes, fit page/width per mode, page flipping and persistence verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 40 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 41 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
