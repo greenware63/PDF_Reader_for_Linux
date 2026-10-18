@@ -282,6 +282,10 @@ void PdfViewerWidget::closeDocument() {
     ++m_currentDocumentId;
     ++m_currentGeneration;
 
+    m_rotation = 0;
+    m_layout.setRotation(0);
+    Q_EMIT rotationChanged(0);
+
     m_hasDocument = false;
     m_currentFilePath.clear();
     m_fallbackScales.clear();
@@ -396,6 +400,37 @@ void PdfViewerWidget::setViewMode(layout::ViewMode mode) {
     }
     Q_EMIT viewModeChanged(mode);
     viewport()->update();
+}
+
+void PdfViewerWidget::setRotation(int degrees) {
+    const int normalized = (degrees % 360 + 360) % 360;
+    if (m_rotation == normalized) {
+        return;
+    }
+    m_rotation = normalized;
+    m_layout.setRotation(m_rotation);
+
+    if (isDocumentOpen()) {
+        const int page = std::clamp(m_currentPage, 0, std::max(0, pageCount() - 1));
+        const double dpr = effectiveDpr();
+        const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
+        m_layout.updateLayout(pdf::quantizeScale(m_scale), dpr, vpW);
+        updateScrollBars();
+        ++m_currentGeneration;
+        m_inFlightKeys.clear();
+        m_renderWorker.setGeneration(m_currentGeneration);
+        goToPage(page);
+    }
+    Q_EMIT rotationChanged(m_rotation);
+    viewport()->update();
+}
+
+void PdfViewerWidget::rotateClockwise() {
+    setRotation(m_rotation + 90);
+}
+
+void PdfViewerWidget::rotateCounterClockwise() {
+    setRotation(m_rotation - 90);
 }
 
 QImage PdfViewerWidget::renderPageForPrint(int pageIndex, double scale, double dpr) {
@@ -957,7 +992,7 @@ bool PdfViewerWidget::drawFallbackTile(QPainter& painter, const layout::VisibleT
         bool fullyCovered = true;
         for (int row = r0; row <= r1; ++row) {
             for (int col = c0; col <= c1; ++col) {
-                auto buf = m_cache.get(pdf::TileKey::create(m_currentDocumentId, t.pageIndex, col, row, oldScale, qDpr));
+                auto buf = m_cache.get(pdf::TileKey::create(m_currentDocumentId, t.pageIndex, col, row, oldScale, qDpr, m_rotation));
                 if (!buf.has_value()) {
                     fullyCovered = false;
                     continue;
@@ -1028,11 +1063,26 @@ void PdfViewerWidget::drawSelection(QPainter& painter, int pageIndex, const layo
     QColor highlightColor = m_darkMode ? QColor(0, 140, 255, 120) : QColor(0, 120, 215, 90);
 
     for (const auto& r : rects) {
+        double px = r.left, py = r.top, pw = r.width(), ph = r.height();
+        if (m_rotation == 90) {
+            px = pl.heightPoints - r.bottom;
+            py = r.left;
+            pw = r.height();
+            ph = r.width();
+        } else if (m_rotation == 180) {
+            px = pl.widthPoints - r.right;
+            py = pl.heightPoints - r.bottom;
+        } else if (m_rotation == 270) {
+            px = r.top;
+            py = pl.widthPoints - r.right;
+            pw = r.height();
+            ph = r.width();
+        }
         QRectF selRect(
-            static_cast<qreal>(static_cast<double>(pl.leftPixel - scrollDocX) + r.left * effScale),
-            static_cast<qreal>(static_cast<double>(pl.topPixel - scrollDocY) + r.top * effScale),
-            static_cast<qreal>(r.width() * effScale),
-            static_cast<qreal>(r.height() * effScale)
+            static_cast<qreal>(static_cast<double>(pl.leftPixel - scrollDocX) + px * effScale),
+            static_cast<qreal>(static_cast<double>(pl.topPixel - scrollDocY) + py * effScale),
+            static_cast<qreal>(pw * effScale),
+            static_cast<qreal>(ph * effScale)
         );
         painter.fillRect(selRect, highlightColor);
     }
@@ -1115,11 +1165,26 @@ void PdfViewerWidget::drawSearchHighlights(QPainter& painter, int pageIndex, con
 
         const bool isActive = (static_cast<int>(i) == m_currentMatchIndex);
         for (const auto& r : match.rects) {
+            double px = r.left, py = r.top, pw = r.width(), ph = r.height();
+            if (m_rotation == 90) {
+                px = pl.heightPoints - r.bottom;
+                py = r.left;
+                pw = r.height();
+                ph = r.width();
+            } else if (m_rotation == 180) {
+                px = pl.widthPoints - r.right;
+                py = pl.heightPoints - r.bottom;
+            } else if (m_rotation == 270) {
+                px = r.top;
+                py = pl.widthPoints - r.right;
+                pw = r.height();
+                ph = r.width();
+            }
             QRectF selRect(
-                static_cast<qreal>(static_cast<double>(pl.leftPixel - scrollDocX) + r.left * effScale),
-                static_cast<qreal>(static_cast<double>(pl.topPixel - scrollDocY) + r.top * effScale),
-                static_cast<qreal>(r.width() * effScale),
-                static_cast<qreal>(r.height() * effScale)
+                static_cast<qreal>(static_cast<double>(pl.leftPixel - scrollDocX) + px * effScale),
+                static_cast<qreal>(static_cast<double>(pl.topPixel - scrollDocY) + py * effScale),
+                static_cast<qreal>(pw * effScale),
+                static_cast<qreal>(ph * effScale)
             );
             if (isActive) {
                 painter.fillRect(selRect, activeMatchColor);
@@ -1143,18 +1208,37 @@ void PdfViewerWidget::scrollToMatch(const pdf::SearchMatch& match) {
     const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
     const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
 
-    double matchTopPt = match.rects.empty() ? 0.0 : match.rects[0].top;
-    double matchHeightPt = match.rects.empty() ? 20.0 : match.rects[0].height();
-    double matchLeftPt = match.rects.empty() ? 0.0 : match.rects[0].left;
-    double matchRightPt = match.rects.empty() ? 20.0 : match.rects[0].right;
-    for (const auto& rect : match.rects) {
-        matchLeftPt = std::min(matchLeftPt, rect.left);
-        matchRightPt = std::max(matchRightPt, rect.right);
+    double matchLeftPt = 0.0, matchRightPt = 20.0, matchTopPt = 0.0, matchBottomPt = 20.0;
+    if (!match.rects.empty()) {
+        matchLeftPt = 1e9; matchRightPt = -1e9; matchTopPt = 1e9; matchBottomPt = -1e9;
+        for (const auto& rect : match.rects) {
+            double px0 = rect.left, py0 = rect.top, px1 = rect.right, py1 = rect.bottom;
+            if (m_rotation == 90) {
+                px0 = pl.heightPoints - rect.bottom;
+                py0 = rect.left;
+                px1 = pl.heightPoints - rect.top;
+                py1 = rect.right;
+            } else if (m_rotation == 180) {
+                px0 = pl.widthPoints - rect.right;
+                py0 = pl.heightPoints - rect.bottom;
+                px1 = pl.widthPoints - rect.left;
+                py1 = pl.heightPoints - rect.top;
+            } else if (m_rotation == 270) {
+                px0 = rect.top;
+                py0 = pl.widthPoints - rect.right;
+                px1 = rect.bottom;
+                py1 = pl.widthPoints - rect.left;
+            }
+            matchLeftPt = std::min(matchLeftPt, px0);
+            matchRightPt = std::max(matchRightPt, px1);
+            matchTopPt = std::min(matchTopPt, py0);
+            matchBottomPt = std::max(matchBottomPt, py1);
+        }
     }
     const int64_t matchDocX = pl.leftPixel + static_cast<int64_t>(std::round(matchLeftPt * effScale));
     const int64_t matchDocW = static_cast<int64_t>(std::round((matchRightPt - matchLeftPt) * effScale));
     int64_t matchDocY = pl.topPixel + static_cast<int64_t>(std::round(matchTopPt * effScale));
-    int64_t matchDocH = static_cast<int64_t>(std::round(matchHeightPt * effScale));
+    int64_t matchDocH = static_cast<int64_t>(std::round((matchBottomPt - matchTopPt) * effScale));
 
     constexpr int64_t margin = 40;
     bool visibleX = (matchDocX >= m_docScrollX + margin) &&
@@ -1622,7 +1706,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     std::vector<pdf::TileKey> visibleKeys;
     visibleKeys.reserve(tiles.size());
     for (const auto& t : tiles) {
-        visibleKeys.push_back(pdf::TileKey::create(m_currentDocumentId, t.pageIndex, t.col, t.row, qScale, qDpr));
+        visibleKeys.push_back(pdf::TileKey::create(m_currentDocumentId, t.pageIndex, t.col, t.row, qScale, qDpr, m_rotation));
     }
     m_cache.setPinnedKeys(visibleKeys);
 
@@ -1670,7 +1754,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
                     int priority = static_cast<int>(std::max<int64_t>(0, 10000000 - distSq));
 
                     pdf::PixelRect pRect{t.tileXOnPage, t.tileYOnPage, t.tileWidth, t.tileHeight};
-                    pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority});
+                    pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority, m_rotation});
                     m_inFlightKeys.insert(key);
                 }
             } else {
@@ -1691,7 +1775,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
                 int priority = static_cast<int>(std::max<int64_t>(0, 10000000 - distSq));
 
                 pdf::PixelRect pRect{t.tileXOnPage, t.tileYOnPage, t.tileWidth, t.tileHeight};
-                pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority});
+                pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority, m_rotation});
                 m_inFlightKeys.insert(key);
             }
         }
@@ -1709,7 +1793,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
 
             const auto ringTiles = m_layout.getVisibleTiles({scrollDocX, ringTop, vpWidthDevice, ringBottom - ringTop}, 512);
             for (const auto& t : ringTiles) {
-                const auto key = pdf::TileKey::create(m_currentDocumentId, t.pageIndex, t.col, t.row, qScale, qDpr);
+                const auto key = pdf::TileKey::create(m_currentDocumentId, t.pageIndex, t.col, t.row, qScale, qDpr, m_rotation);
                 if (visibleSet.count(key) || m_inFlightKeys.count(key) || m_cache.contains(key)) {
                     continue;
                 }
@@ -1726,7 +1810,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
             for (const auto& c : candidates) {
                 const int priority = -1 - static_cast<int>(std::min<int64_t>(c.distSq >> 12, 1000000000));
                 pdf::PixelRect pRect{c.tile.tileXOnPage, c.tile.tileYOnPage, c.tile.tileWidth, c.tile.tileHeight};
-                pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, c.tile.pageIndex, pRect, qScale, qDpr, c.key, priority});
+                pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, c.tile.pageIndex, pRect, qScale, qDpr, c.key, priority, m_rotation});
                 m_inFlightKeys.insert(c.key);
                 ++m_prefetchRequestsIssued;
             }

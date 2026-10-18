@@ -34,9 +34,12 @@ void DocumentLayout::updateLayout(double scale, double dpr, int64_t viewportWidt
 
     // First pass: compute device pixel dimensions for each page and find the widest page
     int64_t widestPage = 0;
+    const bool swapDims = (m_rotation == 90 || m_rotation == 270);
     for (auto& page : m_pages) {
         int w = 0, h = 0;
-        computePagePixelDimensions(page.widthPoints, page.heightPoints, m_scale, m_dpr, w, h);
+        const double pw = swapDims ? page.heightPoints : page.widthPoints;
+        const double ph = swapDims ? page.widthPoints : page.heightPoints;
+        computePagePixelDimensions(pw, ph, m_scale, m_dpr, w, h);
         page.widthPixel = w;
         page.heightPixel = h;
         if (page.widthPixel > widestPage) {
@@ -166,10 +169,13 @@ std::pair<double, double> DocumentLayout::rowSizePoints(int pageIndex) const {
     const int first = rowFirstPage(pageIndex);
     const int count = rowPageCount(pageIndex);
     double w = 0.0, h = 0.0;
+    const bool swapDims = (m_rotation == 90 || m_rotation == 270);
     for (int k = 0; k < count; ++k) {
         const auto& p = m_pages[first + k];
-        const double pw = (p.widthPoints > 0.0) ? p.widthPoints : DEFAULT_PLACEHOLDER_WIDTH_POINTS;
-        const double ph = (p.heightPoints > 0.0) ? p.heightPoints : DEFAULT_PLACEHOLDER_HEIGHT_POINTS;
+        const double rawW = (p.widthPoints > 0.0) ? p.widthPoints : DEFAULT_PLACEHOLDER_WIDTH_POINTS;
+        const double rawH = (p.heightPoints > 0.0) ? p.heightPoints : DEFAULT_PLACEHOLDER_HEIGHT_POINTS;
+        const double pw = swapDims ? rawH : rawW;
+        const double ph = swapDims ? rawW : rawH;
         w += pw;
         h = std::max(h, ph);
     }
@@ -388,7 +394,6 @@ void DocumentLayout::resolveAnchor(const ScrollAnchor& anchor, int64_t viewportO
     outScrollY = std::clamp<int64_t>(outScrollY, 0, maxScrollY);
 }
 
-
 int DocumentLayout::getPageAt(int64_t docX, int64_t docY) const {
     for (size_t i = 0; i < m_pages.size(); ++i) {
         const auto& p = m_pages[i];
@@ -409,8 +414,30 @@ bool DocumentLayout::documentToPagePoints(int pageIndex, int64_t docX, int64_t d
     if (effScale <= 0.0) {
         return false;
     }
-    outPageX = static_cast<double>(docX - p.leftPixel) / effScale;
-    outPageY = static_cast<double>(docY - p.topPixel) / effScale;
+    const double dispX = static_cast<double>(docX - p.leftPixel) / effScale;
+    const double dispY = static_cast<double>(docY - p.topPixel) / effScale;
+
+    const double W = (p.widthPoints > 0.0) ? p.widthPoints : DEFAULT_PLACEHOLDER_WIDTH_POINTS;
+    const double H = (p.heightPoints > 0.0) ? p.heightPoints : DEFAULT_PLACEHOLDER_HEIGHT_POINTS;
+
+    switch (m_rotation) {
+        case 90:
+            outPageX = dispY;
+            outPageY = H - dispX;
+            break;
+        case 180:
+            outPageX = W - dispX;
+            outPageY = H - dispY;
+            break;
+        case 270:
+            outPageX = W - dispY;
+            outPageY = dispX;
+            break;
+        default:
+            outPageX = dispX;
+            outPageY = dispY;
+            break;
+    }
     return true;
 }
 
@@ -420,8 +447,32 @@ bool DocumentLayout::pagePointsToDocument(int pageIndex, double pageX, double pa
     }
     const auto& p = m_pages[pageIndex];
     const double effScale = m_scale * m_dpr;
-    outDocX = p.leftPixel + static_cast<int64_t>(std::round(pageX * effScale));
-    outDocY = p.topPixel + static_cast<int64_t>(std::round(pageY * effScale));
+
+    const double W = (p.widthPoints > 0.0) ? p.widthPoints : DEFAULT_PLACEHOLDER_WIDTH_POINTS;
+    const double H = (p.heightPoints > 0.0) ? p.heightPoints : DEFAULT_PLACEHOLDER_HEIGHT_POINTS;
+
+    double dispX = pageX;
+    double dispY = pageY;
+
+    switch (m_rotation) {
+        case 90:
+            dispX = H - pageY;
+            dispY = pageX;
+            break;
+        case 180:
+            dispX = W - pageX;
+            dispY = H - pageY;
+            break;
+        case 270:
+            dispX = pageY;
+            dispY = W - pageX;
+            break;
+        default:
+            break;
+    }
+
+    outDocX = p.leftPixel + static_cast<int64_t>(std::round(dispX * effScale));
+    outDocY = p.topPixel + static_cast<int64_t>(std::round(dispY * effScale));
     return true;
 }
 

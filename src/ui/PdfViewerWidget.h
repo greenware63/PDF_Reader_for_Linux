@@ -81,6 +81,12 @@ public:
     void setViewMode(layout::ViewMode mode);
     layout::ViewMode viewMode() const noexcept { return m_layout.viewMode(); }
 
+    /// Page rotation APIs: 0, 90, 180, 270 degrees clockwise
+    int rotation() const noexcept { return m_rotation; }
+    void setRotation(int degrees);
+    void rotateClockwise();
+    void rotateCounterClockwise();
+
     void goToPage(int pageIndex);
     /// Navigates to a normalized vertical position in the displayed page.
     void goToPage(int pageIndex, double targetYFraction);
@@ -176,6 +182,7 @@ Q_SIGNALS:
     void outlineReady(const std::vector<pdf::OutlineItem>& outline);
     void darkModeChanged(bool isDark);
     void viewModeChanged(layout::ViewMode mode);
+    void rotationChanged(int degrees);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -301,6 +308,7 @@ private:
 
     // Dark mode / night inversion state
     bool m_darkMode{false};
+    int m_rotation{0};
 };
 
 } // namespace ui

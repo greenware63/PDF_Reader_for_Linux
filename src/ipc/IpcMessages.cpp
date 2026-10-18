@@ -103,6 +103,7 @@ QDataStream& operator<<(QDataStream& out, const TileKey& key) {
     out << static_cast<qint32>(key.row);
     out << static_cast<qint32>(key.scaleMilli);
     out << static_cast<qint32>(key.dprMilli);
+    out << static_cast<qint32>(key.rotation);
     return out;
 }
 
@@ -116,6 +117,11 @@ QDataStream& operator>>(QDataStream& in, TileKey& key) {
     key.row = row;
     key.scaleMilli = sm;
     key.dprMilli = dm;
+    qint32 rot = 0;
+    if (!in.atEnd()) {
+        in >> rot;
+    }
+    key.rotation = rot;
     return in;
 }
 
@@ -148,6 +154,7 @@ QDataStream& operator<<(QDataStream& out, const TileRenderRequest& req) {
     out << req.dpr;
     out << req.key;
     out << static_cast<qint32>(req.priority);
+    out << static_cast<qint32>(req.rotation);
     return out;
 }
 
@@ -160,6 +167,11 @@ QDataStream& operator>>(QDataStream& in, TileRenderRequest& req) {
     req.generation = gen;
     req.pageIndex = page;
     req.priority = prio;
+    qint32 rot = 0;
+    if (!in.atEnd()) {
+        in >> rot;
+    }
+    req.rotation = (rot != 0) ? rot : req.key.rotation;
     return in;
 }
 

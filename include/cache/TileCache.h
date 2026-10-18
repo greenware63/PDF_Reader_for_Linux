@@ -60,7 +60,7 @@ inline int scaleToMilli(double scale) {
 }
 
 /**
- * @brief Identifies a unique rendered tile across documents, pages, grids, quantized scale, and DPR.
+ * @brief Identifies a unique rendered tile across documents, pages, grids, quantized scale, DPR, and rotation.
  * Both scale and DPR are quantized to milli-units (1.333 -> 1333, 1.5 -> 1500) to ensure reliable hashing and comparison.
  */
 struct TileKey {
@@ -70,15 +70,17 @@ struct TileKey {
     int row{0};
     int scaleMilli{1000}; // Quantized scale (e.g. 1.333x -> 1333)
     int dprMilli{1000};   // Quantized DPR (e.g. 1.5x -> 1500)
+    int rotation{0};      // Normalized rotation in degrees (0, 90, 180, 270)
 
-    static TileKey create(int64_t docId, int pageIdx, int c, int r, double scale, double dpr) {
+    static TileKey create(int64_t docId, int pageIdx, int c, int r, double scale, double dpr, int rotation = 0) {
         return TileKey{
             docId,
             pageIdx,
             c,
             r,
             scaleToMilli(scale),
-            dprToMilli(dpr)
+            dprToMilli(dpr),
+            (rotation % 360 + 360) % 360
         };
     }
 
@@ -88,7 +90,8 @@ struct TileKey {
                col == other.col &&
                row == other.row &&
                scaleMilli == other.scaleMilli &&
-               dprMilli == other.dprMilli;
+               dprMilli == other.dprMilli &&
+               rotation == other.rotation;
     }
 };
 
@@ -104,6 +107,7 @@ struct TileKeyHash {
         combine(std::hash<int>{}(k.row));
         combine(std::hash<int>{}(k.scaleMilli));
         combine(std::hash<int>{}(k.dprMilli));
+        combine(std::hash<int>{}(k.rotation));
         return h;
     };
 };
@@ -156,13 +160,13 @@ public:
      * @brief Checks if a failed tile is eligible for retry based on exponential backoff.
      * @param key The tile key.
      * @param baseBackoff Base delay (default 1000ms).
-     * @return true if the tile has failed and the backoff interval has elapsed; false otherwise.
+     * @return true if the tile has failed and the backoff interval has elapsed; false otherwise.\
      */
     bool canRetry(const TileKey& key, std::chrono::milliseconds baseBackoff = std::chrono::milliseconds(1000)) const;
 
     /**
      * @brief Number of failures after which a tile is treated as permanently failed
-     * (canRetry() returns false) until resetFailureHistory() is called.
+     * (canRetry() returns false) until resetFailureHistory() is called.\
      */
     static constexpr int MAX_RETRY_ATTEMPTS = 6;
 
@@ -172,7 +176,7 @@ public:
     bool isPermanentlyFailed(const TileKey& key) const;
 
     /**
-     * @brief Forgets all recorded failure counts (explicit user retry). Does not remove tombstones;
+     * @brief Forgets all recorded failure counts (explicit user retry). Does not remove tombstones;\
      * call clearAllFailed() as well to make failed tiles eligible for rendering again.
      */
     void resetFailureHistory();

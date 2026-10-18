@@ -1,4 +1,4 @@
-#include <iostream>
+﻿#include <iostream>
 #include <vector>
 #include <cmath>
 #include <random>
@@ -689,8 +689,125 @@ int main() {
         std::cout << "  -> Passed: View-mode layouts verified against brute force across page counts and modes." << std::endl;
     }
 
+    // Test 12: Page Rotation in DocumentLayout (0, 90, 180, 270 degrees)
+    std::cout << "[TEST 12] Testing Page Rotation in DocumentLayout..." << std::endl;
+    {
+        layout::DocumentLayout l;
+        std::vector<std::pair<double, double>> pages = {
+            {595.0, 842.0}, // Portrait A4
+            {842.0, 595.0}  // Landscape A4
+        };
+        l.setPageSizes(pages);
+
+        // 1. Initial rotation should be 0
+        if (l.rotation() != 0) {
+            std::cerr << "[FAIL] Initial rotation must be 0, got " << l.rotation() << std::endl;
+            return 1;
+        }
+
+        // 2. Normalization: 360 -> 0, 450 -> 90, -90 -> 270
+        l.setRotation(360);
+        if (l.rotation() != 0) {
+            std::cerr << "[FAIL] setRotation(360) failed to normalize to 0" << std::endl;
+            return 1;
+        }
+        l.setRotation(450);
+        if (l.rotation() != 90) {
+            std::cerr << "[FAIL] setRotation(450) failed to normalize to 90" << std::endl;
+            return 1;
+        }
+        l.setRotation(-90);
+        if (l.rotation() != 270) {
+            std::cerr << "[FAIL] setRotation(-90) failed to normalize to 270" << std::endl;
+            return 1;
+        }
+
+        // 3. Layout dimensions under 0, 90, 180, 270
+        // At 0 degrees: page 0 is 595x842 pt
+        l.setRotation(0);
+        l.updateLayout(1.0, 1.0, 1000);
+        auto p0_rot0 = l.getPageLayout(0);
+        if (p0_rot0.widthPixel != 595 || p0_rot0.heightPixel != 842) {
+            std::cerr << "[FAIL] Page 0 at 0 deg expected 595x842 px, got "
+                      << p0_rot0.widthPixel << "x" << p0_rot0.heightPixel << std::endl;
+            return 1;
+        }
+
+        // At 90 degrees: page 0 dimensions swap to 842x595 pt
+        l.setRotation(90);
+        l.updateLayout(1.0, 1.0, 1000);
+        auto p0_rot90 = l.getPageLayout(0);
+        if (p0_rot90.widthPixel != 842 || p0_rot90.heightPixel != 595) {
+            std::cerr << "[FAIL] Page 0 at 90 deg expected 842x595 px, got "
+                      << p0_rot90.widthPixel << "x" << p0_rot90.heightPixel << std::endl;
+            return 1;
+        }
+
+        // rowSizePoints at 90 degrees
+        auto r0_size = l.rowSizePoints(0);
+        if (r0_size.first != 842.0 || r0_size.second != 595.0) {
+            std::cerr << "[FAIL] rowSizePoints at 90 deg expected 842x595, got "
+                      << r0_size.first << "x" << r0_size.second << std::endl;
+            return 1;
+        }
+
+        // widestRowPoints at 90 degrees
+        if (l.widestRowPoints() != 842.0) {
+            std::cerr << "[FAIL] widestRowPoints at 90 deg expected 842, got " << l.widestRowPoints() << std::endl;
+            return 1;
+        }
+
+        // At 180 degrees: dimensions same as 0 (595x842)
+        l.setRotation(180);
+        l.updateLayout(1.0, 1.0, 1000);
+        auto p0_rot180 = l.getPageLayout(0);
+        if (p0_rot180.widthPixel != 595 || p0_rot180.heightPixel != 842) {
+            std::cerr << "[FAIL] Page 0 at 180 deg expected 595x842 px, got "
+                      << p0_rot180.widthPixel << "x" << p0_rot180.heightPixel << std::endl;
+            return 1;
+        }
+
+        // At 270 degrees: dimensions swapped (842x595)
+        l.setRotation(270);
+        l.updateLayout(1.0, 1.0, 1000);
+        auto p0_rot270 = l.getPageLayout(0);
+        if (p0_rot270.widthPixel != 842 || p0_rot270.heightPixel != 595) {
+            std::cerr << "[FAIL] Page 0 at 270 deg expected 842x595 px, got "
+                      << p0_rot270.widthPixel << "x" << p0_rot270.heightPixel << std::endl;
+            return 1;
+        }
+
+        // 4. Coordinate round-trip mapping across all rotations
+        for (int rot : {0, 90, 180, 270}) {
+            l.setRotation(rot);
+            l.updateLayout(1.5, 1.25, 1200);
+
+            for (double origX : {10.0, 150.0, 300.0, 500.0}) {
+                for (double origY : {20.0, 200.0, 450.0, 800.0}) {
+                    int64_t docX = 0, docY = 0;
+                    if (!l.pagePointsToDocument(0, origX, origY, docX, docY)) {
+                        std::cerr << "[FAIL] pagePointsToDocument failed for rot=" << rot << std::endl;
+                        return 1;
+                    }
+                    double roundX = 0.0, roundY = 0.0;
+                    if (!l.documentToPagePoints(0, docX, docY, roundX, roundY)) {
+                        std::cerr << "[FAIL] documentToPagePoints failed for rot=" << rot << std::endl;
+                        return 1;
+                    }
+                    if (std::abs(roundX - origX) > 1.0 || std::abs(roundY - origY) > 1.0) {
+                        std::cerr << "[FAIL] Coordinate round-trip mismatch at rot=" << rot
+                                  << " orig=(" << origX << "," << origY << ") got=(" << roundX << "," << roundY << ")" << std::endl;
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        std::cout << "  -> Passed: Page Rotation in DocumentLayout (0, 90, 180, 270 deg) verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 11 DOCUMENT LAYOUT TESTS PASSED!   " << std::endl;
+    std::cout << " ALL 12 DOCUMENT LAYOUT TESTS PASSED!   " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

@@ -35,6 +35,7 @@ struct TileRenderRequest {
     double dpr{1.0};
     TileKey key;
     int priority{0}; // Higher value = rendered first
+    int rotation{0};
 };
 
 struct OpenResult {
@@ -231,7 +232,7 @@ Q_SIGNALS:
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
     /// Emitted when search finds matches on a page.
     void searchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
-    /// Emitted as search progresses page-by-page.\n
+    /// Emitted as search progresses page-by-page.
     void searchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);
     /// Emitted when a search across all pages completes.
     void searchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated);

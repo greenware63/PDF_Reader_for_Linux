@@ -422,6 +422,18 @@ void MainWindow::setupActions() {
         });
         fitPage->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_9));
     }
+    viewMenu->addSeparator();
+    {
+        QAction* rotateCw = viewMenu->addAction(tr("Rotate &Clockwise"), this, [this]() {
+            if (auto* v = currentViewer()) v->rotateClockwise();
+        });
+        rotateCw->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
+
+        QAction* rotateCcw = viewMenu->addAction(tr("Rotate Counter-&Clockwise"), this, [this]() {
+            if (auto* v = currentViewer()) v->rotateCounterClockwise();
+        });
+        rotateCcw->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R));
+    }
 
     // Tab navigation shortcuts
     auto* nextTabAction = new QAction(this);
@@ -482,6 +494,17 @@ void MainWindow::setupActions() {
     toolbar->addAction(tr("100%"), this, [this]() {
         if (auto* v = currentViewer()) v->zoomReset();
     });
+
+    toolbar->addSeparator();
+    QAction* rotateCwToolbarAction = toolbar->addAction(tr("Rotate CW"), this, [this]() {
+        if (auto* v = currentViewer()) v->rotateClockwise();
+    });
+    rotateCwToolbarAction->setToolTip(tr("Rotate Clockwise (Ctrl+R)"));
+
+    QAction* rotateCcwToolbarAction = toolbar->addAction(tr("Rotate CCW"), this, [this]() {
+        if (auto* v = currentViewer()) v->rotateCounterClockwise();
+    });
+    rotateCcwToolbarAction->setToolTip(tr("Rotate Counter-Clockwise (Ctrl+Shift+R)"));
 
     toolbar->addSeparator();
     QAction* darkToolbarAction = toolbar->addAction(tr("🌙 Dark"), this, [this]() {

@@ -3348,8 +3348,146 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: View modes, fit page/width per mode, page flipping and persistence verified." << std::endl;
     }
 
+    // Test 42: Page Rotation in PdfViewerWidget and MainWindow (Clockwise & Counter-Clockwise)
+    std::cout << "[TEST 42] Testing Page Rotation in PdfViewerWidget and MainWindow..." << std::endl;
+    {
+        ui::MainWindow window;
+        window.resize(1024, 768);
+        window.show();
+        QCoreApplication::processEvents();
+
+        std::string sampleDoc = "widget_test_rotation.pdf";
+        generateMultiPagePdf(sampleDoc, 2);
+
+        if (!window.openFile(QString::fromStdString(sampleDoc))) {
+            std::cerr << "[FAIL] Failed to open document for rotation test" << std::endl;
+            return 1;
+        }
+
+        auto* viewer = window.currentViewer();
+        QElapsedTimer loadTimer;
+        loadTimer.start();
+        while (loadTimer.elapsed() < 5000 && (!viewer || !viewer->isDocumentOpen())) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (!viewer || !viewer->isDocumentOpen()) {
+            std::cerr << "[FAIL] Document failed to open in rotation test" << std::endl;
+            return 1;
+        }
+
+        // 1. Initial rotation is 0
+        if (viewer->rotation() != 0) {
+            std::cerr << "[FAIL] Initial rotation expected 0, got " << viewer->rotation() << std::endl;
+            return 1;
+        }
+
+        int rotationSignalVal = -1;
+        int signalCount = 0;
+        QObject::connect(viewer, &ui::PdfViewerWidget::rotationChanged, [&](int deg) {
+            rotationSignalVal = deg;
+            ++signalCount;
+        });
+
+        // 2. Rotate Clockwise -> 90 deg
+        const uint64_t genBefore = viewer->currentGeneration();
+        viewer->rotateClockwise();
+        QCoreApplication::processEvents();
+        if (viewer->rotation() != 90 || rotationSignalVal != 90 || signalCount != 1) {
+            std::cerr << "[FAIL] rotateClockwise() failed: rotation=" << viewer->rotation()
+                      << " sigVal=" << rotationSignalVal << " sigCount=" << signalCount << std::endl;
+            return 1;
+        }
+        if (viewer->currentGeneration() <= genBefore) {
+            std::cerr << "[FAIL] rotateClockwise() must advance request generation to invalidate in-flight tiles" << std::endl;
+            return 1;
+        }
+        if (viewer->layout().rotation() != 90) {
+            std::cerr << "[FAIL] viewer->layout().rotation() expected 90, got " << viewer->layout().rotation() << std::endl;
+            return 1;
+        }
+
+        // 3. Render frame under 90 deg rotation and verify tile delivery
+        viewer->viewport()->repaint();
+        QElapsedTimer renderTimer;
+        renderTimer.start();
+        while (renderTimer.elapsed() < 5000 && viewer->cache().size() == 0) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+            viewer->viewport()->repaint();
+        }
+        viewer->waitForRendering();
+
+        // Verify that cached tile has rotation = 90
+        auto keyRot90 = pdf::TileKey::create(viewer->currentDocumentId(), 0, 0, 0,
+                                             pdf::quantizeScale(viewer->currentZoom()),
+                                             viewer->effectiveDpr(), 90);
+        if (!viewer->cache().contains(keyRot90)) {
+            std::cerr << "[FAIL] Cache should contain tile with rotation=90" << std::endl;
+            return 1;
+        }
+        auto keyRot0 = pdf::TileKey::create(viewer->currentDocumentId(), 0, 0, 0,
+                                            pdf::quantizeScale(viewer->currentZoom()),
+                                            viewer->effectiveDpr(), 0);
+        if (viewer->cache().contains(keyRot0)) {
+            std::cerr << "[FAIL] Cache key for rot=0 should not match rot=90 tile" << std::endl;
+            return 1;
+        }
+
+        // 4. Rotate Clockwise -> 180 deg
+        viewer->rotateClockwise();
+        QCoreApplication::processEvents();
+        if (viewer->rotation() != 180) {
+            std::cerr << "[FAIL] Second rotateClockwise() expected 180, got " << viewer->rotation() << std::endl;
+            return 1;
+        }
+
+        // 5. Rotate Clockwise -> 270 deg
+        viewer->rotateClockwise();
+        QCoreApplication::processEvents();
+        if (viewer->rotation() != 270) {
+            std::cerr << "[FAIL] Third rotateClockwise() expected 270, got " << viewer->rotation() << std::endl;
+            return 1;
+        }
+
+        // 6. Rotate Clockwise -> 360/0 deg wrap-around
+        viewer->rotateClockwise();
+        QCoreApplication::processEvents();
+        if (viewer->rotation() != 0) {
+            std::cerr << "[FAIL] Fourth rotateClockwise() expected 0 (wrap-around), got " << viewer->rotation() << std::endl;
+            return 1;
+        }
+
+        // 7. Rotate Counter-Clockwise -> 270 deg
+        viewer->rotateCounterClockwise();
+        QCoreApplication::processEvents();
+        if (viewer->rotation() != 270) {
+            std::cerr << "[FAIL] rotateCounterClockwise() expected 270, got " << viewer->rotation() << std::endl;
+            return 1;
+        }
+
+        // 8. Explicit setRotation
+        viewer->setRotation(180);
+        QCoreApplication::processEvents();
+        if (viewer->rotation() != 180) {
+            std::cerr << "[FAIL] setRotation(180) expected 180, got " << viewer->rotation() << std::endl;
+            return 1;
+        }
+
+        // 9. Document close resets rotation to 0
+        viewer->closeDocument();
+        QCoreApplication::processEvents();
+        if (viewer->rotation() != 0) {
+            std::cerr << "[FAIL] closeDocument() expected to reset rotation to 0, got " << viewer->rotation() << std::endl;
+            return 1;
+        }
+
+        window.closeCurrentTab();
+        std::cout << "  -> Passed: Page rotation (0, 90, 180, 270 deg CW/CCW), signals, generation invalidation, and tile key isolation verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 41 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 42 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

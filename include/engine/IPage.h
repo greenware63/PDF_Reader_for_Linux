@@ -39,14 +39,16 @@ public:
      * @param rect The sub-region rectangle in the page's virtual pixel grid.
      * @param scale Zoom factor (1.0 = 72 DPI, 1.333 = 96 DPI standard desktop).
      * @param devicePixelRatio Screen device pixel ratio.
+     * @param rotation Clockwise rotation in degrees (0, 90, 180, 270).
      * @return PixelBuffer containing the rendered tile.
      */
-    virtual PixelBuffer renderTile(const PixelRect& rect, double scale, double devicePixelRatio) = 0;
+    virtual PixelBuffer renderTile(const PixelRect& rect, double scale, double devicePixelRatio, int rotation = 0) = 0;
 
     /**
      * @brief Renders the entire page into a PixelBuffer, with memory caps for legacy whole-page viewing.
+     * @param rotation Clockwise rotation in degrees (0, 90, 180, 270).
      */
-    virtual PixelBuffer renderWholePage(double scale, double devicePixelRatio) = 0;
+    virtual PixelBuffer renderWholePage(double scale, double devicePixelRatio, int rotation = 0) = 0;
 
     /**
      * @brief Renders a miniature thumbnail of the page with the given target width,

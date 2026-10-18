@@ -157,6 +157,15 @@ public:
     void setFocusPage(int pageIndex) { m_focusPage = pageIndex; }
     int focusPage() const { return m_focusPage; }
 
+    /**
+     * @brief Sets page rotation in degrees (normalized to 0, 90, 180, 270).
+     * Takes effect on the next updateLayout().
+     */
+    void setRotation(int degrees) {
+        m_rotation = (degrees % 360 + 360) % 360;
+    }
+    int rotation() const noexcept { return m_rotation; }
+
     /// Number of pages sharing a row with `pageIndex` (1 or 2) and the row's first page index.
     int rowFirstPage(int pageIndex) const;
     int rowPageCount(int pageIndex) const;
@@ -233,6 +242,7 @@ private:
     int m_focusPage{0};
     double m_scale{1.0};
     double m_dpr{1.0};
+    int m_rotation{0};
 };
 
 } // namespace layout

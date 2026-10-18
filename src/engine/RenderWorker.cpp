@@ -669,7 +669,7 @@ void RenderWorker::workerLoop() {
             if (m_workerDocument && m_running.load()) {
                 IPage* page = getOrLoadWorkerPage(req.pageIndex);
                 if (page) {
-                    buffer = page->renderTile(req.rect, req.scale, req.dpr);
+                    buffer = page->renderTile(req.rect, req.scale, req.dpr, req.rotation != 0 ? req.rotation : req.key.rotation);
                     renderedSuccessfully = buffer.isValid() && (buffer.data() != nullptr);
                 }
             }

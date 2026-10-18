@@ -50,7 +50,7 @@ void PdfiumPage::getPixelDimensions(double scale, double devicePixelRatio, int& 
     layout::computePagePixelDimensions(m_width, m_height, scale, devicePixelRatio, outWidth, outHeight);
 }
 
-PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double devicePixelRatio) {
+PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double devicePixelRatio, int rotation) {
     if (!m_page || m_width <= 0.0 || m_height <= 0.0 || !rect.isValid()) {
         return {};
     }
@@ -61,9 +61,18 @@ PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double d
         return {};
     }
 
-    int fullPageW = 0;
-    int fullPageH = 0;
-    getPixelDimensions(scale, devicePixelRatio, fullPageW, fullPageH);
+    const int rot = (rotation % 360 + 360) % 360;
+    int pdfiumRotate = 0;
+    if (rot == 90) pdfiumRotate = 1;
+    else if (rot == 180) pdfiumRotate = 2;
+    else if (rot == 270) pdfiumRotate = 3;
+
+    int unrotatedW = 0;
+    int unrotatedH = 0;
+    getPixelDimensions(scale, devicePixelRatio, unrotatedW, unrotatedH);
+
+    const int fullPageW = (pdfiumRotate == 1 || pdfiumRotate == 3) ? unrotatedH : unrotatedW;
+    const int fullPageH = (pdfiumRotate == 1 || pdfiumRotate == 3) ? unrotatedW : unrotatedH;
 
     // Intersect requested rect with valid page pixel coordinates
     int x0 = std::clamp(rect.x, 0, fullPageW);
@@ -114,7 +123,7 @@ PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double d
         -y0,
         fullPageW,
         fullPageH,
-        0,
+        pdfiumRotate,
         flags
     );
 
@@ -122,14 +131,23 @@ PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double d
     return buffer;
 }
 
-PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio) {
+PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio, int rotation) {
     if (!m_page || m_width <= 0.0 || m_height <= 0.0) {
         return {};
     }
 
-    int pixelW = 0;
-    int pixelH = 0;
-    getPixelDimensions(scale, devicePixelRatio, pixelW, pixelH);
+    const int rot = (rotation % 360 + 360) % 360;
+    int pdfiumRotate = 0;
+    if (rot == 90) pdfiumRotate = 1;
+    else if (rot == 180) pdfiumRotate = 2;
+    else if (rot == 270) pdfiumRotate = 3;
+
+    int unrotatedW = 0;
+    int unrotatedH = 0;
+    getPixelDimensions(scale, devicePixelRatio, unrotatedW, unrotatedH);
+
+    int pixelW = (pdfiumRotate == 1 || pdfiumRotate == 3) ? unrotatedH : unrotatedW;
+    int pixelH = (pdfiumRotate == 1 || pdfiumRotate == 3) ? unrotatedW : unrotatedH;
 
     // Apply safety caps ONLY to single-buffer whole-page renders
     int64_t totalPixels = static_cast<int64_t>(pixelW) * pixelH;
@@ -171,7 +189,7 @@ PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio) {
     }
 
     const int flags = FPDF_ANNOT;
-    FPDF_RenderPageBitmap(bitmap, m_page, 0, 0, pixelW, pixelH, 0, flags);
+    FPDF_RenderPageBitmap(bitmap, m_page, 0, 0, pixelW, pixelH, pdfiumRotate, flags);
 
     FPDFBitmap_Destroy(bitmap);
     return buffer;

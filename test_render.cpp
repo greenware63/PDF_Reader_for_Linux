@@ -1641,8 +1641,99 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Page label extraction verified with and without /PageLabels dictionaries." << std::endl;
     }
 
+    // Test 20: Rotated whole-page and tile rendering (0, 90, 180, 270 degrees)
+    std::cout << "[TEST 20] Testing rotated whole-page and tile rendering (0, 90, 180, 270 deg)..." << std::endl;
+    {
+        std::string rotPath = "text_test.pdf";
+        auto rotDoc = pdf::createDocument();
+        if (rotDoc->loadFromFile(rotPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to load text_test.pdf for rotation test" << std::endl;
+            return 1;
+        }
+        auto page = rotDoc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Failed to acquire page for rotation test" << std::endl;
+            return 1;
+        }
+
+        // Render unrotated whole page
+        pdf::PixelBuffer buf0 = page->renderWholePage(1.0, 1.0, 0);
+        if (!buf0.isValid()) {
+            std::cerr << "[FAIL] Unrotated whole page render failed" << std::endl;
+            return 1;
+        }
+        int w0 = buf0.width();
+        int h0 = buf0.height();
+
+        // Render at 90 degrees
+        pdf::PixelBuffer buf90 = page->renderWholePage(1.0, 1.0, 90);
+        if (!buf90.isValid() || buf90.width() != h0 || buf90.height() != w0) {
+            std::cerr << "[FAIL] Rotated 90 deg whole page dimensions incorrect: expected "
+                      << h0 << "x" << w0 << ", got " << buf90.width() << "x" << buf90.height() << std::endl;
+            return 1;
+        }
+
+        // Render at 180 degrees
+        pdf::PixelBuffer buf180 = page->renderWholePage(1.0, 1.0, 180);
+        if (!buf180.isValid() || buf180.width() != w0 || buf180.height() != h0) {
+            std::cerr << "[FAIL] Rotated 180 deg whole page dimensions incorrect: expected "
+                      << w0 << "x" << h0 << ", got " << buf180.width() << "x" << buf180.height() << std::endl;
+            return 1;
+        }
+
+        // Render at 270 degrees
+        pdf::PixelBuffer buf270 = page->renderWholePage(1.0, 1.0, 270);
+        if (!buf270.isValid() || buf270.width() != h0 || buf270.height() != w0) {
+            std::cerr << "[FAIL] Rotated 270 deg whole page dimensions incorrect: expected "
+                      << h0 << "x" << w0 << ", got " << buf270.width() << "x" << buf270.height() << std::endl;
+            return 1;
+        }
+
+        // Test rotated tile rendering at 90 degrees
+        int tileW = h0 / 2;
+        int tileH = w0 / 2;
+        pdf::PixelBuffer tile90 = page->renderTile({0, 0, tileW, tileH}, 1.0, 1.0, 90);
+        if (!tile90.isValid() || tile90.width() != tileW || tile90.height() != tileH) {
+            std::cerr << "[FAIL] Rotated 90 deg tile render failed or wrong dimensions: expected "
+                      << tileW << "x" << tileH << ", got " << tile90.width() << "x" << tile90.height() << std::endl;
+            return 1;
+        }
+
+        // Test rotated tile rendering at 270 degrees
+        pdf::PixelBuffer tile270 = page->renderTile({tileW, 0, h0 - tileW, tileH}, 1.0, 1.0, 270);
+        if (!tile270.isValid() || tile270.width() != (h0 - tileW) || tile270.height() != tileH) {
+            std::cerr << "[FAIL] Rotated 270 deg tile render failed or wrong dimensions: expected "
+                      << (h0 - tileW) << "x" << tileH << ", got " << tile270.width() << "x" << tile270.height() << std::endl;
+            return 1;
+        }
+
+        // Verify that 90 deg render is non-blank (contains glyph pixels)
+        bool hasContent = false;
+        const uint8_t* scan90 = buf90.data();
+        for (int y = 0; y < buf90.height(); ++y) {
+            const uint32_t* row = reinterpret_cast<const uint32_t*>(scan90 + y * buf90.stride());
+            for (int x = 0; x < buf90.width(); ++x) {
+                uint32_t pixel = row[x];
+                uint8_t b = pixel & 0xFF;
+                uint8_t g = (pixel >> 8) & 0xFF;
+                uint8_t r = (pixel >> 16) & 0xFF;
+                if (r < 250 || g < 250 || b < 250) {
+                    hasContent = true;
+                    break;
+                }
+            }
+            if (hasContent) break;
+        }
+        if (!hasContent) {
+            std::cerr << "[FAIL] Rotated 90 deg whole page appears completely white/blank" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Rotated whole-page (90, 180, 270 deg) and rotated tiles rendered with correct swapped dimensions and non-blank content." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 19 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 20 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
