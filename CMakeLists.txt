@@ -188,6 +188,7 @@ if(ENABLE_TEST_HOOKS)
     message(WARNING "ENABLE_TEST_HOOKS=ON: worker fault-injection hooks are compiled in. Do not ship this build.")
     target_compile_definitions(pdf_worker PRIVATE PDF_WORKER_TEST_HOOKS=1)
     target_compile_definitions(pdf_engine PUBLIC PDF_WORKER_TEST_HOOKS=1)
+    target_compile_definitions(pdf_ipc PUBLIC PDF_WORKER_TEST_HOOKS=1)
 else()
     message(STATUS "ENABLE_TEST_HOOKS=OFF: shipping worker configuration.")
 endif()
@@ -300,6 +301,9 @@ target_link_libraries(test_password_prompt PRIVATE
 add_executable(test_worker_ipc
     test_worker_ipc.cpp
 )
+if(ENABLE_TEST_HOOKS)
+    target_compile_definitions(test_worker_ipc PRIVATE PDF_WORKER_TEST_HOOKS=1)
+endif()
 
 target_include_directories(test_worker_ipc PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include

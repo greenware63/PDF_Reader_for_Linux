@@ -189,6 +189,10 @@ public:
      */
     void setHangEngineForTesting(bool hang) noexcept {
         m_testHangEngine.store(hang, std::memory_order_relaxed);
+        if (hang) {
+            noteProgress(ipc::WorkerOp::Tile);
+            m_cv.notify_all();
+        }
     }
 #endif
 

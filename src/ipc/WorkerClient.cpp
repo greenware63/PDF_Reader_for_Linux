@@ -835,8 +835,6 @@ void WorkerClient::onWatchdogTimeout() {
     sendMessage(MessageType::Ping, serialize(PingRequest{m_nextControlRequestId++}));
 }
 
-} // namespace pdf::ipc
-
 #ifdef PDF_WORKER_TEST_HOOKS
 void WorkerClient::hangEngineForTesting() {
     WorkerControlRequest req;
@@ -845,3 +843,5 @@ void WorkerClient::hangEngineForTesting() {
     sendMessage(MessageType::WorkerControlRequest, serialize(req));
 }
 #endif
+
+} // namespace pdf::ipc

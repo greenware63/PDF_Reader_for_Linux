@@ -18,6 +18,12 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#if __has_include(<linux/seccomp.h>) && __has_include(<linux/filter.h>)
+#include <linux/seccomp.h>
+#include <linux/filter.h>
+#include <cstddef>
+#define PDF_WORKER_HAS_SECCOMP_HEADERS 1
+#endif
 
 #if __has_include(<linux/landlock.h>)
 #include <linux/landlock.h>
@@ -63,6 +69,22 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
 
     if (testFailRlimit) {
         errorMessage = "Setting resource limit RLIMIT_AS failed: Operation not permitted (injected test failure)";
+        return false;
+    }
+
+    // 0. Descriptor hygiene: close any inherited file descriptors above stderr (0, 1, 2)
+    // to ensure no sensitive files or parent IPC pipes leak into the untrusted worker process.
+    const int maxOpenFds = static_cast<int>(sysconf(_SC_OPEN_MAX));
+    for (int fd = 3; fd < (maxOpenFds > 0 ? maxOpenFds : 1024); ++fd) {
+        ::close(fd);
+    }
+
+    // 0.1 Core dump & ptrace protection: prevent memory inspection and dump retention (T1, T5)
+    if (prctl(PR_SET_DUMPABLE, 0) != 0) {
+        errorMessage = "PR_SET_DUMPABLE failed: " + std::string(std::strerror(errno));
+        return false;
+    }
+    if (!setWorkerResourceLimit(RLIMIT_CORE, 0, 0, "RLIMIT_CORE", errorMessage)) {
         return false;
     }
 
@@ -113,6 +135,28 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
         errorMessage = "PR_SET_NO_NEW_PRIVS failed: " + std::string(std::strerror(errno));
         return false;
     }
+
+#if defined(PDF_WORKER_HAS_SECCOMP_HEADERS) && defined(PR_SET_SECCOMP) && defined(SECCOMP_MODE_FILTER) && defined(__NR_execve)
+    // 4. Seccomp BPF filter: deny execve and execveat to eliminate process execution vectors (T1, T2)
+    struct sock_filter seccompExecveFilter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, nr))),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+#ifdef __NR_execveat
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execveat, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+#endif
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog seccompExecveProg = {
+        .len = static_cast<unsigned short>(sizeof(seccompExecveFilter) / sizeof(seccompExecveFilter[0])),
+        .filter = seccompExecveFilter,
+    };
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &seccompExecveProg) != 0) {
+        errorMessage = "prctl(PR_SET_SECCOMP) denying execve failed: " + std::string(std::strerror(errno));
+        return false;
+    }
+#endif
 
 #if defined(PDF_WORKER_HAS_LANDLOCK_HEADERS) && \
     defined(LANDLOCK_CREATE_RULESET_VERSION) && defined(SYS_landlock_create_ruleset) && \

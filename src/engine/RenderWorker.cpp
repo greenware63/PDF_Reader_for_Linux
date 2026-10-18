@@ -120,6 +120,11 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
         }
 
         m_controlQueue.push_back({[this, documentId, filePath, password]() {
+            noteProgress(ipc::WorkerOp::Open);
+            struct OpenGuard {
+                RenderWorker* w;
+                ~OpenGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+            } guard{this};
             if (const int delayMs = m_testOpenDelayMs.load(std::memory_order_relaxed); delayMs > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
@@ -181,6 +186,11 @@ void RenderWorker::requestThumbnail(int64_t documentId, int pageIndex, int targe
         return;
     }
     m_controlQueue.push_back({[this, documentId, pageIndex, targetWidth]() {
+        noteProgress(ipc::WorkerOp::Thumbnail);
+        struct ThumbGuard {
+            RenderWorker* w;
+            ~ThumbGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
         if (documentId != m_activeDocumentId.load() || !m_workerDocument) {
             Q_EMIT thumbnailFailed(documentId, pageIndex);
             return;
@@ -207,6 +217,11 @@ void RenderWorker::requestPrintPage(int64_t documentId, int pageIndex, double sc
         return;
     }
     m_controlQueue.push_back({[this, documentId, pageIndex, scale, dpr]() {
+        noteProgress(ipc::WorkerOp::Print);
+        struct PrintGuard {
+            RenderWorker* w;
+            ~PrintGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
         if (documentId != m_activeDocumentId.load() || !m_workerDocument) {
             Q_EMIT printPageFailed(documentId, pageIndex);
             return;
@@ -233,6 +248,11 @@ void RenderWorker::requestExtractPages(int64_t documentId, int firstPage, int la
         return;
     }
     m_controlQueue.push_back({[this, documentId, firstPage, lastPage]() {
+        noteProgress(ipc::WorkerOp::Extract);
+        struct ExtractGuard {
+            RenderWorker* w;
+            ~ExtractGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
         if (documentId != m_activeDocumentId.load() || !m_workerDocument) {
             Q_EMIT extractPagesFailed(documentId, firstPage, lastPage);
             return;
@@ -432,6 +452,7 @@ void RenderWorker::startSearch(int64_t documentId, int64_t searchId, const QStri
 
 void RenderWorker::cancelSearch() {
     m_currentSearchId.fetch_add(1);
+    noteProgress(ipc::WorkerOp::Idle);
 
     std::lock_guard<std::mutex> lock(m_mutex);
     m_activeSearch.searchId = 0;
@@ -504,7 +525,8 @@ std::pair<int64_t, uint32_t> RenderWorker::progressSnapshot() const noexcept {
 bool RenderWorker::isEngineProgressing(int64_t maxSilentDurationMs) const noexcept {
     const int64_t last = m_lastProgressEpochMs.load(std::memory_order_relaxed);
     if (last == 0) return true;
-    const int64_t now = QDateTime::currentMSecsSinceEpoch();
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     return (now - last) <= maxSilentDurationMs;
 }
 
@@ -528,7 +550,6 @@ void RenderWorker::workerLoop() {
             }
         }
 #endif
-        m_lastProgressEpochMs.store(QDateTime::currentMSecsSinceEpoch(), std::memory_order_relaxed);
         ControlTask ctrlTask;
         bool hasControlTask = false;
         TileRenderRequest req;
@@ -548,6 +569,7 @@ void RenderWorker::workerLoop() {
         bool isLastSearchPage = false;
 
         {
+            noteProgress(ipc::WorkerOp::Idle);
             std::unique_lock<std::mutex> lock(m_mutex);
             m_cv.wait(lock, [&]() {
                 if (!m_running.load()) return true;
@@ -636,6 +658,11 @@ void RenderWorker::workerLoop() {
         }
 
         if (hasRenderRequest) {
+            noteProgress(ipc::WorkerOp::Tile);
+            struct TileGuard {
+                RenderWorker* w;
+                ~TileGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+            } guard{this};
             PixelBuffer buffer;
             bool renderedSuccessfully = false;
 
@@ -712,6 +739,7 @@ void RenderWorker::workerLoop() {
 
                 if (isLastSearchPage || limitReached) {
                     Q_EMIT searchCompleted(searchDocId, searchId, totalSoFar, searchTruncated);
+                    noteProgress(ipc::WorkerOp::Idle);
                     std::lock_guard<std::mutex> lock(m_mutex);
                     if (m_activeSearch.searchId == searchId) {
                         m_activeSearch.searchId = 0;

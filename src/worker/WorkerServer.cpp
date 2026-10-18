@@ -309,6 +309,9 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             if (request.openDelayMs >= 0) {
                 m_engineWorker.setOpenDelayForTesting(std::chrono::milliseconds(request.openDelayMs));
             }
+            if (request.hangEngine) {
+                m_engineWorker.setHangEngineForTesting(true);
+            }
 #endif
             if (request.waitForIdle) {
                 m_engineWorker.waitForIdle();
