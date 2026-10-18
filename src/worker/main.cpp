@@ -10,6 +10,11 @@
 #ifdef __linux__
 #include <sys/prctl.h>
 #include <sys/syscall.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/un.h>
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -31,6 +36,23 @@ static bool applyProcessIsolation(std::string& errorMessage) {
         errorMessage = "Parent process exited while worker isolation was being configured.";
         return false;
     }
+
+    // Set resource limits (RLIMIT_AS, RLIMIT_CPU, RLIMIT_NOFILE) to prevent resource exhaustion (T5)
+    // 1. RLIMIT_AS: 4 GiB virtual address space cap
+    struct rlimit rlim{};
+    rlim.rlim_cur = 4096ULL * 1024 * 1024;
+    rlim.rlim_max = 4096ULL * 1024 * 1024;
+    setrlimit(RLIMIT_AS, &rlim);
+
+    // 2. RLIMIT_CPU: 60s soft / 120s hard CPU limit
+    rlim.rlim_cur = 60;
+    rlim.rlim_max = 120;
+    setrlimit(RLIMIT_CPU, &rlim);
+
+    // 3. RLIMIT_NOFILE: max 256 open file descriptors
+    rlim.rlim_cur = 256;
+    rlim.rlim_max = 256;
+    setrlimit(RLIMIT_NOFILE, &rlim);
 
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
         errorMessage = "PR_SET_NO_NEW_PRIVS failed: " + std::string(std::strerror(errno));
@@ -144,6 +166,107 @@ static bool applyProcessIsolation(std::string& errorMessage) {
     return true;
 }
 
+static int runIsolationSelftest() {
+    std::cout << "=== PDF WORKER ISOLATION SELFTEST ===" << std::endl;
+#ifndef __linux__
+    std::cout << "[ISOLATION_SELFTEST] platform: SKIPPED (non-Linux)" << std::endl;
+    return 0;
+#else
+    // Probe 1: Write to /tmp
+    bool writeBlocked = false;
+    {
+        const std::string tmpPath = "/tmp/pdf_worker_selftest_" + std::to_string(getpid()) + ".tmp";
+        int fd = open(tmpPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) {
+            writeBlocked = (errno == EACCES || errno == EPERM || errno == EROFS);
+        } else {
+            close(fd);
+            unlink(tmpPath.c_str());
+        }
+    }
+    std::cout << "[ISOLATION_SELFTEST] write_tmp: " << (writeBlocked ? "BLOCKED" : "PERMITTED") << std::endl;
+
+    // Probe 2: Read file outside document (e.g. /etc/passwd or ~/.bashrc)
+    bool readPermitted = false;
+    {
+        int fd = open("/etc/passwd", O_RDONLY);
+        if (fd >= 0) {
+            readPermitted = true;
+            close(fd);
+        } else {
+            const char* home = getenv("HOME");
+            if (home) {
+                std::string bashrc = std::string(home) + "/.bashrc";
+                fd = open(bashrc.c_str(), O_RDONLY);
+                if (fd >= 0) {
+                    readPermitted = true;
+                    close(fd);
+                }
+            }
+        }
+    }
+    std::cout << "[ISOLATION_SELFTEST] read_outside: " << (readPermitted ? "PERMITTED" : "BLOCKED") << std::endl;
+
+    // Probe 3: Open TCP network socket
+    bool networkPermitted = false;
+    {
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock >= 0) {
+            networkPermitted = true;
+            close(sock);
+        }
+    }
+    std::cout << "[ISOLATION_SELFTEST] open_tcp: " << (networkPermitted ? "PERMITTED" : "BLOCKED") << std::endl;
+
+    // Probe 4: Connect to Session Bus (D-Bus)
+    bool sessionBusPermitted = false;
+    {
+        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (sock >= 0) {
+            const char* dbusAddr = getenv("DBUS_SESSION_BUS_ADDRESS");
+            std::string path;
+            if (dbusAddr && strncmp(dbusAddr, "unix:path=", 10) == 0) {
+                path = dbusAddr + 10;
+                size_t comma = path.find(',');
+                if (comma != std::string::npos) path = path.substr(0, comma);
+            } else {
+                path = "/run/user/" + std::to_string(getuid()) + "/bus";
+            }
+            sockaddr_un addr{};
+            addr.sun_family = AF_UNIX;
+            if (!path.empty() && path.length() < sizeof(addr.sun_path)) {
+                std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+                if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+                    sessionBusPermitted = true;
+                } else if (errno != EACCES && errno != EPERM) {
+                    // Socket syscall itself permitted (failed with e.g. ENOENT or ECONNREFUSED)
+                    sessionBusPermitted = true;
+                }
+            } else {
+                sessionBusPermitted = true;
+            }
+            close(sock);
+        }
+    }
+    std::cout << "[ISOLATION_SELFTEST] session_bus: " << (sessionBusPermitted ? "PERMITTED" : "BLOCKED") << std::endl;
+
+    // Probe 5: Delete / create foreign file in /dev/shm
+    bool devShmPermitted = false;
+    {
+        const std::string foreignPath = "/dev/shm/pdf_worker_probe_foreign_" + std::to_string(getpid()) + ".tmp";
+        int fd = open(foreignPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            devShmPermitted = true;
+            close(fd);
+            unlink(foreignPath.c_str());
+        }
+    }
+    std::cout << "[ISOLATION_SELFTEST] dev_shm_foreign: " << (devShmPermitted ? "PERMITTED" : "BLOCKED") << std::endl;
+
+    return 0;
+#endif
+}
+
 int main(int argc, char* argv[]) {
     // Headless event loop: no X11/Wayland connection needed in the worker process
     QCoreApplication app(argc, argv);
@@ -160,7 +283,24 @@ int main(int argc, char* argv[]) {
         QStringLiteral("socketName")
     );
     parser.addOption(socketOption);
+
+    QCommandLineOption selftestOption(
+        QStringLiteral("isolation-selftest"),
+        QStringLiteral("Run sandbox isolation probe tests and exit.")
+    );
+    parser.addOption(selftestOption);
+
     parser.process(app);
+
+    if (parser.isSet(selftestOption)) {
+        std::string isolationError;
+        if (!applyProcessIsolation(isolationError)) {
+            std::cerr << "[pdf_worker] Failed to establish process isolation for selftest: "
+                      << isolationError << std::endl;
+            return 1;
+        }
+        return runIsolationSelftest();
+    }
 
     const QString socketName = parser.value(socketOption);
     if (socketName.isEmpty()) {

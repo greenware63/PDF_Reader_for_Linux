@@ -11,6 +11,7 @@
 #include <algorithm>
 #include "ipc/IpcProtocol.h"
 #include "ipc/IpcMessages.h"
+#include "ipc/WorkerClient.h"
 
 static bool waitFor(std::function<bool()> condition, int timeoutMs = 5000) {
     QElapsedTimer timer;
@@ -388,6 +389,78 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     std::cout << "  -> Passed: Abrupt worker termination detected cleanly; caller survived intact." << std::endl;
+
+    // --- TEST 8: Worker Isolation Self-Test Probe ---
+    std::cout << "[TEST 8] Testing worker sandbox isolation escape probe (--isolation-selftest)..." << std::endl;
+    {
+        QProcess selftestProc;
+        selftestProc.start(workerExe, QStringList() << QStringLiteral("--isolation-selftest"));
+        if (!selftestProc.waitForFinished(5000)) {
+            std::cerr << "[FAIL] Isolation selftest process timed out." << std::endl;
+            selftestProc.kill();
+            return 1;
+        }
+        const QString output = QString::fromUtf8(selftestProc.readAllStandardOutput());
+#ifdef Q_OS_LINUX
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] write_tmp: BLOCKED"))) {
+            std::cerr << "[FAIL] write_tmp probe should be BLOCKED on Linux." << std::endl;
+            return 1;
+        }
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] read_outside: PERMITTED")) ||
+            !output.contains(QStringLiteral("[ISOLATION_SELFTEST] open_tcp: PERMITTED")) ||
+            !output.contains(QStringLiteral("[ISOLATION_SELFTEST] session_bus: PERMITTED")) ||
+            !output.contains(QStringLiteral("[ISOLATION_SELFTEST] dev_shm_foreign: PERMITTED"))) {
+            std::cerr << "[FAIL] Baseline probes failed to report expected pre-hardening permissions." << std::endl;
+            return 1;
+        }
+#else
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] platform: SKIPPED (non-Linux)"))) {
+            std::cerr << "[FAIL] Non-Linux platform expected SKIPPED." << std::endl;
+            return 1;
+        }
+#endif
+        std::cout << "  -> Passed: Worker isolation escape probe baseline accurately verified." << std::endl;
+    }
+
+    // --- TEST 9: Heartbeat Watchdog Terminating Unresponsive/Spinning Worker ---
+    std::cout << "[TEST 9] Testing UI heartbeat watchdog terminating hung/spinning worker..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        // Fast watchdog parameters for the unit test: 80 ms interval, 3 missed pings = ~240 ms timeout
+        client.setWatchdogParams(80, 3);
+        const auto openRes = client.openDocumentSync(1, samplePdf.toStdString());
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document for watchdog test." << std::endl;
+            return 1;
+        }
+
+        bool failureSignalReceived = false;
+        QString failureMsg;
+        QObject::connect(&client, &pdf::ipc::WorkerClient::workerFailed, [&](const QString& msg) {
+            failureSignalReceived = true;
+            failureMsg = msg;
+        });
+
+        // Instruct the worker to spin forever, ignoring IPC and heartbeat pings
+        client.spinWorkerForTesting();
+
+        bool watchdogTriggered = waitFor([&]() {
+            return failureSignalReceived;
+        }, 5000);
+
+        if (!watchdogTriggered) {
+            std::cerr << "[FAIL] Watchdog failed to terminate spinning worker within timeout." << std::endl;
+            client.killWorkerForTesting();
+            return 1;
+        }
+        if (!failureMsg.contains(QStringLiteral("heartbeat timeout"))) {
+            std::cerr << "[FAIL] Worker failure did not cite heartbeat timeout: " << failureMsg.toStdString() << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Watchdog detected hung worker, terminated it, and reported: "
+                  << failureMsg.toStdString() << std::endl;
+        client.stop();
+    }
 
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;

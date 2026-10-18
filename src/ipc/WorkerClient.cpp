@@ -1,4 +1,4 @@
-﻿#include "WorkerClient.h"
+#include "WorkerClient.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -67,6 +67,7 @@ WorkerClient::WorkerClient(QObject* parent)
             this, &WorkerClient::onProcessFinished);
     connect(&m_connectTimer, &QTimer::timeout, this, &WorkerClient::tryConnect);
     m_connectTimer.setInterval(40);
+    connect(&m_watchdogTimer, &QTimer::timeout, this, &WorkerClient::onWatchdogTimeout);
 }
 
 WorkerClient::~WorkerClient() {
@@ -138,6 +139,10 @@ bool WorkerClient::ensureConnected() {
 void WorkerClient::onSocketConnected() {
     m_connectTimer.stop();
     m_failureReported = false;
+    m_missedPings = 0;
+    if (m_watchdogEnabled && m_watchdogIntervalMs > 0) {
+        m_watchdogTimer.start(m_watchdogIntervalMs);
+    }
     flushOutgoing();
 }
 
@@ -171,6 +176,8 @@ void WorkerClient::failWorker(const QString& message) {
     }
     m_failureReported = true;
     m_connectTimer.stop();
+    m_watchdogTimer.stop();
+    m_missedPings = 0;
     m_outgoingPackets.clear();
     m_outgoingBytes = 0;
     m_socket.abort();
@@ -257,6 +264,8 @@ void WorkerClient::openDocumentAsync(int64_t documentId, const std::string& file
 }
 
 void WorkerClient::closeDocumentSync() {
+    m_watchdogTimer.stop();
+    m_missedPings = 0;
     if (!ensureConnected()) {
         return;
     }
@@ -494,6 +503,8 @@ void WorkerClient::stop() {
     }
     m_stopping = true;
     m_connectTimer.stop();
+    m_watchdogTimer.stop();
+    m_missedPings = 0;
     m_socket.abort();
     m_outgoingPackets.clear();
     m_outgoingBytes = 0;
@@ -540,6 +551,13 @@ void WorkerClient::onSocketReadyRead() {
 
 void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) {
     switch (type) {
+        case MessageType::Pong: {
+            PongResponse response;
+            if (deserialize(payload, response)) {
+                m_missedPings = 0;
+            }
+            break;
+        }
         case MessageType::OpenDocumentResponse: {
             OpenDocumentResponse response;
             if (deserialize(payload, response)) {
@@ -735,12 +753,54 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
             }
             break;
         }
-        case MessageType::Pong:
-            break;
+
         default:
             failWorker(tr("PDF worker sent an unexpected message."));
             break;
     }
+}
+
+
+void WorkerClient::setWatchdogEnabled(bool enabled) {
+    m_watchdogEnabled = enabled;
+    if (!enabled) {
+        m_watchdogTimer.stop();
+        m_missedPings = 0;
+    } else if (m_socket.state() == QLocalSocket::ConnectedState && m_watchdogIntervalMs > 0) {
+        m_missedPings = 0;
+        m_watchdogTimer.start(m_watchdogIntervalMs);
+    }
+}
+
+void WorkerClient::setWatchdogParams(int intervalMs, int maxMissedPings) {
+    m_watchdogIntervalMs = intervalMs;
+    m_maxMissedPings = maxMissedPings;
+    if (m_watchdogEnabled && m_socket.state() == QLocalSocket::ConnectedState && intervalMs > 0) {
+        m_missedPings = 0;
+        m_watchdogTimer.start(intervalMs);
+    }
+}
+
+void WorkerClient::spinWorkerForTesting() {
+    sendMessage(MessageType::WorkerControlRequest,
+                serialize(WorkerControlRequest{0, -1, -1, false, false, true}));
+}
+
+void WorkerClient::onWatchdogTimeout() {
+    if (m_process.state() == QProcess::NotRunning || m_socket.state() != QLocalSocket::ConnectedState) {
+        m_watchdogTimer.stop();
+        return;
+    }
+    if (m_missedPings >= m_maxMissedPings) {
+        std::cerr << "[WorkerClient] Worker heartbeat timed out (" << m_missedPings
+                  << " missed pings). Terminating unresponsive worker." << std::endl;
+        m_watchdogTimer.stop();
+        m_process.kill();
+        failWorker(tr("PDF worker became unresponsive (heartbeat timeout)."));
+        return;
+    }
+    m_missedPings++;
+    sendMessage(MessageType::Ping, serialize(PingRequest{m_nextControlRequestId++}));
 }
 
 } // namespace pdf::ipc

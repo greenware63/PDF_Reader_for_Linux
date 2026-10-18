@@ -1,4 +1,4 @@
-﻿#include "ipc/IpcMessages.h"
+#include "ipc/IpcMessages.h"
 #include <algorithm>
 
 namespace pdf {
@@ -669,7 +669,8 @@ QDataStream& operator<<(QDataStream& out, const WorkerControlRequest& request) {
         << static_cast<qint32>(request.renderDelayMs)
         << static_cast<qint32>(request.openDelayMs)
         << request.waitForIdle
-        << request.queryStatus;
+        << request.queryStatus
+        << request.spinForever;
     return out;
 }
 
@@ -680,6 +681,11 @@ QDataStream& operator>>(QDataStream& in, WorkerControlRequest& request) {
     in >> renderDelay >> openDelay >> request.waitForIdle >> request.queryStatus;
     request.renderDelayMs = renderDelay;
     request.openDelayMs = openDelay;
+    if (!in.atEnd()) {
+        in >> request.spinForever;
+    } else {
+        request.spinForever = false;
+    }
     return in;
 }
 

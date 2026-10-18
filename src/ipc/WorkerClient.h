@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "ipc/IpcMessages.h"
 
@@ -41,6 +41,10 @@ public:
     void setRenderDelayForTesting(std::chrono::milliseconds delay);
     void setOpenDelayForTesting(std::chrono::milliseconds delay);
     void killWorkerForTesting();
+    void setWatchdogEnabled(bool enabled);
+    bool isWatchdogEnabled() const noexcept { return m_watchdogEnabled; }
+    void setWatchdogParams(int intervalMs, int maxMissedPings);
+    void spinWorkerForTesting();
     void requestThumbnail(int64_t documentId, int pageIndex, int targetWidth = 140);
     void requestPrintPage(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0);
     void requestExtractPages(int64_t documentId, int firstPage, int lastPage);
@@ -73,6 +77,7 @@ private Q_SLOTS:
     void onSocketError(QLocalSocket::LocalSocketError error);
     void onProcessError(QProcess::ProcessError error);
     void onProcessFinished(int exitCode, QProcess::ExitStatus status);
+    void onWatchdogTimeout();
 
 private:
     void startWorker();
@@ -88,6 +93,11 @@ private:
     QProcess m_process;
     QLocalSocket m_socket;
     QTimer m_connectTimer;
+    QTimer m_watchdogTimer;
+    int m_watchdogIntervalMs{2000};
+    int m_maxMissedPings{3};
+    int m_missedPings{0};
+    bool m_watchdogEnabled{true};
     QString m_serverName;
     QByteArray m_incomingBuffer;
     std::vector<QByteArray> m_outgoingPackets;
