@@ -1,5 +1,6 @@
-#include "engine/RenderWorker.h"
+﻿#include "engine/RenderWorker.h"
 #include "engine/SearchText.h"
+#include <QDateTime>
 #include <algorithm>
 
 namespace pdf {
@@ -488,6 +489,13 @@ IPage* RenderWorker::getOrLoadWorkerPage(int pageIndex) {
     return insIt->second.first.get();
 }
 
+bool RenderWorker::isEngineProgressing(int64_t maxSilentDurationMs) const noexcept {
+    const int64_t last = m_lastProgressEpochMs.load(std::memory_order_relaxed);
+    if (last == 0) return true;
+    const int64_t now = QDateTime::currentMSecsSinceEpoch();
+    return (now - last) <= maxSilentDurationMs;
+}
+
 void RenderWorker::postHealthCheck(std::function<void()> onHealthy) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_running.load()) {
@@ -501,11 +509,14 @@ void RenderWorker::workerLoop() {
     int tilesRenderedSinceSearch = 0;
 
     while (m_running.load()) {
+#ifdef PDF_WORKER_TEST_HOOKS
         if (m_testHangEngine.load(std::memory_order_relaxed)) {
             while (m_testHangEngine.load(std::memory_order_relaxed) && m_running.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         }
+#endif
+        m_lastProgressEpochMs.store(QDateTime::currentMSecsSinceEpoch(), std::memory_order_relaxed);
         ControlTask ctrlTask;
         bool hasControlTask = false;
         TileRenderRequest req;

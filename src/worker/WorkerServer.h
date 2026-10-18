@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <QObject>
 #include <QLocalServer>
@@ -21,7 +21,9 @@ public:
     ~WorkerServer() override;
 
     bool start();
+#ifdef PDF_WORKER_TEST_HOOKS
     void setHangEngineForTesting(bool hang) { m_engineWorker.setHangEngineForTesting(hang); }
+#endif
 
 Q_SIGNALS:
     void clientDisconnected();

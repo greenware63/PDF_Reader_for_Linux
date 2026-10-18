@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "ipc/IpcProtocol.h"
 #include "engine/IDocument.h"
@@ -177,7 +177,6 @@ struct WorkerControlRequest {
     int openDelayMs{-1};
     bool waitForIdle{false};
     bool queryStatus{false};
-    bool spinForever{false};
 };
 
 struct WorkerControlResponse {

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <QObject>
 #include <QMetaType>
@@ -175,11 +175,19 @@ public:
     void postHealthCheck(std::function<void()> onHealthy);
 
     /**
+     * @brief Checks if the engine worker is alive or actively progressing on an operation
+     * within the specified silent duration window.
+     */
+    bool isEngineProgressing(int64_t maxSilentDurationMs = 5000) const noexcept;
+
+#ifdef PDF_WORKER_TEST_HOOKS
+    /**
      * @brief Test hook: artificially blocks the engine thread to simulate an unresponsive engine.
      */
     void setHangEngineForTesting(bool hang) noexcept {
         m_testHangEngine.store(hang, std::memory_order_relaxed);
     }
+#endif
 
     /**
      * @brief Test hook: artificially delays every openDocumentAsync() by this many milliseconds
@@ -245,7 +253,10 @@ private:
     std::atomic<uint64_t> m_currentGeneration{0};
     std::atomic<size_t> m_cachedPageCount{0};
     std::atomic<int> m_testRenderDelayMs{0};
+    std::atomic<int64_t> m_lastProgressEpochMs{0};
+#ifdef PDF_WORKER_TEST_HOOKS
     std::atomic<bool> m_testHangEngine{false};
+#endif
     std::atomic<int> m_testOpenDelayMs{0};
     std::atomic<int64_t> m_currentSearchId{0};
 

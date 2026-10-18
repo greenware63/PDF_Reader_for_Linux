@@ -1,4 +1,4 @@
-#include "WorkerClient.h"
+﻿#include "WorkerClient.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -228,6 +228,12 @@ OpenResult WorkerClient::openDocumentSync(int64_t documentId, const std::string&
     if (!ensureConnected()) {
         return failedOpenResult();
     }
+    if (m_watchdogEnabled && m_socket.state() == QLocalSocket::ConnectedState && m_watchdogIntervalMs > 0) {
+        m_missedPings = 0;
+        if (!m_watchdogTimer.isActive()) {
+            m_watchdogTimer.start(m_watchdogIntervalMs);
+        }
+    }
     QEventLoop loop;
     QTimer timeout;
     timeout.setSingleShot(true);
@@ -258,6 +264,12 @@ OpenResult WorkerClient::openDocumentSync(int64_t documentId, const std::string&
 
 void WorkerClient::openDocumentAsync(int64_t documentId, const std::string& filePath,
                                      const std::string& password) {
+    if (m_watchdogEnabled && m_socket.state() == QLocalSocket::ConnectedState && m_watchdogIntervalMs > 0) {
+        m_missedPings = 0;
+        if (!m_watchdogTimer.isActive()) {
+            m_watchdogTimer.start(m_watchdogIntervalMs);
+        }
+    }
     sendMessage(MessageType::OpenDocumentRequest,
                 serialize(OpenDocumentRequest{documentId, QString::fromStdString(filePath),
                                               QString::fromStdString(password)}));
@@ -779,11 +791,6 @@ void WorkerClient::setWatchdogParams(int intervalMs, int maxMissedPings) {
         m_missedPings = 0;
         m_watchdogTimer.start(intervalMs);
     }
-}
-
-void WorkerClient::spinWorkerForTesting() {
-    sendMessage(MessageType::WorkerControlRequest,
-                serialize(WorkerControlRequest{0, -1, -1, false, false, true}));
 }
 
 void WorkerClient::onWatchdogTimeout() {

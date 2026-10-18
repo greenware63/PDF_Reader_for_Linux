@@ -1,4 +1,4 @@
-#include "WorkerServer.h"
+﻿#include "WorkerServer.h"
 #include <QCoreApplication>
 #include <QCommandLineParser>
 #include <QCommandLineOption>
@@ -64,12 +64,11 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
         return false;
     }
 
-    // 3. RLIMIT_CPU: Documented cumulative lifetime safety net (3600 CPU seconds).
-    // Note: Individual runaway rendering operations are detected and terminated by the UI heartbeat watchdog;
-    // RLIMIT_CPU serves as an ultimate last-resort lifetime budget for the worker process.
-    if (!setWorkerResourceLimit(RLIMIT_CPU, 3600, 3600, "RLIMIT_CPU", errorMessage)) {
-        return false;
-    }
+    // Architectural Note on RLIMIT_CPU:
+    // As identified in the security audit, RLIMIT_CPU is a cumulative process-lifetime budget
+    // rather than a per-operation timeout. Imposing an arbitrary CPU ceiling would terminate
+    // legitimate multi-hour reading sessions. Instead, runaway individual operations
+    // and infinite loops are detected and recovered per-operation via the non-blocking UI heartbeat watchdog.
 
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
         errorMessage = "PR_SET_NO_NEW_PRIVS failed: " + std::string(std::strerror(errno));
@@ -390,6 +389,7 @@ int main(int argc, char* argv[]) {
     );
     parser.addOption(shmMarkerOption);
 
+#ifdef PDF_WORKER_TEST_HOOKS
     QCommandLineOption testFailRlimitOption(
         QStringLiteral("test-fail-rlimit"),
         QStringLiteral("Test hook: simulate setrlimit failure during process isolation setup.")
@@ -401,10 +401,15 @@ int main(int argc, char* argv[]) {
         QStringLiteral("Test hook: simulate engine-thread hang for watchdog verification.")
     );
     parser.addOption(testHangEngineOption);
+#endif
 
     parser.process(app);
 
+#ifdef PDF_WORKER_TEST_HOOKS
     const bool testFailRlimit = parser.isSet(testFailRlimitOption);
+#else
+    const bool testFailRlimit = false;
+#endif
 
     if (parser.isSet(selftestOption)) {
         std::string isolationError;
@@ -433,9 +438,11 @@ int main(int argc, char* argv[]) {
     }
 
     pdf::worker::WorkerServer server(socketName);
+#ifdef PDF_WORKER_TEST_HOOKS
     if (parser.isSet(testHangEngineOption)) {
         server.setHangEngineForTesting(true);
     }
+#endif
 
     if (!server.start()) {
         std::cerr << "[pdf_worker] Failed to listen on socket: " << socketName.toStdString() << std::endl;

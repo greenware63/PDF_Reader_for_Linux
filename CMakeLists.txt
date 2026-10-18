@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+﻿cmake_minimum_required(VERSION 3.24)
 project(pdf-reader LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -182,6 +182,12 @@ target_link_libraries(pdf_worker PRIVATE
     Qt6::Core
     Qt6::Network
 )
+
+option(ENABLE_TEST_HOOKS "Enable test-only hooks in worker for watchdog verification" ON)
+if(ENABLE_TEST_HOOKS)
+    target_compile_definitions(pdf_worker PRIVATE PDF_WORKER_TEST_HOOKS=1)
+    target_compile_definitions(pdf_engine PUBLIC PDF_WORKER_TEST_HOOKS=1)
+endif()
 
 # Main desktop application executable
 add_executable(pdf-reader

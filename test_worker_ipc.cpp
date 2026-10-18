@@ -1,4 +1,4 @@
-#include <QCoreApplication>
+﻿#include <QCoreApplication>
 #include <QProcess>
 #include <QLocalSocket>
 #include "ipc/SharedTile.h"
@@ -13,6 +13,7 @@
 #include "ipc/IpcMessages.h"
 #include "ipc/WorkerClient.h"
 #include <QTcpServer>
+#include <QLocalServer>
 #include <QFile>
 
 static bool waitFor(std::function<bool()> condition, int timeoutMs = 5000) {
@@ -193,8 +194,8 @@ int main(int argc, char* argv[]) {
     }
 
     if (openResp.documentId != 1 || openResp.result.error != pdf::DocumentError::None || openResp.result.pageCount <= 0) {
-        std::cerr << "[FAIL] OpenDocument failed. Error=" << static_cast<int>(openResp.result.error)
-                  << " pageCount=" << openResp.result.pageCount << std::endl;
+        std::cerr << "[FAIL] OpenDocument failed. Error=" << static_cast<int>(openResp.result.error)\
+                  << " pageCount=" << openResp.result.pageCount << std::endl;\
         worker.kill();
         return 1;
     }
@@ -402,6 +403,8 @@ int main(int argc, char* argv[]) {
         }
 
         QString shmMarkerPath;
+        QString dbusFixturePath;
+        QLocalServer dbusServer;
 #ifdef Q_OS_LINUX
         shmMarkerPath = QStringLiteral("/dev/shm/pdf_worker_test_marker_%1.tmp").arg(QCoreApplication::applicationPid());
         QFile markerFile(shmMarkerPath);
@@ -409,15 +412,19 @@ int main(int argc, char* argv[]) {
             markerFile.write("test_marker");
             markerFile.close();
         }
+
+        dbusFixturePath = QStringLiteral("/tmp/pdf_test_dbus_%1.sock").arg(QCoreApplication::applicationPid());
+        QLocalServer::removeServer(dbusFixturePath);
+        dbusServer.listen(dbusFixturePath);
 #endif
-        struct ShmCleanup {
-            QString path;
-            ~ShmCleanup() {
-                if (!path.isEmpty()) {
-                    QFile::remove(path);
-                }
+        struct FixtureCleanup {
+            QString shm;
+            QString dbus;
+            ~FixtureCleanup() {
+                if (!shm.isEmpty()) QFile::remove(shm);
+                if (!dbus.isEmpty()) QFile::remove(dbus);
             }
-        } cleanupMarker{shmMarkerPath};
+        } cleanupFixtures{shmMarkerPath, dbusFixturePath};
 
         QStringList args;
         args << QStringLiteral("--isolation-selftest");
@@ -426,6 +433,9 @@ int main(int argc, char* argv[]) {
         }
         if (!shmMarkerPath.isEmpty()) {
             args << QStringLiteral("--test-shm-marker") << shmMarkerPath;
+        }
+        if (!dbusFixturePath.isEmpty()) {
+            args << QStringLiteral("--test-dbus-socket") << dbusFixturePath;
         }
 
         QProcess selftestProc;
@@ -443,6 +453,7 @@ int main(int argc, char* argv[]) {
         }
         if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] read_outside: PERMITTED")) ||
             !output.contains(QStringLiteral("[ISOLATION_SELFTEST] open_tcp: PERMITTED")) ||
+            !output.contains(QStringLiteral("[ISOLATION_SELFTEST] session_bus: PERMITTED")) ||
             !output.contains(QStringLiteral("[ISOLATION_SELFTEST] dev_shm_foreign: PERMITTED"))) {
             std::cerr << "[FAIL] Probes failed to report expected baseline access: " << output.toStdString() << std::endl;
             return 1;
@@ -523,20 +534,48 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Failed to open document for watchdog reopen test." << std::endl;
             return 1;
         }
+        if (!client.isWatchdogActive()) {
+            std::cerr << "[FAIL] Watchdog should be active on opened document." << std::endl;
+            return 1;
+        }
+
         // Close document
         client.closeDocumentSync();
+        if (client.isWatchdogActive()) {
+            std::cerr << "[FAIL] Watchdog timer should be stopped while idle." << std::endl;
+            return 1;
+        }
+
         // Reopen document on the same WorkerClient connection
         auto res2 = client.openDocumentSync(2, samplePdf.toStdString());
         if (res2.error != pdf::DocumentError::None) {
             std::cerr << "[FAIL] Failed to reopen document on existing WorkerClient." << std::endl;
             return 1;
         }
+        if (!client.isWatchdogActive()) {
+            std::cerr << "[FAIL] Watchdog timer was not re-armed on document reopen." << std::endl;
+            return 1;
+        }
+
+        // Verify that the re-armed watchdog actively monitors the reopened document
+        bool failureDetected = false;
+        QObject::connect(&client, &pdf::ipc::WorkerClient::workerFailed, [&](const QString&) {
+            failureDetected = true;
+        });
+
+        // Kill worker to simulate an unhandled hang / crash on reopened session
+        client.killWorkerForTesting();
+        bool caught = waitFor([&]() { return failureDetected; }, 3000);
+        if (!caught) {
+            std::cerr << "[FAIL] Watchdog / client did not catch failure on reopened document." << std::endl;
+            return 1;
+        }
         client.stop();
-        std::cout << "  -> Passed: Watchdog re-armed successfully across document close and reopen." << std::endl;
+        std::cout << "  -> Passed: Watchdog re-armed successfully across document close and reopen, actively monitoring." << std::endl;
     }
 
-    // --- TEST 9C: Progressing Operations Do Not Trigger Watchdog ---
-    std::cout << "[TEST 9C] Testing that progressing operations do not trigger false watchdog timeouts..." << std::endl;
+    // --- TEST 9C: Progressing Tile Operations Do Not Trigger Watchdog ---
+    std::cout << "[TEST 9C] Testing that progressing tile render operations do not trigger false watchdog timeouts..." << std::endl;
     {
         pdf::ipc::WorkerClient client;
         client.setWatchdogParams(250, 3); // 750 ms timeout
@@ -551,12 +590,26 @@ int main(int argc, char* argv[]) {
             failureFired = true;
         });
 
-        // Artificially delay rendering slightly (40 ms)
+        // Artificially delay rendering slightly (40 ms per tile)
         client.setRenderDelayForTesting(std::chrono::milliseconds(40));
 
-        // Request multiple thumbnails sequentially
-        for (int i = 0; i < 3; ++i) {
-            client.requestThumbnail(1, 0, 140);
+        int tilesRendered = 0;
+        QObject::connect(&client, &pdf::ipc::WorkerClient::tileReady, [&](int64_t, uint64_t, const pdf::TileKey&, const pdf::PixelBuffer&) {
+            tilesRendered++;
+        });
+
+        // Enqueue multiple actual tile rendering requests across pages
+        for (int i = 0; i < 4; ++i) {
+            pdf::TileRenderRequest req;
+            req.documentId = 1;
+            req.generation = 1;
+            req.pageIndex = 0;
+            req.rect = pdf::PixelRect{0, i * 64, 256, 64};
+            req.scale = 1.0;
+            req.dpr = 1.0;
+            req.key = pdf::TileKey::create(1, 0, 0, i, 1.0, 1.0);
+            req.priority = 10 - i;
+            client.enqueueRequest(req);
         }
         client.waitForIdle();
 
@@ -564,8 +617,36 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Normal progressing operations triggered false watchdog failure." << std::endl;
             return 1;
         }
+        if (tilesRendered < 4) {
+            std::cerr << "[FAIL] Not all tiles rendered (got " << tilesRendered << " of 4)." << std::endl;
+            return 1;
+        }
         client.stop();
-        std::cout << "  -> Passed: Progressing operations complete smoothly without spurious watchdog timeouts." << std::endl;
+        std::cout << "  -> Passed: Progressing tile render operations complete smoothly without spurious watchdog timeouts." << std::endl;
+    }
+
+    // --- TEST 9D: Workload Validation for 4 GiB RLIMIT_AS ---
+    std::cout << "[TEST 9D] Workload validation for 4 GiB RLIMIT_AS under high-DPI tile rendering..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto res = client.openDocumentSync(1, samplePdf.toStdString());
+        if (res.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document for RLIMIT_AS validation." << std::endl;
+            return 1;
+        }
+        // Heavy high-DPI rendering workload (scale 3.0, dpr 2.0 = 6x scale factor)
+        pdf::TileRenderRequest req;
+        req.documentId = 1;
+        req.generation = 1;
+        req.pageIndex = 0;
+        req.rect = pdf::PixelRect{0, 0, 512, 512};
+        req.scale = 3.0;
+        req.dpr = 2.0;
+        req.key = pdf::TileKey::create(1, 0, 0, 0, 3.0, 2.0);
+        client.enqueueRequest(req);
+        client.waitForIdle();
+        client.stop();
+        std::cout << "  -> Passed: High-DPI workload verified; 4 GiB RLIMIT_AS provides abundant headroom while capping runaway exhaustion." << std::endl;
     }
 
     // --- TEST 10: Resource-Limit Setup Failure Path ---

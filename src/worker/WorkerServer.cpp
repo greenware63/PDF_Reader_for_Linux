@@ -1,4 +1,4 @@
-#include "WorkerServer.h"
+﻿#include "WorkerServer.h"
 #include <QCoreApplication>
 #include <QRandomGenerator>
 #include <algorithm>
@@ -300,12 +300,7 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             if (!ipc::deserialize(payload, request)) {
                 break;
             }
-            if (request.spinForever) {
-                std::cerr << "[WorkerServer] spinForever requested for testing. Simulating hung worker." << std::endl;
-                while (true) {
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                }
-            }
+
             if (request.renderDelayMs >= 0) {
                 m_engineWorker.setRenderDelayForTesting(std::chrono::milliseconds(request.renderDelayMs));
             }

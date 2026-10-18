@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "ipc/IpcMessages.h"
 
@@ -43,8 +43,8 @@ public:
     void killWorkerForTesting();
     void setWatchdogEnabled(bool enabled);
     bool isWatchdogEnabled() const noexcept { return m_watchdogEnabled; }
+    bool isWatchdogActive() const noexcept { return m_watchdogTimer.isActive(); }
     void setWatchdogParams(int intervalMs, int maxMissedPings);
-    void spinWorkerForTesting();
     void requestThumbnail(int64_t documentId, int pageIndex, int targetWidth = 140);
     void requestPrintPage(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0);
     void requestExtractPages(int64_t documentId, int firstPage, int lastPage);
