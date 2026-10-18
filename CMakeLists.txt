@@ -183,10 +183,13 @@ target_link_libraries(pdf_worker PRIVATE
     Qt6::Network
 )
 
-option(ENABLE_TEST_HOOKS "Enable test-only hooks in worker for watchdog verification" ON)
+option(ENABLE_TEST_HOOKS "Enable test-only hooks in worker (fault injection). OFF for shipping builds." OFF)
 if(ENABLE_TEST_HOOKS)
+    message(WARNING "ENABLE_TEST_HOOKS=ON: worker fault-injection hooks are compiled in. Do not ship this build.")
     target_compile_definitions(pdf_worker PRIVATE PDF_WORKER_TEST_HOOKS=1)
     target_compile_definitions(pdf_engine PUBLIC PDF_WORKER_TEST_HOOKS=1)
+else()
+    message(STATUS "ENABLE_TEST_HOOKS=OFF: shipping worker configuration.")
 endif()
 
 # Main desktop application executable

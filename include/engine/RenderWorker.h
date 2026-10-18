@@ -22,6 +22,7 @@
 #include "engine/PageText.h"
 #include "engine/SearchTypes.h"
 #include "cache/TileCache.h"
+#include "ipc/IpcProtocol.h"
 
 namespace pdf {
 
@@ -172,6 +173,8 @@ public:
      * @brief Posts a lightweight health probe to the worker thread control queue.
      * Invoked on the worker thread when the engine can make progress.
      */
+    void noteProgress(ipc::WorkerOp op = ipc::WorkerOp::Idle);
+    std::pair<int64_t, uint32_t> progressSnapshot() const noexcept;
     void postHealthCheck(std::function<void()> onHealthy);
 
     /**
@@ -253,6 +256,7 @@ private:
     std::atomic<uint64_t> m_currentGeneration{0};
     std::atomic<size_t> m_cachedPageCount{0};
     std::atomic<int> m_testRenderDelayMs{0};
+    std::atomic<uint32_t> m_currentOp{0};
     std::atomic<int64_t> m_lastProgressEpochMs{0};
 #ifdef PDF_WORKER_TEST_HOOKS
     std::atomic<bool> m_testHangEngine{false};

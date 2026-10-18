@@ -176,13 +176,12 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
         case ipc::MessageType::Ping: {
             ipc::PingRequest req;
             if (ipc::deserialize(payload, req)) {
-                const uint64_t seq = req.seq;
-                m_engineWorker.postHealthCheck([this, seq]() {
-                    QMetaObject::invokeMethod(this, [this, seq]() {
-                        ipc::PongResponse resp{seq};
-                        sendPacket(ipc::MessageType::Pong, ipc::serialize(resp));
-                    }, Qt::QueuedConnection);
-                });
+                const auto [lastProgress, curOp] = m_engineWorker.progressSnapshot();
+                ipc::PongResponse resp;
+                resp.seq = req.seq;
+                resp.lastProgressEpochMs = lastProgress;
+                resp.currentOp = curOp;
+                sendPacket(ipc::MessageType::Pong, ipc::serialize(resp));
             }
             break;
         }
@@ -301,12 +300,16 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
                 break;
             }
 
+#ifdef PDF_WORKER_TEST_HOOKS
+            // Fault injection is test-only. In a shipping build these fields are
+            // ignored, so a peer cannot park the render with an arbitrary delay.
             if (request.renderDelayMs >= 0) {
                 m_engineWorker.setRenderDelayForTesting(std::chrono::milliseconds(request.renderDelayMs));
             }
             if (request.openDelayMs >= 0) {
                 m_engineWorker.setOpenDelayForTesting(std::chrono::milliseconds(request.openDelayMs));
             }
+#endif
             if (request.waitForIdle) {
                 m_engineWorker.waitForIdle();
                 QCoreApplication::processEvents();

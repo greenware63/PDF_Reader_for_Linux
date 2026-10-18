@@ -9,7 +9,7 @@ A high-performance, native PDF workstation for Linux designed with an Adobe Pro-
 - **Standalone Layout Engine (`pdf_layout`)**: `DocumentLayout` is compiled as a standalone static library with **zero Qt and zero PDFium dependencies**. It operates entirely in 64-bit device pixel space, providing continuous page layout, O(log N) binary search for visible pages, gap/boundary detection, horizontal centering, 2D cursor zoom anchor pinning, and Qt-free visible tile enumeration.
 - **Separate PDF Worker Process**: The `pdf-reader` executable links to `pdf_ipc`, not `pdf_engine` or PDFium. It launches `pdf_worker` and sends document, tile, text, outline, and search requests over a versioned `QLocalSocket` protocol. PDFium calls and page caching remain serialized on the worker's `RenderWorker` thread.
 - **Shared-Memory Tile Transport**: Rendered tile pixels are transferred through per-tile `QSharedMemory` segments; only the segment key and layout metadata travel in the socket packet. The UI copies pixels into an owned `PixelBuffer` before acknowledging and releasing the segment.
-- **Bounded IPC Framing**: Packets validate magic, protocol version, message type, and a 32 MiB payload ceiling. Deserialization rejects trailing data and bounds collection sizes before allocation.
+- **Bounded IPC Framing**: Packets validate magic, protocol version, message type, and a 64 MiB payload ceiling. Deserialization rejects trailing data and bounds collection sizes before allocation.
 - **Unconstrained Virtual Tiling**: Virtual page dimensions at deep zoom are unconstrained (supporting rasters up to 17,850 × 25,260 px and beyond). Rendering is decomposed into a 512×512 tile grid via `renderTile()` with origin translation `(-x0, -y0)` and LCD sub-pixel font fringing disabled.
 - **Scale-Preserving Whole-Page Clamping**: For single-buffer whole-page convenience renders, rasters are safely clamped to 8192 px and 16 Megapixels to prevent bad allocation / OOM, scaling effective device pixel ratios dynamically so page layout is preserved. Individual tile requests are guarded against requests exceeding 4096 px per side or 16 MP.
 - **Robust Object Lifetimes**: Pages hold shared ownership of the underlying document handle, preventing use-after-free even if the document is closed or reloaded while pages are retained.
@@ -17,6 +17,9 @@ A high-performance, native PDF workstation for Linux designed with an Adobe Pro-
 - **Non-Destructive Loading & Restoration**: Failed document opens (corrupt file, wrong password, missing file) preserve any currently active document and its render queue intact.
 
 On Linux, the worker enables `PR_SET_PDEATHSIG` and requires `PR_SET_NO_NEW_PRIVS` plus Landlock. Reads remain unrestricted so the worker can open PDFs selected from arbitrary locations. Filesystem writes and creation/removal operations are denied by default, with a scoped `/dev/shm` allowance for the shared-memory tile transport. The IPC socket uses Linux's abstract namespace, so it does not need a filesystem-write exception. This is filesystem write confinement, not a complete sandbox; seccomp and read-path confinement are not implemented. If required setup fails or the kernel lacks Landlock, the worker exits instead of running with weaker isolation.
+
+On Windows, the worker process is launched as a separate process over QLocalSocket, but sandbox and resource confinement (Landlock, PR_SET_NO_NEW_PRIVS, rlimits) are Linux-specific. Windows builds should currently be considered unsupported for secure processing of untrusted or hostile PDF files.
+
 
 ## Security Hardening & Compiler Diagnostics
 

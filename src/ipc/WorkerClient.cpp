@@ -567,6 +567,29 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
             PongResponse response;
             if (deserialize(payload, response)) {
                 m_missedPings = 0;
+                const auto now = std::chrono::steady_clock::now();
+                if (response.currentOp == static_cast<uint32_t>(WorkerOp::Idle)) {
+                    m_lastWorkerProgressEpochMs = response.lastProgressEpochMs;
+                    m_lastWorkerOp = response.currentOp;
+                    m_lastProgressAdvanceTime = now;
+                } else {
+                    if (response.lastProgressEpochMs != m_lastWorkerProgressEpochMs || m_lastWorkerOp != response.currentOp) {
+                        m_lastWorkerProgressEpochMs = response.lastProgressEpochMs;
+                        m_lastWorkerOp = response.currentOp;
+                        m_lastProgressAdvanceTime = now;
+                    } else {
+                        const auto elapsedStallMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastProgressAdvanceTime).count();
+                        if (elapsedStallMs >= m_engineStallMs) {
+                            std::cerr << "[WorkerClient] Worker engine stalled on op " << response.currentOp
+                                      << " for " << elapsedStallMs << " ms (limit " << m_engineStallMs
+                                      << " ms). Terminating hung worker." << std::endl;
+                            m_watchdogTimer.stop();
+                            m_process.kill();
+                            failWorker(tr("PDF worker engine stalled (operation heartbeat frozen)."));
+                            return;
+                        }
+                    }
+                }
             }
             break;
         }
@@ -784,9 +807,11 @@ void WorkerClient::setWatchdogEnabled(bool enabled) {
     }
 }
 
-void WorkerClient::setWatchdogParams(int intervalMs, int maxMissedPings) {
+void WorkerClient::setWatchdogParams(int intervalMs, int maxMissedPings, int engineStallMs) {
     m_watchdogIntervalMs = intervalMs;
     m_maxMissedPings = maxMissedPings;
+    m_engineStallMs = engineStallMs;
+    m_lastProgressAdvanceTime = std::chrono::steady_clock::now();
     if (m_watchdogEnabled && m_socket.state() == QLocalSocket::ConnectedState && intervalMs > 0) {
         m_missedPings = 0;
         m_watchdogTimer.start(intervalMs);
@@ -811,3 +836,12 @@ void WorkerClient::onWatchdogTimeout() {
 }
 
 } // namespace pdf::ipc
+
+#ifdef PDF_WORKER_TEST_HOOKS
+void WorkerClient::hangEngineForTesting() {
+    WorkerControlRequest req;
+    req.requestId = m_nextControlRequestId++;
+    req.hangEngine = true;
+    sendMessage(MessageType::WorkerControlRequest, serialize(req));
+}
+#endif

@@ -36,6 +36,19 @@ static bool setWorkerResourceLimit(int resource, rlim_t soft, rlim_t hard, const
 }
 #endif
 
+// AddressSanitizer reserves tens of terabytes of virtual address space at process
+// start. Applying RLIMIT_AS afterwards makes every later mmap() fail, so the worker
+// cannot allocate, never reaches listen(), and the suite dies with "initial worker
+// socket connection". Sanitizer builds therefore skip the address-space cap; the cap
+// is validated in the shipping (non-sanitizer) configuration instead.
+#if defined(__SANITIZE_ADDRESS__)
+#define PDF_WORKER_ASAN_BUILD 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define PDF_WORKER_ASAN_BUILD 1
+#endif
+#endif
+
 static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit = false) {
 #ifdef __linux__
     const pid_t parentPid = getppid();
@@ -55,20 +68,46 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
 
     // Set resource limits (RLIMIT_AS, RLIMIT_NOFILE, RLIMIT_CPU) and explicitly verify every return value
     // 1. RLIMIT_AS: 4 GiB virtual address space cap to prevent memory exhaustion DoS (T5)
+#ifndef PDF_WORKER_ASAN_BUILD
     if (!setWorkerResourceLimit(RLIMIT_AS, 4096ULL * 1024 * 1024, 4096ULL * 1024 * 1024, "RLIMIT_AS", errorMessage)) {
         return false;
     }
+#else
+    std::cerr << "[pdf_worker] RLIMIT_AS skipped: AddressSanitizer build." << std::endl;
+#endif
 
     // 2. RLIMIT_NOFILE: max 256 open file descriptors to prevent descriptor leakage
     if (!setWorkerResourceLimit(RLIMIT_NOFILE, 256, 256, "RLIMIT_NOFILE", errorMessage)) {
         return false;
     }
 
-    // Architectural Note on RLIMIT_CPU:
-    // As identified in the security audit, RLIMIT_CPU is a cumulative process-lifetime budget
-    // rather than a per-operation timeout. Imposing an arbitrary CPU ceiling would terminate
-    // legitimate multi-hour reading sessions. Instead, runaway individual operations
-    // and infinite loops are detected and recovered per-operation via the non-blocking UI heartbeat watchdog.
+    // 3. RLIMIT_CPU: 7200 s soft / 7260 s hard. A cumulative lifetime budget, not a
+    //    per-operation deadline: it is the last-resort backstop behind the UI watchdog,
+    //    which is what catches a stuck engine in normal operation. SIGXCPU is converted
+    //    to a clean exit so the UI shows its usual recovery banner instead of a crash.
+    //    A launcher that already lowered the soft limit keeps its value.
+    {
+        struct rlimit inherited{};
+        rlim_t soft = 7200;
+        rlim_t hard = 7260;
+        if (getrlimit(RLIMIT_CPU, &inherited) == 0 && inherited.rlim_cur != RLIM_INFINITY) {
+            soft = inherited.rlim_cur;
+            hard = inherited.rlim_max == RLIM_INFINITY ? soft : inherited.rlim_max;
+        }
+        if (signal(SIGXCPU, [](int) { _exit(70); }) == SIG_ERR) {
+            errorMessage = "Installing the SIGXCPU handler failed";
+            return false;
+        }
+        if (!setWorkerResourceLimit(RLIMIT_CPU, soft, hard, "RLIMIT_CPU", errorMessage)) {
+            return false;
+        }
+    }
+
+    // Note on RLIMIT_CPU: it is a cumulative process-lifetime budget rather than a
+    // per-operation deadline, so it is set generously and only serves as a backstop for a
+    // worker that somehow keeps burning CPU without the watchdog noticing. The primary
+    // detector for a stuck engine remains the UI heartbeat watchdog, which kills and
+    // restarts the worker and shows the recovery banner.
 
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
         errorMessage = "PR_SET_NO_NEW_PRIVS failed: " + std::string(std::strerror(errno));

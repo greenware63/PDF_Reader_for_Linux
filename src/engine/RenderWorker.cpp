@@ -489,6 +489,18 @@ IPage* RenderWorker::getOrLoadWorkerPage(int pageIndex) {
     return insIt->second.first.get();
 }
 
+void RenderWorker::noteProgress(ipc::WorkerOp op) {
+    m_currentOp.store(static_cast<uint32_t>(op), std::memory_order_relaxed);
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    m_lastProgressEpochMs.store(now, std::memory_order_relaxed);
+}
+
+std::pair<int64_t, uint32_t> RenderWorker::progressSnapshot() const noexcept {
+    return {m_lastProgressEpochMs.load(std::memory_order_relaxed),
+            m_currentOp.load(std::memory_order_relaxed)};
+}
+
 bool RenderWorker::isEngineProgressing(int64_t maxSilentDurationMs) const noexcept {
     const int64_t last = m_lastProgressEpochMs.load(std::memory_order_relaxed);
     if (last == 0) return true;
@@ -635,10 +647,12 @@ void RenderWorker::workerLoop() {
                 }
             }
 
+#ifdef PDF_WORKER_TEST_HOOKS
             // Test hook: keep the tile in flight for a while to make timing-dependent behaviour observable
             if (const int delayMs = m_testRenderDelayMs.load(std::memory_order_relaxed); delayMs > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
+#endif
 
             // Deliver completed render whenever documentId matches active document.
             if (m_running.load() && req.documentId == m_activeDocumentId.load()) {
@@ -662,6 +676,7 @@ void RenderWorker::workerLoop() {
         }
 
         if (hasSearchTask) {
+            noteProgress(ipc::WorkerOp::Search);
             if (!m_running.load() || searchId != m_currentSearchId.load() || searchDocId != m_activeDocumentId.load()) {
                 continue;
             }

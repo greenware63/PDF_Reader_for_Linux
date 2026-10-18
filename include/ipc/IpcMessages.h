@@ -160,6 +160,8 @@ struct PingRequest {
 
 struct PongResponse {
     uint64_t seq{0};
+    int64_t lastProgressEpochMs{0};
+    uint32_t currentOp{0};
 };
 
 struct WorkerErrorResponse {
@@ -177,6 +179,9 @@ struct WorkerControlRequest {
     int openDelayMs{-1};
     bool waitForIdle{false};
     bool queryStatus{false};
+#ifdef PDF_WORKER_TEST_HOOKS
+    bool hangEngine{false};
+#endif
 };
 
 struct WorkerControlResponse {

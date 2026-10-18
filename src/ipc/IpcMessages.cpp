@@ -630,14 +630,20 @@ QDataStream& operator>>(QDataStream& in, PingRequest& req) {
 
 // PongResponse
 QDataStream& operator<<(QDataStream& out, const PongResponse& res) {
-    out << static_cast<quint64>(res.seq);
+    out << static_cast<quint64>(res.seq)
+        << static_cast<qint64>(res.lastProgressEpochMs)
+        << static_cast<quint32>(res.currentOp);
     return out;
 }
 
 QDataStream& operator>>(QDataStream& in, PongResponse& res) {
     quint64 s = 0;
-    in >> s;
+    qint64 prog = 0;
+    quint32 op = 0;
+    in >> s >> prog >> op;
     res.seq = s;
+    res.lastProgressEpochMs = prog;
+    res.currentOp = op;
     return in;
 }
 
@@ -670,6 +676,9 @@ QDataStream& operator<<(QDataStream& out, const WorkerControlRequest& request) {
         << static_cast<qint32>(request.openDelayMs)
         << request.waitForIdle
         << request.queryStatus;
+#ifdef PDF_WORKER_TEST_HOOKS
+    out << request.hangEngine;
+#endif
     return out;
 }
 
@@ -680,6 +689,11 @@ QDataStream& operator>>(QDataStream& in, WorkerControlRequest& request) {
     in >> renderDelay >> openDelay >> request.waitForIdle >> request.queryStatus;
     request.renderDelayMs = renderDelay;
     request.openDelayMs = openDelay;
+#ifdef PDF_WORKER_TEST_HOOKS
+    if (!in.atEnd()) {
+        in >> request.hangEngine;
+    }
+#endif
     return in;
 }
 

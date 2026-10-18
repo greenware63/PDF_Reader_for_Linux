@@ -467,8 +467,8 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Worker isolation escape probe baseline accurately verified." << std::endl;
     }
 
-    // --- TEST 9A: Heartbeat Watchdog Verifies Engine-Thread Health ---
-    std::cout << "[TEST 9A] Testing UI watchdog detects engine-thread hang (postHealthCheck)..." << std::endl;
+    // --- TEST 9A: Heartbeat Watchdog Verifies Engine-Thread Health (Progress Snapshot) ---
+    std::cout << "[TEST 9A] Testing worker answers Ping promptly with progress snapshot during engine hang..." << std::endl;
     {
         const QString hangSocket = QStringLiteral("pdf_test_hang_engine_%1").arg(QCoreApplication::applicationPid());
         QProcess hangWorker;
@@ -495,40 +495,85 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Send PingRequest to the worker.
-        // WorkerServer's Qt event loop is responsive, but RenderWorker thread is blocked.
-        // Health protocol must NOT respond with Pong when engine thread cannot make progress.
-        pdf::ipc::PingRequest pingReq{123};
-        QByteArray pingPacket = pdf::ipc::buildPacket(pdf::ipc::MessageType::Ping, pdf::ipc::serialize(pingReq));
-        hangClient.write(pingPacket);
+        QByteArray hangIncoming;
+        QObject::connect(&hangClient, &QLocalSocket::readyRead, [&]() {
+            hangIncoming.append(hangClient.readAll());
+        });
+
+        auto readHangPacket = [&](pdf::ipc::MessageType& outType, QByteArray& outPayload) -> bool {
+            if (static_cast<size_t>(hangIncoming.size()) < sizeof(pdf::ipc::PacketHeader)) return false;
+            pdf::ipc::PacketHeader hdr;
+            std::memcpy(&hdr, hangIncoming.constData(), sizeof(pdf::ipc::PacketHeader));
+            if (hdr.magic != pdf::ipc::IPC_MAGIC) return false;
+            const size_t fullSize = sizeof(pdf::ipc::PacketHeader) + hdr.payloadSize;
+            if (static_cast<size_t>(hangIncoming.size()) < fullSize) return false;
+            outType = static_cast<pdf::ipc::MessageType>(hdr.type);
+            outPayload = hangIncoming.mid(sizeof(pdf::ipc::PacketHeader), hdr.payloadSize);
+            hangIncoming.remove(0, fullSize);
+            return true;
+        };
+
+        // Ping 1
+        pdf::ipc::PingRequest pingReq1{101};
+        hangClient.write(pdf::ipc::buildPacket(pdf::ipc::MessageType::Ping, pdf::ipc::serialize(pingReq1)));
         hangClient.flush();
 
-        QElapsedTimer noPongTimer;
-        noPongTimer.start();
-        bool receivedPong = false;
-        while (noPongTimer.elapsed() < 600) {
-            QCoreApplication::processEvents();
-            if (hangClient.bytesAvailable() >= static_cast<qint64>(sizeof(pdf::ipc::PacketHeader))) {
-                receivedPong = true;
-                break;
-            }
-            QThread::msleep(10);
-        }
-        if (receivedPong) {
-            std::cerr << "[FAIL] Blocked engine thread should NOT send PongResponse!" << std::endl;
+        pdf::ipc::MessageType msgType;
+        QByteArray payload;
+        bool gotPong1 = waitFor([&]() {
+            return readHangPacket(msgType, payload) && msgType == pdf::ipc::MessageType::Pong;
+        }, 3000);
+
+        if (!gotPong1) {
+            std::cerr << "[FAIL] WorkerServer did not respond to Ping on IPC thread!" << std::endl;
             hangWorker.kill();
             return 1;
         }
+        pdf::ipc::PongResponse pong1;
+        if (!pdf::ipc::deserialize(payload, pong1) || pong1.seq != 101) {
+            std::cerr << "[FAIL] Invalid PongResponse 1 sequence." << std::endl;
+            hangWorker.kill();
+            return 1;
+        }
+
+        // Wait a short duration and send Ping 2
+        QThread::msleep(100);
+        pdf::ipc::PingRequest pingReq2{102};
+        hangClient.write(pdf::ipc::buildPacket(pdf::ipc::MessageType::Ping, pdf::ipc::serialize(pingReq2)));
+        hangClient.flush();
+
+        bool gotPong2 = waitFor([&]() {
+            return readHangPacket(msgType, payload) && msgType == pdf::ipc::MessageType::Pong;
+        }, 3000);
+
+        if (!gotPong2) {
+            std::cerr << "[FAIL] WorkerServer did not respond to second Ping!" << std::endl;
+            hangWorker.kill();
+            return 1;
+        }
+        pdf::ipc::PongResponse pong2;
+        if (!pdf::ipc::deserialize(payload, pong2) || pong2.seq != 102) {
+            std::cerr << "[FAIL] Invalid second PongResponse sequence." << std::endl;
+            hangWorker.kill();
+            return 1;
+        }
+
+        if (pong1.lastProgressEpochMs != pong2.lastProgressEpochMs) {
+            std::cerr << "[FAIL] Engine thread is hung but lastProgressEpochMs advanced unexpectedly!" << std::endl;
+            hangWorker.kill();
+            return 1;
+        }
+
         hangWorker.kill();
         hangWorker.waitForFinished(1000);
-        std::cout << "  -> Passed: WorkerServer correctly withholds Pong when engine thread is blocked." << std::endl;
+        std::cout << "  -> Passed: Worker answers Ping promptly with progress snapshot; timestamp remains frozen while engine is hung." << std::endl;
     }
 
-    // --- TEST 9B: Watchdog Re-arming across Document Close & Reopen ---
-    std::cout << "[TEST 9B] Testing watchdog re-arming across document close and reopen..." << std::endl;
+    // --- TEST 9B: Watchdog Re-arming & Heartbeat Stall Timeout Verification ---
+    std::cout << "[TEST 9B] Testing watchdog re-arming and heartbeat/stall timeout detection..." << std::endl;
     {
         pdf::ipc::WorkerClient client;
-        client.setWatchdogParams(100, 3);
+        client.setWatchdogParams(100, 3, 300); // 100 ms interval, 3 missed, 300 ms stall
         auto res = client.openDocumentSync(1, samplePdf.toStdString());
         if (res.error != pdf::DocumentError::None) {
             std::cerr << "[FAIL] Failed to open document for watchdog reopen test." << std::endl;
@@ -558,27 +603,42 @@ int main(int argc, char* argv[]) {
         }
 
         // Verify that the re-armed watchdog actively monitors the reopened document
-        bool failureDetected = false;
-        QObject::connect(&client, &pdf::ipc::WorkerClient::workerFailed, [&](const QString&) {
-            failureDetected = true;
+        QString failureMessage;
+        QElapsedTimer timer;
+        timer.start();
+        QObject::connect(&client, &pdf::ipc::WorkerClient::workerFailed, [&](const QString& msg) {
+            failureMessage = msg;
         });
 
-        // Kill worker to simulate an unhandled hang / crash on reopened session
+#ifdef PDF_WORKER_TEST_HOOKS
+        // Hang engine at runtime via control request without killing process
+        client.hangEngineForTesting();
+        bool caught = waitFor([&]() { return !failureMessage.isEmpty(); }, 4000);
+        if (!caught) {
+            std::cerr << "[FAIL] Watchdog did not catch engine stall on reopened document." << std::endl;
+            return 1;
+        }
+        if (!failureMessage.contains("heartbeat") && !failureMessage.contains("stalled") && !failureMessage.contains("unresponsive")) {
+            std::cerr << "[FAIL] Failure message did not mention heartbeat/stall: " << failureMessage.toStdString() << std::endl;
+            return 1;
+        }
+#else
         client.killWorkerForTesting();
-        bool caught = waitFor([&]() { return failureDetected; }, 3000);
+        bool caught = waitFor([&]() { return !failureMessage.isEmpty(); }, 3000);
         if (!caught) {
             std::cerr << "[FAIL] Watchdog / client did not catch failure on reopened document." << std::endl;
             return 1;
         }
+#endif
         client.stop();
-        std::cout << "  -> Passed: Watchdog re-armed successfully across document close and reopen, actively monitoring." << std::endl;
+        std::cout << "  -> Passed: Watchdog re-armed successfully across document close and reopen, actively caught hang/stall." << std::endl;
     }
 
     // --- TEST 9C: Progressing Tile Operations Do Not Trigger Watchdog ---
     std::cout << "[TEST 9C] Testing that progressing tile render operations do not trigger false watchdog timeouts..." << std::endl;
     {
         pdf::ipc::WorkerClient client;
-        client.setWatchdogParams(250, 3); // 750 ms timeout
+        client.setWatchdogParams(250, 3, 5000);
         auto res = client.openDocumentSync(1, samplePdf.toStdString());
         if (res.error != pdf::DocumentError::None) {
             std::cerr << "[FAIL] Failed to open document." << std::endl;
@@ -634,6 +694,9 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Failed to open document for RLIMIT_AS validation." << std::endl;
             return 1;
         }
+        const qint64 pid = client.workerPid();
+        (void)pid;
+
         // Heavy high-DPI rendering workload (scale 3.0, dpr 2.0 = 6x scale factor)
         pdf::TileRenderRequest req;
         req.documentId = 1;
@@ -645,6 +708,21 @@ int main(int argc, char* argv[]) {
         req.key = pdf::TileKey::create(1, 0, 0, 0, 3.0, 2.0);
         client.enqueueRequest(req);
         client.waitForIdle();
+
+#ifdef Q_OS_LINUX
+        if (pid > 0) {
+            QFile statusFile(QStringLiteral("/proc/%1/status").arg(pid));
+            if (statusFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                const QString statusText = QString::fromUtf8(statusFile.readAll());
+                for (const QString& line : statusText.split('\n')) {
+                    if (line.startsWith(QStringLiteral("VmHWM:"))) {
+                        std::cout << "  -> Measured worker " << line.trimmed().toStdString() << " during high-DPI workload." << std::endl;
+                        break;
+                    }
+                }
+            }
+        }
+#endif
         client.stop();
         std::cout << "  -> Passed: High-DPI workload verified; 4 GiB RLIMIT_AS provides abundant headroom while capping runaway exhaustion." << std::endl;
     }

@@ -44,7 +44,11 @@ public:
     void setWatchdogEnabled(bool enabled);
     bool isWatchdogEnabled() const noexcept { return m_watchdogEnabled; }
     bool isWatchdogActive() const noexcept { return m_watchdogTimer.isActive(); }
-    void setWatchdogParams(int intervalMs, int maxMissedPings);
+    void setWatchdogParams(int intervalMs, int maxMissedPings, int engineStallMs = 60000);
+    qint64 workerPid() const noexcept { return m_process.processId(); }
+#ifdef PDF_WORKER_TEST_HOOKS
+    void hangEngineForTesting();
+#endif
     void requestThumbnail(int64_t documentId, int pageIndex, int targetWidth = 140);
     void requestPrintPage(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0);
     void requestExtractPages(int64_t documentId, int firstPage, int lastPage);
@@ -96,7 +100,11 @@ private:
     QTimer m_watchdogTimer;
     int m_watchdogIntervalMs{2000};
     int m_maxMissedPings{3};
+    int m_engineStallMs{60000};
     int m_missedPings{0};
+    int64_t m_lastWorkerProgressEpochMs{0};
+    uint32_t m_lastWorkerOp{0};
+    std::chrono::steady_clock::time_point m_lastProgressAdvanceTime{};
     bool m_watchdogEnabled{true};
     QString m_serverName;
     QByteArray m_incomingBuffer;

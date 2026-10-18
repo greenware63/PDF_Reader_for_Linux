@@ -5,8 +5,18 @@
 namespace pdf::ipc {
 
 constexpr uint32_t IPC_MAGIC = 0x50444657; // 'PDFW'
-constexpr uint32_t IPC_PROTOCOL_VERSION = 1;
+constexpr uint32_t IPC_PROTOCOL_VERSION = 2;
 constexpr uint32_t MAX_IPC_PAYLOAD_SIZE = 64 * 1024 * 1024;
+
+enum class WorkerOp : uint32_t {
+    Idle = 0,
+    Open,
+    Tile,
+    Thumbnail,
+    Print,
+    Extract,
+    Search
+};
 
 enum class MessageType : uint32_t {
     // Control / Lifecycle
