@@ -1,4 +1,4 @@
-﻿#include "engine/RenderWorker.h"
+#include "engine/RenderWorker.h"
 #include "engine/SearchText.h"
 #include <algorithm>
 
@@ -488,10 +488,24 @@ IPage* RenderWorker::getOrLoadWorkerPage(int pageIndex) {
     return insIt->second.first.get();
 }
 
+void RenderWorker::postHealthCheck(std::function<void()> onHealthy) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load()) {
+        return;
+    }
+    m_controlQueue.push_back({std::move(onHealthy)});
+    m_cv.notify_one();
+}
+
 void RenderWorker::workerLoop() {
     int tilesRenderedSinceSearch = 0;
 
     while (m_running.load()) {
+        if (m_testHangEngine.load(std::memory_order_relaxed)) {
+            while (m_testHangEngine.load(std::memory_order_relaxed) && m_running.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
         ControlTask ctrlTask;
         bool hasControlTask = false;
         TileRenderRequest req;

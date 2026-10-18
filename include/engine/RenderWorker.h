@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QObject>
 #include <QMetaType>
@@ -169,6 +169,19 @@ public:
     }
 
     /**
+     * @brief Posts a lightweight health probe to the worker thread control queue.
+     * Invoked on the worker thread when the engine can make progress.
+     */
+    void postHealthCheck(std::function<void()> onHealthy);
+
+    /**
+     * @brief Test hook: artificially blocks the engine thread to simulate an unresponsive engine.
+     */
+    void setHangEngineForTesting(bool hang) noexcept {
+        m_testHangEngine.store(hang, std::memory_order_relaxed);
+    }
+
+    /**
      * @brief Test hook: artificially delays every openDocumentAsync() by this many milliseconds
      * before the file is loaded, to make non-blocking behaviour observable. 0 disables.
      */
@@ -232,6 +245,7 @@ private:
     std::atomic<uint64_t> m_currentGeneration{0};
     std::atomic<size_t> m_cachedPageCount{0};
     std::atomic<int> m_testRenderDelayMs{0};
+    std::atomic<bool> m_testHangEngine{false};
     std::atomic<int> m_testOpenDelayMs{0};
     std::atomic<int64_t> m_currentSearchId{0};
 

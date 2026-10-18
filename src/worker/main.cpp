@@ -23,9 +23,20 @@
 #include <linux/landlock.h>
 #define PDF_WORKER_HAS_LANDLOCK_HEADERS 1
 #endif
+
+static bool setWorkerResourceLimit(int resource, rlim_t soft, rlim_t hard, const char* name, std::string& error) {
+    struct rlimit rlim{};
+    rlim.rlim_cur = soft;
+    rlim.rlim_max = hard;
+    if (setrlimit(resource, &rlim) != 0) {
+        error = std::string("Setting resource limit ") + name + " failed: " + std::strerror(errno);
+        return false;
+    }
+    return true;
+}
 #endif
 
-static bool applyProcessIsolation(std::string& errorMessage) {
+static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit = false) {
 #ifdef __linux__
     const pid_t parentPid = getppid();
     if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
@@ -37,22 +48,28 @@ static bool applyProcessIsolation(std::string& errorMessage) {
         return false;
     }
 
-    // Set resource limits (RLIMIT_AS, RLIMIT_CPU, RLIMIT_NOFILE) to prevent resource exhaustion (T5)
-    // 1. RLIMIT_AS: 4 GiB virtual address space cap
-    struct rlimit rlim{};
-    rlim.rlim_cur = 4096ULL * 1024 * 1024;
-    rlim.rlim_max = 4096ULL * 1024 * 1024;
-    setrlimit(RLIMIT_AS, &rlim);
+    if (testFailRlimit) {
+        errorMessage = "Setting resource limit RLIMIT_AS failed: Operation not permitted (injected test failure)";
+        return false;
+    }
 
-    // 2. RLIMIT_CPU: 60s soft / 120s hard CPU limit
-    rlim.rlim_cur = 60;
-    rlim.rlim_max = 120;
-    setrlimit(RLIMIT_CPU, &rlim);
+    // Set resource limits (RLIMIT_AS, RLIMIT_NOFILE, RLIMIT_CPU) and explicitly verify every return value
+    // 1. RLIMIT_AS: 4 GiB virtual address space cap to prevent memory exhaustion DoS (T5)
+    if (!setWorkerResourceLimit(RLIMIT_AS, 4096ULL * 1024 * 1024, 4096ULL * 1024 * 1024, "RLIMIT_AS", errorMessage)) {
+        return false;
+    }
 
-    // 3. RLIMIT_NOFILE: max 256 open file descriptors
-    rlim.rlim_cur = 256;
-    rlim.rlim_max = 256;
-    setrlimit(RLIMIT_NOFILE, &rlim);
+    // 2. RLIMIT_NOFILE: max 256 open file descriptors to prevent descriptor leakage
+    if (!setWorkerResourceLimit(RLIMIT_NOFILE, 256, 256, "RLIMIT_NOFILE", errorMessage)) {
+        return false;
+    }
+
+    // 3. RLIMIT_CPU: Documented cumulative lifetime safety net (3600 CPU seconds).
+    // Note: Individual runaway rendering operations are detected and terminated by the UI heartbeat watchdog;
+    // RLIMIT_CPU serves as an ultimate last-resort lifetime budget for the worker process.
+    if (!setWorkerResourceLimit(RLIMIT_CPU, 3600, 3600, "RLIMIT_CPU", errorMessage)) {
+        return false;
+    }
 
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
         errorMessage = "PR_SET_NO_NEW_PRIVS failed: " + std::string(std::strerror(errno));
@@ -161,107 +178,169 @@ static bool applyProcessIsolation(std::string& errorMessage) {
     return false;
 #endif
 #else
+    if (testFailRlimit) {
+        errorMessage = "Setting resource limit RLIMIT_AS failed: Operation not permitted (injected test failure)";
+        return false;
+    }
     (void)errorMessage;
 #endif
     return true;
 }
 
-static int runIsolationSelftest() {
+static int runIsolationSelftest(int testTcpPort, const std::string& testDbusSocket, const std::string& testShmMarker) {
     std::cout << "=== PDF WORKER ISOLATION SELFTEST ===" << std::endl;
 #ifndef __linux__
+    (void)testTcpPort;
+    (void)testDbusSocket;
+    (void)testShmMarker;
     std::cout << "[ISOLATION_SELFTEST] platform: SKIPPED (non-Linux)" << std::endl;
     return 0;
 #else
     // Probe 1: Write to /tmp
-    bool writeBlocked = false;
     {
         const std::string tmpPath = "/tmp/pdf_worker_selftest_" + std::to_string(getpid()) + ".tmp";
         int fd = open(tmpPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd < 0) {
-            writeBlocked = (errno == EACCES || errno == EPERM || errno == EROFS);
+            if (errno == EACCES || errno == EPERM || errno == EROFS) {
+                std::cout << "[ISOLATION_SELFTEST] write_tmp: BLOCKED" << std::endl;
+            } else {
+                std::cout << "[ISOLATION_SELFTEST] write_tmp: INCONCLUSIVE (" << std::strerror(errno) << ")" << std::endl;
+            }
         } else {
             close(fd);
             unlink(tmpPath.c_str());
+            std::cout << "[ISOLATION_SELFTEST] write_tmp: PERMITTED" << std::endl;
         }
     }
-    std::cout << "[ISOLATION_SELFTEST] write_tmp: " << (writeBlocked ? "BLOCKED" : "PERMITTED") << std::endl;
 
     // Probe 2: Read file outside document (e.g. /etc/passwd or ~/.bashrc)
-    bool readPermitted = false;
     {
         int fd = open("/etc/passwd", O_RDONLY);
         if (fd >= 0) {
-            readPermitted = true;
+            std::cout << "[ISOLATION_SELFTEST] read_outside: PERMITTED" << std::endl;
             close(fd);
+        } else if (errno == EACCES || errno == EPERM) {
+            std::cout << "[ISOLATION_SELFTEST] read_outside: BLOCKED" << std::endl;
         } else {
             const char* home = getenv("HOME");
+            bool resolved = false;
             if (home) {
                 std::string bashrc = std::string(home) + "/.bashrc";
                 fd = open(bashrc.c_str(), O_RDONLY);
                 if (fd >= 0) {
-                    readPermitted = true;
+                    std::cout << "[ISOLATION_SELFTEST] read_outside: PERMITTED" << std::endl;
                     close(fd);
+                    resolved = true;
+                } else if (errno == EACCES || errno == EPERM) {
+                    std::cout << "[ISOLATION_SELFTEST] read_outside: BLOCKED" << std::endl;
+                    resolved = true;
                 }
+            }
+            if (!resolved) {
+                std::cout << "[ISOLATION_SELFTEST] read_outside: INCONCLUSIVE (target file unavailable)" << std::endl;
             }
         }
     }
-    std::cout << "[ISOLATION_SELFTEST] read_outside: " << (readPermitted ? "PERMITTED" : "BLOCKED") << std::endl;
 
-    // Probe 3: Open TCP network socket
-    bool networkPermitted = false;
+    // Probe 3: TCP Network connection to a controlled endpoint
     {
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock >= 0) {
-            networkPermitted = true;
-            close(sock);
+        if (testTcpPort > 0) {
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) {
+                if (errno == EACCES || errno == EPERM) {
+                    std::cout << "[ISOLATION_SELFTEST] open_tcp: BLOCKED" << std::endl;
+                } else {
+                    std::cout << "[ISOLATION_SELFTEST] open_tcp: INCONCLUSIVE (socket error: "
+                              << std::strerror(errno) << ")" << std::endl;
+                }
+            } else {
+                sockaddr_in addr{};
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons(static_cast<uint16_t>(testTcpPort));
+                inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+                if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+                    std::cout << "[ISOLATION_SELFTEST] open_tcp: PERMITTED" << std::endl;
+                } else if (errno == EACCES || errno == EPERM) {
+                    std::cout << "[ISOLATION_SELFTEST] open_tcp: BLOCKED" << std::endl;
+                } else {
+                    std::cout << "[ISOLATION_SELFTEST] open_tcp: INCONCLUSIVE (connect failed: "
+                              << std::strerror(errno) << ")" << std::endl;
+                }
+                close(sock);
+            }
+        } else {
+            std::cout << "[ISOLATION_SELFTEST] open_tcp: INCONCLUSIVE (no test endpoint provided)" << std::endl;
         }
     }
-    std::cout << "[ISOLATION_SELFTEST] open_tcp: " << (networkPermitted ? "PERMITTED" : "BLOCKED") << std::endl;
 
     // Probe 4: Connect to Session Bus (D-Bus)
-    bool sessionBusPermitted = false;
     {
-        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (sock >= 0) {
+        std::string dbusPath = testDbusSocket;
+        if (dbusPath.empty()) {
             const char* dbusAddr = getenv("DBUS_SESSION_BUS_ADDRESS");
-            std::string path;
             if (dbusAddr && strncmp(dbusAddr, "unix:path=", 10) == 0) {
-                path = dbusAddr + 10;
-                size_t comma = path.find(',');
-                if (comma != std::string::npos) path = path.substr(0, comma);
-            } else {
-                path = "/run/user/" + std::to_string(getuid()) + "/bus";
+                dbusPath = dbusAddr + 10;
+                size_t comma = dbusPath.find(',');
+                if (comma != std::string::npos) dbusPath = dbusPath.substr(0, comma);
             }
-            sockaddr_un addr{};
-            addr.sun_family = AF_UNIX;
-            if (!path.empty() && path.length() < sizeof(addr.sun_path)) {
-                std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
-                if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
-                    sessionBusPermitted = true;
-                } else if (errno != EACCES && errno != EPERM) {
-                    // Socket syscall itself permitted (failed with e.g. ENOENT or ECONNREFUSED)
-                    sessionBusPermitted = true;
+        }
+
+        if (!dbusPath.empty()) {
+            int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+            if (sock < 0) {
+                if (errno == EACCES || errno == EPERM) {
+                    std::cout << "[ISOLATION_SELFTEST] session_bus: BLOCKED" << std::endl;
+                } else {
+                    std::cout << "[ISOLATION_SELFTEST] session_bus: INCONCLUSIVE (socket error)" << std::endl;
                 }
             } else {
-                sessionBusPermitted = true;
+                sockaddr_un addr{};
+                addr.sun_family = AF_UNIX;
+                if (dbusPath.length() < sizeof(addr.sun_path)) {
+                    std::strncpy(addr.sun_path, dbusPath.c_str(), sizeof(addr.sun_path) - 1);
+                    if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+                        std::cout << "[ISOLATION_SELFTEST] session_bus: PERMITTED" << std::endl;
+                    } else if (errno == EACCES || errno == EPERM) {
+                        std::cout << "[ISOLATION_SELFTEST] session_bus: BLOCKED" << std::endl;
+                    } else {
+                        std::cout << "[ISOLATION_SELFTEST] session_bus: INCONCLUSIVE (connect: "
+                                  << std::strerror(errno) << ")" << std::endl;
+                    }
+                } else {
+                    std::cout << "[ISOLATION_SELFTEST] session_bus: INCONCLUSIVE (path too long)" << std::endl;
+                }
+                close(sock);
             }
-            close(sock);
+        } else {
+            std::cout << "[ISOLATION_SELFTEST] session_bus: INCONCLUSIVE (no live bus address)" << std::endl;
         }
     }
-    std::cout << "[ISOLATION_SELFTEST] session_bus: " << (sessionBusPermitted ? "PERMITTED" : "BLOCKED") << std::endl;
 
-    // Probe 5: Delete / create foreign file in /dev/shm
-    bool devShmPermitted = false;
+    // Probe 5: Modify/remove pre-created foreign marker in /dev/shm
     {
-        const std::string foreignPath = "/dev/shm/pdf_worker_probe_foreign_" + std::to_string(getpid()) + ".tmp";
-        int fd = open(foreignPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (fd >= 0) {
-            devShmPermitted = true;
-            close(fd);
-            unlink(foreignPath.c_str());
+        if (!testShmMarker.empty()) {
+            int fd = open(testShmMarker.c_str(), O_WRONLY);
+            if (fd >= 0) {
+                close(fd);
+                if (unlink(testShmMarker.c_str()) == 0) {
+                    std::cout << "[ISOLATION_SELFTEST] dev_shm_foreign: PERMITTED" << std::endl;
+                } else if (errno == EACCES || errno == EPERM) {
+                    std::cout << "[ISOLATION_SELFTEST] dev_shm_foreign: BLOCKED" << std::endl;
+                } else {
+                    std::cout << "[ISOLATION_SELFTEST] dev_shm_foreign: INCONCLUSIVE (unlink: "
+                              << std::strerror(errno) << ")" << std::endl;
+                }
+            } else if (errno == EACCES || errno == EPERM) {
+                std::cout << "[ISOLATION_SELFTEST] dev_shm_foreign: BLOCKED" << std::endl;
+            } else {
+                std::cout << "[ISOLATION_SELFTEST] dev_shm_foreign: INCONCLUSIVE (open: "
+                          << std::strerror(errno) << ")" << std::endl;
+            }
+        } else {
+            std::cout << "[ISOLATION_SELFTEST] dev_shm_foreign: INCONCLUSIVE (no test marker provided)" << std::endl;
         }
     }
-    std::cout << "[ISOLATION_SELFTEST] dev_shm_foreign: " << (devShmPermitted ? "PERMITTED" : "BLOCKED") << std::endl;
 
     return 0;
 #endif
@@ -290,32 +369,74 @@ int main(int argc, char* argv[]) {
     );
     parser.addOption(selftestOption);
 
+    QCommandLineOption tcpPortOption(
+        QStringLiteral("test-tcp-port"),
+        QStringLiteral("Port of local listening test TCP server for network isolation probe."),
+        QStringLiteral("port")
+    );
+    parser.addOption(tcpPortOption);
+
+    QCommandLineOption dbusSocketOption(
+        QStringLiteral("test-dbus-socket"),
+        QStringLiteral("Path to live D-Bus socket for session bus probe."),
+        QStringLiteral("path")
+    );
+    parser.addOption(dbusSocketOption);
+
+    QCommandLineOption shmMarkerOption(
+        QStringLiteral("test-shm-marker"),
+        QStringLiteral("Path to pre-created marker file in /dev/shm for foreign shm probe."),
+        QStringLiteral("path")
+    );
+    parser.addOption(shmMarkerOption);
+
+    QCommandLineOption testFailRlimitOption(
+        QStringLiteral("test-fail-rlimit"),
+        QStringLiteral("Test hook: simulate setrlimit failure during process isolation setup.")
+    );
+    parser.addOption(testFailRlimitOption);
+
+    QCommandLineOption testHangEngineOption(
+        QStringLiteral("test-hang-engine"),
+        QStringLiteral("Test hook: simulate engine-thread hang for watchdog verification.")
+    );
+    parser.addOption(testHangEngineOption);
+
     parser.process(app);
+
+    const bool testFailRlimit = parser.isSet(testFailRlimitOption);
 
     if (parser.isSet(selftestOption)) {
         std::string isolationError;
-        if (!applyProcessIsolation(isolationError)) {
+        if (!applyProcessIsolation(isolationError, testFailRlimit)) {
             std::cerr << "[pdf_worker] Failed to establish process isolation for selftest: "
                       << isolationError << std::endl;
             return 1;
         }
-        return runIsolationSelftest();
+        const int tcpPort = parser.value(tcpPortOption).toInt();
+        const std::string dbusSocket = parser.value(dbusSocketOption).toStdString();
+        const std::string shmMarker = parser.value(shmMarkerOption).toStdString();
+        return runIsolationSelftest(tcpPort, dbusSocket, shmMarker);
     }
 
     const QString socketName = parser.value(socketOption);
-    if (socketName.isEmpty()) {
+    if (socketName.isEmpty() && !testFailRlimit) {
         std::cerr << "[pdf_worker] Error: --socket argument is required." << std::endl;
         return 1;
     }
 
     std::string isolationError;
-    if (!applyProcessIsolation(isolationError)) {
+    if (!applyProcessIsolation(isolationError, testFailRlimit)) {
         std::cerr << "[pdf_worker] Failed to establish required process isolation: "
                   << isolationError << std::endl;
         return 1;
     }
 
     pdf::worker::WorkerServer server(socketName);
+    if (parser.isSet(testHangEngineOption)) {
+        server.setHangEngineForTesting(true);
+    }
+
     if (!server.start()) {
         std::cerr << "[pdf_worker] Failed to listen on socket: " << socketName.toStdString() << std::endl;
         return 1;

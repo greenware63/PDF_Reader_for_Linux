@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QObject>
 #include <QLocalServer>
@@ -21,6 +21,7 @@ public:
     ~WorkerServer() override;
 
     bool start();
+    void setHangEngineForTesting(bool hang) { m_engineWorker.setHangEngineForTesting(hang); }
 
 Q_SIGNALS:
     void clientDisconnected();

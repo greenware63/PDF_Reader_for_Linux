@@ -176,8 +176,13 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
         case ipc::MessageType::Ping: {
             ipc::PingRequest req;
             if (ipc::deserialize(payload, req)) {
-                ipc::PongResponse resp{req.seq};
-                sendPacket(ipc::MessageType::Pong, ipc::serialize(resp));
+                const uint64_t seq = req.seq;
+                m_engineWorker.postHealthCheck([this, seq]() {
+                    QMetaObject::invokeMethod(this, [this, seq]() {
+                        ipc::PongResponse resp{seq};
+                        sendPacket(ipc::MessageType::Pong, ipc::serialize(resp));
+                    }, Qt::QueuedConnection);
+                });
             }
             break;
         }
