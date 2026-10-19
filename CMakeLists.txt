@@ -272,6 +272,9 @@ target_link_libraries(test_widget PRIVATE
     pdf_engine
     pdf_ipc
 )
+if(ENABLE_TEST_HOOKS)
+    target_compile_definitions(test_widget PRIVATE PDF_WORKER_TEST_HOOKS=1)
+endif()
 
 # Headless tests for the encrypted-PDF password prompt workflow.
 add_executable(test_password_prompt

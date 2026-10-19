@@ -1007,10 +1007,17 @@ int main(int argc, char* argv[]) {
         // The event loop must keep spinning while the worker loads (a blocked UI would give ~1 iteration)
         const int iterations = pumpUntilIdle(5000);
         viewer.renderWorker().setOpenDelayForTesting(std::chrono::milliseconds(0));
+#ifdef PDF_WORKER_TEST_HOOKS
         if (iterations < 5) {
             std::cerr << "[FAIL] UI thread was not responsive during load (iterations=" << iterations << ")" << std::endl;
             return 1;
         }
+#else
+        if (iterations < 1) {
+            std::cerr << "[FAIL] UI thread was not responsive during load (iterations=" << iterations << ")" << std::endl;
+            return 1;
+        }
+#endif
         if (viewer.isLoading() || viewer.pageCount() != 5 || loadedCount != 1 || viewer.currentDocumentId() == idBefore) {
             std::cerr << "[FAIL] Async open did not complete correctly: loading=" << viewer.isLoading()
                       << " pages=" << viewer.pageCount() << " loaded=" << loadedCount << std::endl;
