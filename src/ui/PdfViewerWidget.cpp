@@ -341,17 +341,28 @@ void PdfViewerWidget::closeDocument() {
     Q_EMIT outlineReady(m_outline);
 }
 
-void PdfViewerWidget::setDarkMode(bool enabled) {
-    if (m_darkMode == enabled) {
+void PdfViewerWidget::setColorMode(ColorMode mode) {
+    if (m_colorMode == mode) {
         return;
     }
-    m_darkMode = enabled;
-    Q_EMIT darkModeChanged(m_darkMode);
+    const bool wasDark = isDarkMode();
+    m_colorMode = mode;
+    m_darkMode = (m_colorMode == ColorMode::Inverted || m_colorMode == ColorMode::HighContrast);
+    m_transformedPixmapCache.clear();
+    const bool nowDark = isDarkMode();
+    if (wasDark != nowDark) {
+        Q_EMIT darkModeChanged(nowDark);
+    }
+    Q_EMIT colorModeChanged(m_colorMode);
     viewport()->update();
 }
 
+void PdfViewerWidget::setDarkMode(bool enabled) {
+    setColorMode(enabled ? ColorMode::Inverted : ColorMode::Normal);
+}
+
 void PdfViewerWidget::toggleDarkMode() {
-    setDarkMode(!m_darkMode);
+    setColorMode(m_colorMode == ColorMode::Normal ? ColorMode::Inverted : ColorMode::Normal);
 }
 
 void PdfViewerWidget::restoreReadingPosition(int pageIndex, double zoom, int64_t scrollX, int64_t scrollY) {
@@ -955,15 +966,24 @@ void PdfViewerWidget::updateLayoutGeometry() {
 }
 
 void PdfViewerWidget::drawErrorPlaceholder(QPainter& painter, const QRectF& rect) {
-    painter.fillRect(rect, m_darkMode ? QColor(60, 20, 20) : QColor(245, 225, 225));
+    const bool isDark = isDarkMode();
+    painter.fillRect(rect, isDark ? QColor(60, 20, 20) : QColor(245, 225, 225));
     painter.setPen(QPen(QColor(220, 60, 60), 1, Qt::DashLine));
     painter.drawRect(rect);
-    painter.setPen(m_darkMode ? QColor(255, 120, 120) : QColor(180, 30, 30));
+    painter.setPen(isDark ? QColor(255, 120, 120) : QColor(180, 30, 30));
     painter.drawText(rect, Qt::AlignCenter, tr("Page display error"));
 }
 
 void PdfViewerWidget::drawPendingPlaceholder(QPainter& painter, const QRectF& rect) {
-    painter.fillRect(rect, m_darkMode ? QColor("#1e1e1e") : QColor(252, 252, 252));
+    QColor placeholderColor;
+    switch (m_colorMode) {
+        case ColorMode::Inverted:     placeholderColor = QColor("#1e1e1e"); break;
+        case ColorMode::HighContrast: placeholderColor = QColor("#121212"); break;
+        case ColorMode::Sepia:        placeholderColor = QColor("#fbf0d9"); break;
+        case ColorMode::Normal:
+        default:                      placeholderColor = QColor(252, 252, 252); break;
+    }
+    painter.fillRect(rect, placeholderColor);
 }
 
 void PdfViewerWidget::drawWorkerErrorBanner(QPainter& painter) {
@@ -1083,12 +1103,11 @@ bool PdfViewerWidget::drawFallbackTile(QPainter& painter, const layout::VisibleT
                                  tileRect.y() + (iy0 / r - t.tileYOnPage),
                                  (ix1 - ix0) / r,
                                  (iy1 - iy0) / r);
-                if (m_darkMode) {
-                    QImage inv = toQImage(*buf).copy();
-                    inv.invertPixels(QImage::InvertRgb);
-                    painter.drawImage(dst, inv, src);
-                } else {
+                if (m_colorMode == ColorMode::Normal) {
                     painter.drawImage(dst, toQImage(*buf), src);
+                } else {
+                    QImage transformed = applyColorMode(toQImage(*buf), m_colorMode);
+                    painter.drawImage(dst, transformed, src);
                 }
                 drawnAny = true;
             }
@@ -1131,7 +1150,14 @@ void PdfViewerWidget::drawSelection(QPainter& painter, int pageIndex, const layo
     int endChar = (pageIndex == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
 
     auto rects = pt.getSelectionRects(startChar, endChar);
-    QColor highlightColor = m_darkMode ? QColor(0, 140, 255, 120) : QColor(0, 120, 215, 90);
+    QColor highlightColor;
+    switch (m_colorMode) {
+        case ColorMode::Inverted:     highlightColor = QColor(0, 140, 255, 120); break;
+        case ColorMode::HighContrast: highlightColor = QColor(255, 215, 0, 130); break;
+        case ColorMode::Sepia:        highlightColor = QColor(180, 130, 60, 110); break;
+        case ColorMode::Normal:
+        default:                      highlightColor = QColor(0, 120, 215, 90); break;
+    }
 
     for (const auto& r : rects) {
         double px = 0.0, py = 0.0, pw = 0.0, ph = 0.0;
@@ -1677,7 +1703,15 @@ void PdfViewerWidget::keyPressEvent(QKeyEvent* event) {
 
 void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     QPainter painter(viewport());
-    painter.fillRect(viewport()->rect(), m_darkMode ? QColor("#181818") : QColor("#323639"));
+    QColor vpBg;
+    switch (m_colorMode) {
+        case ColorMode::Inverted:     vpBg = QColor("#181818"); break;
+        case ColorMode::HighContrast: vpBg = QColor("#0a0a0a"); break;
+        case ColorMode::Sepia:        vpBg = QColor("#342c24"); break;
+        case ColorMode::Normal:
+        default:                      vpBg = QColor("#323639"); break;
+    }
+    painter.fillRect(viewport()->rect(), vpBg);
 
     if (!isDocumentOpen()) {
         if (!m_workerErrorMessage.isEmpty()) {
@@ -1716,15 +1750,42 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
                 static_cast<qreal>(pl.heightPixel)
             );
 
+            QColor pageBg;
+            QColor pageBorder;
+            QColor shadowColor;
+            switch (m_colorMode) {
+                case ColorMode::Inverted:
+                    pageBg = QColor("#1e1e1e");
+                    pageBorder = QColor(50, 50, 50);
+                    shadowColor = QColor(0, 0, 0, 140);
+                    break;
+                case ColorMode::HighContrast:
+                    pageBg = QColor("#121212");
+                    pageBorder = QColor(60, 60, 60);
+                    shadowColor = QColor(0, 0, 0, 180);
+                    break;
+                case ColorMode::Sepia:
+                    pageBg = QColor("#fbf0d9");
+                    pageBorder = QColor(190, 175, 150);
+                    shadowColor = QColor(0, 0, 0, 90);
+                    break;
+                case ColorMode::Normal:
+                default:
+                    pageBg = Qt::white;
+                    pageBorder = QColor(180, 180, 180);
+                    shadowColor = QColor(0, 0, 0, 80);
+                    break;
+            }
+
             // Drop shadow
             QRectF shadowRect = pageRect.adjusted(3, 3, 5, 5);
-            painter.fillRect(shadowRect, m_darkMode ? QColor(0, 0, 0, 140) : QColor(0, 0, 0, 80));
+            painter.fillRect(shadowRect, shadowColor);
 
             // Paper background
-            painter.fillRect(pageRect, m_darkMode ? QColor("#1e1e1e") : Qt::white);
+            painter.fillRect(pageRect, pageBg);
 
             // Subtle border
-            painter.setPen(m_darkMode ? QColor(50, 50, 50) : QColor(180, 180, 180));
+            painter.setPen(pageBorder);
             painter.drawRect(pageRect);
         }
     }
@@ -1760,13 +1821,22 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
         auto cachedBuf = m_cache.get(key);
         if (cachedBuf.has_value()) {
             m_inFlightKeys.erase(key);
-            if (m_darkMode) {
-                QImage img = toQImage(*cachedBuf).copy();
-                img.invertPixels(QImage::InvertRgb);
-                painter.drawImage(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), img);
-            } else {
+            if (m_colorMode == ColorMode::Normal) {
                 QImage img = toQImage(*cachedBuf);
                 painter.drawImage(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), img);
+            } else {
+                auto it = m_transformedPixmapCache.find(key);
+                if (it != m_transformedPixmapCache.end()) {
+                    painter.drawPixmap(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), it->second);
+                } else {
+                    QImage img = applyColorMode(toQImage(*cachedBuf), m_colorMode);
+                    QPixmap pixmap = QPixmap::fromImage(img);
+                    if (m_transformedPixmapCache.size() > 128) {
+                        m_transformedPixmapCache.clear();
+                    }
+                    m_transformedPixmapCache.emplace(key, pixmap);
+                    painter.drawPixmap(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), pixmap);
+                }
             }
         } else if (m_cache.isFailed(key)) {
             if (m_cache.canRetry(key)) {

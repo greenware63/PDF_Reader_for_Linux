@@ -1,4 +1,5 @@
 ﻿#include "ui/PdfViewerWidget.h"
+#include "ui/ImageUtils.h"
 #include "ui/MainWindow.h"
 #include "ui/ThumbnailListWidget.h"
 #include <QTabWidget>
@@ -3493,8 +3494,197 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Page rotation (0, 90, 180, 270 deg CW/CCW), signals, generation invalidation, and tile key isolation verified." << std::endl;
     }
 
+    // Test 43: Reading Color Modes (Normal, Inverted, Sepia, HighContrast)
+    std::cout << "[TEST 43] Testing Reading Color Modes (Normal, Inverted, Sepia, HighContrast)..." << std::endl;
+    {
+        // 1. Pixel Transformation Verification for applyColorMode
+        {
+            QImage whitePix(1, 1, QImage::Format_ARGB32);
+            whitePix.setPixel(0, 0, qRgb(255, 255, 255));
+
+            QImage blackPix(1, 1, QImage::Format_ARGB32);
+            blackPix.setPixel(0, 0, qRgb(0, 0, 0));
+
+            // Sepia
+            QImage sepiaWhite = ui::applyColorMode(whitePix, ui::ColorMode::Sepia);
+            QRgb swRgb = sepiaWhite.pixel(0, 0);
+            if (qRed(swRgb) != 251 || qGreen(swRgb) != 240 || qBlue(swRgb) != 217) {
+                std::cerr << "[FAIL] Sepia white expected #FBF0D9 (251, 240, 217), got ("
+                          << qRed(swRgb) << ", " << qGreen(swRgb) << ", " << qBlue(swRgb) << ")" << std::endl;
+                return 1;
+            }
+
+            QImage sepiaBlack = ui::applyColorMode(blackPix, ui::ColorMode::Sepia);
+            QRgb sbRgb = sepiaBlack.pixel(0, 0);
+            if (qRed(sbRgb) != 62 || qGreen(sbRgb) != 48 || qBlue(sbRgb) != 36) {
+                std::cerr << "[FAIL] Sepia black expected #3E3024 (62, 48, 36), got ("
+                          << qRed(sbRgb) << ", " << qGreen(sbRgb) << ", " << qBlue(sbRgb) << ")" << std::endl;
+                return 1;
+            }
+
+            // High Contrast
+            QImage hcWhite = ui::applyColorMode(whitePix, ui::ColorMode::HighContrast);
+            QRgb hwRgb = hcWhite.pixel(0, 0);
+            if (qRed(hwRgb) != 18 || qGreen(hwRgb) != 18 || qBlue(hwRgb) != 18) {
+                std::cerr << "[FAIL] HighContrast white expected #121212 (18, 18, 18), got ("
+                          << qRed(hwRgb) << ", " << qGreen(hwRgb) << ", " << qBlue(hwRgb) << ")" << std::endl;
+                return 1;
+            }
+
+            QImage hcBlack = ui::applyColorMode(blackPix, ui::ColorMode::HighContrast);
+            QRgb hbRgb = hcBlack.pixel(0, 0);
+            if (qRed(hbRgb) != 240 || qGreen(hbRgb) != 240 || qBlue(hbRgb) != 240) {
+                std::cerr << "[FAIL] HighContrast black expected #F0F0F0 (240, 240, 240), got ("
+                          << qRed(hbRgb) << ", " << qGreen(hbRgb) << ", " << qBlue(hbRgb) << ")" << std::endl;
+                return 1;
+            }
+
+            // Inverted
+            QImage invWhite = ui::applyColorMode(whitePix, ui::ColorMode::Inverted);
+            QRgb iwRgb = invWhite.pixel(0, 0);
+            if (qRed(iwRgb) != 0 || qGreen(iwRgb) != 0 || qBlue(iwRgb) != 0) {
+                std::cerr << "[FAIL] Inverted white expected black (0, 0, 0)" << std::endl;
+                return 1;
+            }
+
+            // Normal
+            QImage normWhite = ui::applyColorMode(whitePix, ui::ColorMode::Normal);
+            QRgb nwRgb = normWhite.pixel(0, 0);
+            if (qRed(nwRgb) != 255 || qGreen(nwRgb) != 255 || qBlue(nwRgb) != 255) {
+                std::cerr << "[FAIL] Normal white expected (255, 255, 255)" << std::endl;
+                return 1;
+            }
+        }
+
+        // 2. Viewport Widget theming and signals
+        {
+            ui::PdfViewerWidget viewer;
+            viewer.resize(800, 600);
+            viewer.show();
+            QCoreApplication::processEvents();
+
+            std::string sampleDoc = "widget_test_colormodes.pdf";
+            generateMultiPagePdf(sampleDoc, 2);
+            if (viewer.openDocument(QString::fromStdString(sampleDoc)) != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Failed to open document for color mode test" << std::endl;
+                return 1;
+            }
+
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < 3000 && viewer.cache().size() == 0) {
+                QCoreApplication::processEvents();
+                QThread::msleep(10);
+            }
+
+            // Initial: Normal
+            if (viewer.colorMode() != ui::ColorMode::Normal || viewer.isDarkMode()) {
+                std::cerr << "[FAIL] Initial color mode should be Normal and isDarkMode() false" << std::endl;
+                return 1;
+            }
+
+            // Switch to Sepia
+            bool colorModeSignalEmitted = false;
+            QObject::connect(&viewer, &ui::PdfViewerWidget::colorModeChanged, [&](ui::ColorMode m) {
+                if (m == ui::ColorMode::Sepia) colorModeSignalEmitted = true;
+            });
+            viewer.setColorMode(ui::ColorMode::Sepia);
+            QCoreApplication::processEvents();
+
+            if (!colorModeSignalEmitted || viewer.colorMode() != ui::ColorMode::Sepia || viewer.isDarkMode()) {
+                std::cerr << "[FAIL] Sepia mode transition or signal failed" << std::endl;
+                return 1;
+            }
+
+            // Render viewport in Sepia and check viewport background #342c24
+            QImage sepiaFrame(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+            {
+                QPainter p(&sepiaFrame);
+                viewer.viewport()->render(&p);
+            }
+            QRgb sepiaBg = sepiaFrame.pixel(2, 2);
+            if (qRed(sepiaBg) != 0x34 || qGreen(sepiaBg) != 0x2c || qBlue(sepiaBg) != 0x24) {
+                std::cerr << "[FAIL] Sepia viewport background expected #342c24, got RGB("
+                          << qRed(sepiaBg) << "," << qGreen(sepiaBg) << "," << qBlue(sepiaBg) << ")" << std::endl;
+                return 1;
+            }
+
+            // Switch to High Contrast
+            viewer.setColorMode(ui::ColorMode::HighContrast);
+            QCoreApplication::processEvents();
+            if (viewer.colorMode() != ui::ColorMode::HighContrast || !viewer.isDarkMode()) {
+                std::cerr << "[FAIL] HighContrast mode expected isDarkMode() == true" << std::endl;
+                return 1;
+            }
+
+            // Render viewport in HighContrast and check viewport background #0a0a0a
+            QImage hcFrame(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+            {
+                QPainter p(&hcFrame);
+                viewer.viewport()->render(&p);
+            }
+            QRgb hcBg = hcFrame.pixel(2, 2);
+            if (qRed(hcBg) != 0x0a || qGreen(hcBg) != 0x0a || qBlue(hcBg) != 0x0a) {
+                std::cerr << "[FAIL] HighContrast viewport background expected #0a0a0a, got RGB("
+                          << qRed(hcBg) << "," << qGreen(hcBg) << "," << qBlue(hcBg) << ")" << std::endl;
+                return 1;
+            }
+
+            // Switch to Inverted
+            viewer.setColorMode(ui::ColorMode::Inverted);
+            QCoreApplication::processEvents();
+            if (viewer.colorMode() != ui::ColorMode::Inverted || !viewer.isDarkMode()) {
+                std::cerr << "[FAIL] Inverted mode expected isDarkMode() == true" << std::endl;
+                return 1;
+            }
+
+            // Switch back to Normal via setDarkMode(false)
+            viewer.setDarkMode(false);
+            QCoreApplication::processEvents();
+            if (viewer.colorMode() != ui::ColorMode::Normal || viewer.isDarkMode()) {
+                std::cerr << "[FAIL] setDarkMode(false) expected to return to Normal mode" << std::endl;
+                return 1;
+            }
+        }
+
+        // 3. MainWindow integration & QSettings persistence
+        {
+            QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+            const QVariant prevColor = settings.value(QStringLiteral("colorMode"));
+            {
+                ui::MainWindow window;
+                window.resize(1024, 768);
+                window.show();
+                window.setColorMode(ui::ColorMode::Sepia);
+                if (window.colorMode() != ui::ColorMode::Sepia) {
+                    std::cerr << "[FAIL] MainWindow setColorMode(Sepia) failed" << std::endl;
+                    return 1;
+                }
+            }
+            QSettings reread(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+            if (reread.value(QStringLiteral("colorMode")).toInt() != static_cast<int>(ui::ColorMode::Sepia)) {
+                std::cerr << "[FAIL] ColorMode was not persisted in QSettings" << std::endl;
+                return 1;
+            }
+            {
+                ui::MainWindow second;
+                if (second.colorMode() != ui::ColorMode::Sepia) {
+                    std::cerr << "[FAIL] ColorMode was not restored by new MainWindow instance" << std::endl;
+                    return 1;
+                }
+            }
+            if (prevColor.isValid()) {
+                reread.setValue(QStringLiteral("colorMode"), prevColor);
+            } else {
+                reread.remove(QStringLiteral("colorMode"));
+            }
+        }
+
+        std::cout << "  -> Passed: Reading color modes (Normal, Inverted, Sepia, HighContrast), LUT pixel transformations, viewport theming, and QSettings persistence verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 42 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 43 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

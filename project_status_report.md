@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-The project has achieved a major milestone by transitioning to a **multi-process sandboxed worker architecture** (the Chromium security model) and completing **Milestones 1, 2, and 3** (Thumbnails & Page Labels, Multi-Document Tabs & Recent Files Session Management, and Native Linux/CUPS Printing & Headless PDF Export). All rendering and PDF parsing logic is isolated in a standalone `pdf_worker` binary under OS-level sandboxing, while the UI process (`pdf-reader`) remains completely unlinked from PDFium.
+The project has achieved a major milestone by transitioning to a **multi-process sandboxed worker architecture** (the Chromium security model) and completing **Milestones 1, 2, 3, and 4** (Thumbnails & Page Labels, Multi-Document Tabs & Recent Files Session Management, Native Linux/CUPS Printing & Headless PDF Export, and Reading Color Modes / Dark Mode / Sepia / High-Contrast). All rendering and PDF parsing logic is isolated in a standalone `pdf_worker` binary under OS-level sandboxing, while the UI process (`pdf-reader`) remains completely unlinked from PDFium.
 
 ---
 
@@ -51,6 +51,7 @@ flowchart LR
 | **Milestone 1** | **Thumbnails & Page Labels Sidebar** | Multi-tab sidebar (`QTabWidget`), PDF page label extraction via PDFium `FPDF_GetPageLabel`, lazy-loading miniature thumbnail grid with card styling, prefetching window, and two-way viewport synchronization. |
 | **Milestone 2** | **Multi-Document Tabs & Session Management** | Tabbed document interface (`QTabWidget`), dynamic tab add/close/switching (`Ctrl+T`, `Ctrl+W`, `Ctrl+Tab`), per-tab viewer isolation, and persistent Recent Files menu (`QSettings`) with clear option. |
 | **Milestone 3** | **Native CUPS Printing & Page Export** | Zero-PDFium UI printing via IPC `RenderPageRequest`, native print dialog (`QPrintDialog`), page ranges (`AllPages`, `CurrentPage`, `PageRange`), headless PDF export (`exportDocumentToPdf`), and print progress reporting. |
+| **Milestone 4** | **Dark Mode & Reading Themes** | High-performance LUT-based color mode post-processing (Normal, Invert/DarkMode, Sepia, HighContrast), GPU-accelerated transformed tile caching, synchronized sidebar thumbnails, View menu & toolbar theme actions, and QSettings persistence. |
 
 ---
 
@@ -106,9 +107,9 @@ flowchart TD
         T2["Milestone 2: Tabs & Multi-Document Session (DONE)"]
     end
 
-    subgraph Phase2 ["Phase 2: Desktop Workstation Polish"]
+    subgraph Phase2 ["Phase 2: Desktop Workstation Polish (DONE)"]
         T3["Milestone 3: CUPS Native Linux Printing & Export (DONE)"]
-        T4["Milestone 4: Dark Mode / Night Inversion Shader"]
+        T4["Milestone 4: Dark Mode & Reading Themes (DONE)"]
     end
 
     subgraph Phase3 ["Phase 3: Production Hardening & Distribution"]

@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <unordered_set>
 #include <unordered_map>
+#include <QPixmap>
+#include "ColorMode.h"
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
 #include "cache/TileCache.h"
@@ -93,8 +95,10 @@ public:
     void nextPage();
     void previousPage();
 
-    /// Dark mode / night inversion APIs
-    bool isDarkMode() const noexcept { return m_darkMode; }
+    /// Color mode / dark mode / night inversion APIs
+    ColorMode colorMode() const noexcept { return m_colorMode; }
+    void setColorMode(ColorMode mode);
+    bool isDarkMode() const noexcept { return m_colorMode == ColorMode::Inverted || m_colorMode == ColorMode::HighContrast; }
     void setDarkMode(bool enabled);
     void toggleDarkMode();
 
@@ -181,6 +185,7 @@ Q_SIGNALS:
     void searchFinished(bool truncated);
     void outlineReady(const std::vector<pdf::OutlineItem>& outline);
     void darkModeChanged(bool isDark);
+    void colorModeChanged(ui::ColorMode mode);
     void viewModeChanged(layout::ViewMode mode);
     void rotationChanged(int degrees);
 
@@ -306,9 +311,11 @@ private:
     std::vector<QString> m_pageLabels;
     QString m_currentFilePath;
 
-    // Dark mode / night inversion state
+    // Color mode / dark mode / night inversion state
+    ColorMode m_colorMode{ColorMode::Normal};
     bool m_darkMode{false};
     int m_rotation{0};
+    mutable std::unordered_map<pdf::TileKey, QPixmap, pdf::TileKeyHash> m_transformedPixmapCache;
 };
 
 } // namespace ui

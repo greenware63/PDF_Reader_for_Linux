@@ -196,6 +196,7 @@ endif()
 # Main desktop application executable
 add_executable(pdf-reader
     main.cpp
+    src/ui/ColorMode.h
     src/ui/ImageUtils.h
     src/ui/FindBar.h
     src/ui/FindBar.cpp
@@ -252,6 +253,8 @@ target_link_libraries(test_tile_cache PRIVATE
 # Viewport Widget headless test (subclasses QAbstractScrollArea)
 add_executable(test_widget
     test_widget.cpp
+    src/ui/ColorMode.h
+    src/ui/ImageUtils.h
     src/ui/FindBar.h
     src/ui/FindBar.cpp
     src/ui/ThumbnailListWidget.h

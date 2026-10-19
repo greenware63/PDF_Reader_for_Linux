@@ -64,8 +64,10 @@ public:
     /// Exports the currently active document to a PDF file. @return true on success.
     bool exportDocumentToPdf(const QString& outputPath, int fromPage = -1, int toPage = -1);
 
-    /// Dark mode / night inversion status.
-    bool isDarkMode() const noexcept { return m_darkMode; }
+    /// Color mode / dark mode / reading theme status.
+    ColorMode colorMode() const noexcept { return m_colorMode; }
+    void setColorMode(ColorMode mode);
+    bool isDarkMode() const noexcept { return m_colorMode == ColorMode::Inverted || m_colorMode == ColorMode::HighContrast; }
     layout::ViewMode viewMode() const noexcept { return m_viewMode; }
     /// Applies the page arrangement to every open tab and to tabs opened later; remembered across sessions.
     void setViewMode(layout::ViewMode mode);
@@ -136,10 +138,12 @@ private:
     QStandardItemModel* m_outlineModel{nullptr};
     QLabel* m_outlineEmptyLabel{nullptr};
     QAction* m_toggleSidebarAction{nullptr};
+    QAction* m_colorModeActions[4]{nullptr, nullptr, nullptr, nullptr};
     QAction* m_darkModeAction{nullptr};
     QMenu* m_recentFilesMenu{nullptr};
     QStringList m_recentFiles;
     bool m_sidebarUserHidden{false};
+    ColorMode m_colorMode{ColorMode::Normal};
     bool m_darkMode{false};
     layout::ViewMode m_viewMode{layout::ViewMode::Continuous};
     QAction* m_viewModeActions[4]{nullptr, nullptr, nullptr, nullptr};

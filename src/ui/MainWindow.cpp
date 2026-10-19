@@ -111,7 +111,15 @@ static QString readingPositionKey(const QString& filePath) {
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
     QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
-    m_darkMode = settings.value(QStringLiteral("darkMode"), false).toBool();
+    if (settings.contains(QStringLiteral("colorMode"))) {
+        const int savedColorMode = settings.value(QStringLiteral("colorMode"), 0).toInt();
+        if (savedColorMode >= 0 && savedColorMode <= static_cast<int>(ColorMode::HighContrast)) {
+            m_colorMode = static_cast<ColorMode>(savedColorMode);
+        }
+    } else {
+        m_colorMode = settings.value(QStringLiteral("darkMode"), false).toBool() ? ColorMode::Inverted : ColorMode::Normal;
+    }
+    m_darkMode = (m_colorMode == ColorMode::Inverted || m_colorMode == ColorMode::HighContrast);
     {
         const int savedMode = settings.value(QStringLiteral("viewMode"), 0).toInt();
         if (savedMode >= 0 && savedMode <= static_cast<int>(layout::ViewMode::TwoPageCover)) {
@@ -274,7 +282,7 @@ void MainWindow::setupUi() {
 
 PdfViewerWidget* MainWindow::createViewerTab(const QString& title) {
     auto* viewer = new PdfViewerWidget(m_docTabs);
-    viewer->setDarkMode(m_darkMode);
+    viewer->setColorMode(m_colorMode);
     viewer->setViewMode(m_viewMode);
     connectViewer(viewer);
     const QString tabTitle = title.isEmpty() ? tr("Untitled") : title;
@@ -382,12 +390,31 @@ void MainWindow::setupActions() {
     });
     m_toggleSidebarAction->setShortcut(QKeySequence(Qt::Key_F4));
 
-    m_darkModeAction = viewMenu->addAction(tr("&Dark Mode / Invert"), this, [this]() {
-        setDarkMode(!m_darkMode);
-    });
-    m_darkModeAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
-    m_darkModeAction->setCheckable(true);
-    m_darkModeAction->setChecked(m_darkMode);
+    QMenu* colorMenu = viewMenu->addMenu(tr("&Color Mode"));
+    auto* colorGroup = new QActionGroup(this);
+    colorGroup->setExclusive(true);
+
+    struct ColorEntry { ColorMode mode; const char* text; const char* shortcut; };
+    const ColorEntry colorEntries[] = {
+        {ColorMode::Normal,       QT_TR_NOOP("&Normal (Light)"),         ""},
+        {ColorMode::Inverted,     QT_TR_NOOP("&Dark Mode / Invert"),     "Ctrl+I"},
+        {ColorMode::Sepia,        QT_TR_NOOP("&Sepia (Warm Reading)"),   "Ctrl+Shift+S"},
+        {ColorMode::HighContrast, QT_TR_NOOP("&High Contrast"),          "Ctrl+Shift+H"},
+    };
+
+    for (const auto& e : colorEntries) {
+        QAction* a = colorMenu->addAction(tr(e.text));
+        a->setCheckable(true);
+        if (e.shortcut && e.shortcut[0] != '\0') {
+            a->setShortcut(QKeySequence(QString::fromLatin1(e.shortcut)));
+        }
+        a->setChecked(e.mode == m_colorMode);
+        colorGroup->addAction(a);
+        m_colorModeActions[static_cast<int>(e.mode)] = a;
+        const ColorMode mode = e.mode;
+        connect(a, &QAction::triggered, this, [this, mode]() { setColorMode(mode); });
+    }
+    m_darkModeAction = m_colorModeActions[static_cast<int>(ColorMode::Inverted)];
 
     viewMenu->addSeparator();
     {
@@ -513,19 +540,26 @@ void MainWindow::setupActions() {
     darkToolbarAction->setToolTip(tr("Toggle Dark Mode / Invert Colors (Ctrl+I)"));
 }
 
-void MainWindow::setDarkMode(bool enabled) {
-    m_darkMode = enabled;
-    if (m_darkModeAction) {
-        m_darkModeAction->setChecked(enabled);
+void MainWindow::setColorMode(ColorMode mode) {
+    m_colorMode = mode;
+    m_darkMode = (m_colorMode == ColorMode::Inverted || m_colorMode == ColorMode::HighContrast);
+    const int idx = static_cast<int>(mode);
+    if (idx >= 0 && idx < 4 && m_colorModeActions[idx] && !m_colorModeActions[idx]->isChecked()) {
+        m_colorModeActions[idx]->setChecked(true);
     }
     QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    settings.setValue(QStringLiteral("colorMode"), static_cast<int>(m_colorMode));
     settings.setValue(QStringLiteral("darkMode"), m_darkMode);
 
     for (int i = 0; i < tabCount(); ++i) {
         if (auto* v = viewerAt(i)) {
-            v->setDarkMode(enabled);
+            v->setColorMode(mode);
         }
     }
+}
+
+void MainWindow::setDarkMode(bool enabled) {
+    setColorMode(enabled ? ColorMode::Inverted : ColorMode::Normal);
 }
 
 void MainWindow::setViewMode(layout::ViewMode mode) {

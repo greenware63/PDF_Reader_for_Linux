@@ -1,5 +1,7 @@
 #include "ThumbnailListWidget.h"
 #include "PdfViewerWidget.h"
+#include "ImageUtils.h"
+#include "ColorMode.h"
 #include <QPainter>
 #include <QScrollBar>
 #include <QTimer>
@@ -72,23 +74,47 @@ void ThumbnailListWidget::setViewer(PdfViewerWidget* viewer) {
                 requestVisibleThumbnails();
             }
         });
+        connect(m_viewer, &PdfViewerWidget::colorModeChanged, this, [this](ColorMode) {
+            m_loadedPages.clear();
+            m_requestedPages.clear();
+            if (isVisible()) {
+                requestVisibleThumbnails();
+            }
+        });
     }
 }
 
 QPixmap ThumbnailListWidget::createPlaceholderPixmap(int width, int height, int pageNumber) const {
     QPixmap pixmap(width, height);
-    pixmap.fill(QColor(245, 245, 245));
+    const bool isDark = m_viewer ? m_viewer->isDarkMode() : false;
+    const bool isSepia = m_viewer ? (m_viewer->colorMode() == ColorMode::Sepia) : false;
+
+    QColor bgColor(245, 245, 245);
+    QColor borderColor(200, 200, 200);
+    QColor textColor(160, 160, 160);
+
+    if (isDark) {
+        bgColor = QColor(35, 35, 35);
+        borderColor = QColor(60, 60, 60);
+        textColor = QColor(140, 140, 140);
+    } else if (isSepia) {
+        bgColor = QColor(245, 235, 215);
+        borderColor = QColor(210, 195, 170);
+        textColor = QColor(140, 120, 95);
+    }
+
+    pixmap.fill(bgColor);
 
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    painter.setPen(QPen(QColor(200, 200, 200), 1));
+    painter.setPen(QPen(borderColor, 1));
     painter.drawRect(0, 0, width - 1, height - 1);
 
     QFont font = painter.font();
     font.setPointSize(11);
     font.setBold(true);
     painter.setFont(font);
-    painter.setPen(QColor(160, 160, 160));
+    painter.setPen(textColor);
     painter.drawText(QRect(0, 0, width, height), Qt::AlignCenter, QString::number(pageNumber));
 
     return pixmap;
@@ -172,7 +198,8 @@ void ThumbnailListWidget::onThumbnailReady(int pageIndex, const QImage& image) {
     m_loadedPages.insert(pageIndex);
     if (pageIndex >= 0 && pageIndex < count()) {
         if (auto* it = item(pageIndex)) {
-            it->setIcon(QIcon(QPixmap::fromImage(image)));
+            const QImage transformed = m_viewer ? applyColorMode(image, m_viewer->colorMode()) : image;
+            it->setIcon(QIcon(QPixmap::fromImage(transformed)));
         }
     }
 }
