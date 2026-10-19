@@ -1,0 +1,63 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<<  /Length 133 >>
+stream
+BT  /F1 14 Tf 72 700 Td (CANARY-OLDREV original confidential text) Tj ET
+BT  /F1 14 Tf 72 650 Td (Second line CANARY-OLDREV-2) Tj ET
+
+endstream
+endobj
+3 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 612 792] /Contents 2 0 R /Resources << /Font << /F1 1 0 R >> >> >>
+endobj
+4 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+5 0 obj
+<< /Type /Catalog /Pages 4 0 R >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000000270 00000 n 
+0000000396 00000 n 
+0000000453 00000 n 
+trailer
+<< /Size 6 /Root 5 0 R  >>
+startxref
+502
+%%EOF
+3 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Resources << /Font << /F1 1 0 R >> >> >>
+endobj
+6 0 obj
+<<  /Length 131 >>
+stream
+BT  /F1 14 Tf 72 700 Td (Replacement text KEEP-NEW) Tj ET
+BT  /F1 14 Tf 72 650 Td (Visible line under the box CANARY-NEWREV) Tj ET
+
+endstream
+endobj
+7 0 obj
+<< /Orphan (CANARY-ORPHAN) >>
+endobj
+xref
+0 1
+0000000000 65535 f 
+3 1
+0000000686 00000 n 
+6 1
+0000000812 00000 n 
+7 1
+0000000995 00000 n 
+trailer
+<< /Size 8 /Root 5 0 R /Prev 502  >>
+startxref
+1040
+%%EOF

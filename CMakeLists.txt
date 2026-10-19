@@ -143,6 +143,21 @@ target_link_libraries(pdf_engine PUBLIC
     pdfium
 )
 
+# Burn-in redaction engine (see docs/REDACTION.md). Pure C++20, PDFium only: no Qt, no UI.
+add_library(pdf_redact STATIC
+    include/redact/Redaction.h
+    src/redact/Redaction.cpp
+)
+
+target_include_directories(pdf_redact PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(pdf_redact PUBLIC
+    pdfium
+)
+
 # Standalone IPC library for protocol messages and serialization
 add_library(pdf_ipc STATIC
     include/ipc/IpcProtocol.h
@@ -316,6 +331,16 @@ target_link_libraries(test_worker_ipc PRIVATE
     Qt6::Network
 )
 
+# Redaction engine tests (need zlib for the independent inspector's inflate; skipped when absent)
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND AND UNIX)
+    add_executable(test_redaction tests/redaction/test_redaction.cpp tests/redaction/PdfInspector.h)
+    target_link_libraries(test_redaction PRIVATE pdf_redact ZLIB::ZLIB)
+    target_include_directories(test_redaction PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/redaction)
+else()
+    message(STATUS "zlib not found (or non-Unix): test_redaction is not built")
+endif()
+
 # CTest registration
 enable_testing()
 add_test(
@@ -349,6 +374,13 @@ add_test(
     NAME WorkerIpcTestSuite
     COMMAND test_worker_ipc "$<TARGET_FILE:pdf_worker>" "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
 )
+
+if(TARGET test_redaction)
+    add_test(
+        NAME RedactionTestSuite
+        COMMAND test_redaction "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/redaction"
+    )
+endif()
 
 if(WIN32)
     get_filename_component(COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
