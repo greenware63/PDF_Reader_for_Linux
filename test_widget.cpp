@@ -229,6 +229,82 @@ static void generateSupplementaryUnicodePdfFixture(const std::string& path) {
     std::ofstream out(path, std::ios::binary);
     out.write(pdf.data(), pdf.size());
 }
+static void generatePersianPdfFixture(const std::string& path) {
+    std::string cmap =
+        "/CIDInit /ProcSet findresource begin\n"
+        "12 dict begin\n"
+        "begincmap\n"
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        "/CMapName /Custom-Persian-ToUnicode def\n"
+        "/CMapType 2 def\n"
+        "1 begincodespacerange\n"
+        "<0000> <FFFF>\n"
+        "endcodespacerange\n"
+        "9 beginbfchar\n"
+        "<0001> <0646>\n"
+        "<0002> <0627>\n"
+        "<0003> <0647>\n"
+        "<0004> <062C>\n"
+        "<0005> <0020>\n"
+        "<0006> <0645>\n"
+        "<0007> <0627>\n"
+        "<0008> <0644>\n"
+        "<0009> <0633>\n"
+        "endbfchar\n"
+        "endcmap\n"
+        "CMapName currentdict /CMap defineresource pop\n"
+        "end\n"
+        "end\n";
+
+    std::string contentStream =
+        "BT\n"
+        "/F1 20 Tf\n"
+        "100 700 Td\n"
+        "<000100020003000400050006000700080009> Tj\n"
+        "ET\n";
+
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 8 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Helvetica-Custom /Encoding /Identity-H /DescendantFonts [5 0 R] /ToUnicode 7 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "5 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Helvetica-Custom /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 6 0 R /DW 1000 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "6 0 obj\n<< /Type /FontDescriptor /FontName /Helvetica-Custom /Flags 4 /FontBBox [-500 -500 2000 2000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "7 0 obj\n<< /Length " + std::to_string(cmap.size()) + " >>\nstream\n" + cmap + "\nendstream\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "8 0 obj\n<< /Length " + std::to_string(contentStream.size()) + " >>\nstream\n" + contentStream + "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 9\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
+
 static void generateTwoPageTextFixture(const std::string& path, const std::string& text1, const std::string& text2) {
     std::string pdf;
     pdf += "%PDF-1.4\n";
@@ -1945,6 +2021,7 @@ int main(int argc, char* argv[]) {
 
         // 2. Test Persian RTL text search in viewer
         std::string persianPath = "persian_test.pdf";
+        generatePersianPdfFixture(persianPath);
         err = viewer.openDocument(QString::fromStdString(persianPath));
         if (err != pdf::DocumentError::None) {
             std::cerr << "[FAIL] Failed to open Persian document in viewer for search" << std::endl;
@@ -1953,7 +2030,14 @@ int main(int argc, char* argv[]) {
 
         viewer.findText(QString::fromUtf8("\xd8\xb3\xd9\x84\xd8\xa7\xd9\x85"), false);
         viewer.renderWorker().waitForIdle();
-        QCoreApplication::processEvents();
+        {
+            QElapsedTimer searchTimer;
+            searchTimer.start();
+            while (searchTimer.elapsed() < 3000 && viewer.searchMatchCount() == 0) {
+                QCoreApplication::processEvents();
+                QThread::msleep(10);
+            }
+        }
 
         if (viewer.searchMatchCount() != 1) {
             std::cerr << "[FAIL] Persian search expected 1 match for 'salam', got " << viewer.searchMatchCount() << std::endl;
