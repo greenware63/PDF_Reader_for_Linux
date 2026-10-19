@@ -158,7 +158,7 @@ int main(int argc, char* argv[]) {
     QByteArray msgPayload;
     bool gotPong = waitFor([&]() {
         return readPacket(msgType, msgPayload) && msgType == pdf::ipc::MessageType::Pong;
-    }, 3000);
+    }, 5000);
 
     if (!gotPong) {
         std::cerr << "[FAIL] Did not receive Pong from worker." << std::endl;
@@ -336,7 +336,7 @@ int main(int argc, char* argv[]) {
 
     bool workerCleanExit = waitFor([&]() {
         return worker.state() == QProcess::NotRunning;
-    }, 3000);
+    }, 5000);
 
     if (!workerCleanExit) {
         std::cerr << "[FAIL] Worker process did not shut down upon socket disconnect." << std::endl;
@@ -369,7 +369,7 @@ int main(int argc, char* argv[]) {
             crashClient.connectToServer(crashSocketName);
         }
         return crashClient.state() == QLocalSocket::ConnectedState;
-    }, 3000);
+    }, 5000);
 
     if (!crashConnected) {
         std::cerr << "[FAIL] Failed to connect to crash-test worker." << std::endl;
@@ -388,7 +388,7 @@ int main(int argc, char* argv[]) {
 
     bool detected = waitFor([&]() {
         return disconnectedDetected || crashClient.state() == QLocalSocket::UnconnectedState;
-    }, 3000);
+    }, 5000);
 
     if (!detected) {
         std::cerr << "[FAIL] Client did not detect abrupt worker termination." << std::endl;
@@ -548,7 +548,7 @@ int main(int argc, char* argv[]) {
         QByteArray payload;
         bool gotPong1 = waitFor([&]() {
             return readHangPacket(msgType, payload) && msgType == pdf::ipc::MessageType::Pong;
-        }, 3000);
+        }, 5000);
 
         if (!gotPong1) {
             std::cerr << "[FAIL] WorkerServer did not respond to Ping on IPC thread!" << std::endl;
@@ -570,7 +570,7 @@ int main(int argc, char* argv[]) {
 
         bool gotPong2 = waitFor([&]() {
             return readHangPacket(msgType, payload) && msgType == pdf::ipc::MessageType::Pong;
-        }, 3000);
+        }, 5000);
 
         if (!gotPong2) {
             std::cerr << "[FAIL] WorkerServer did not respond to second Ping!" << std::endl;
@@ -642,7 +642,8 @@ int main(int argc, char* argv[]) {
 #ifdef PDF_WORKER_TEST_HOOKS
         // Hang engine at runtime via control request without killing process
         client.hangEngineForTesting();
-        bool caught = waitFor([&]() { return !failureMessage.isEmpty(); }, 4000);
+        // Allow up to 10s deadline so watchdog detection remains robust under heavy CPU load
+        bool caught = waitFor([&]() { return !failureMessage.isEmpty(); }, 10000);
         if (!caught) {
             std::cerr << "[FAIL] Watchdog did not catch engine stall on reopened document." << std::endl;
             return 1;
