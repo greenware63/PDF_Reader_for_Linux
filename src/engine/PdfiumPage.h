@@ -23,7 +23,7 @@ public:
     void getPixelDimensions(double scale, double devicePixelRatio, int& outWidth, int& outHeight) const override;
     PixelBuffer renderTile(const PixelRect& rect, double scale, double devicePixelRatio, int rotation = 0) override;
     PixelBuffer renderWholePage(double scale, double devicePixelRatio, int rotation = 0) override;
-    PixelBuffer renderThumbnail(int targetWidth) override;
+    PixelBuffer renderThumbnail(int targetWidth, int rotation = 0) override;
     PageText extractText() override;
 
     static void setSimulateGetTextFailureForTesting(bool simulate) noexcept;

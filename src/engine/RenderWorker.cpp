@@ -179,13 +179,13 @@ void RenderWorker::requestDocumentOutline(int64_t documentId) {
     }
 }
 
-void RenderWorker::requestThumbnail(int64_t documentId, int pageIndex, int targetWidth) {
+void RenderWorker::requestThumbnail(int64_t documentId, int pageIndex, int targetWidth, int rotation) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_running.load()) {
         Q_EMIT thumbnailFailed(documentId, pageIndex);
         return;
     }
-    m_controlQueue.push_back({[this, documentId, pageIndex, targetWidth]() {
+    m_controlQueue.push_back({[this, documentId, pageIndex, targetWidth, rotation]() {
         noteProgress(ipc::WorkerOp::Thumbnail);
         struct ThumbGuard {
             RenderWorker* w;
@@ -200,7 +200,7 @@ void RenderWorker::requestThumbnail(int64_t documentId, int pageIndex, int targe
             Q_EMIT thumbnailFailed(documentId, pageIndex);
             return;
         }
-        PixelBuffer buf = page->renderThumbnail(targetWidth);
+        PixelBuffer buf = page->renderThumbnail(targetWidth, rotation);
         if (buf.isValid()) {
             Q_EMIT thumbnailReady(documentId, pageIndex, buf);
         } else {
@@ -210,13 +210,13 @@ void RenderWorker::requestThumbnail(int64_t documentId, int pageIndex, int targe
     m_cv.notify_one();
 }
 
-void RenderWorker::requestPrintPage(int64_t documentId, int pageIndex, double scale, double dpr) {
+void RenderWorker::requestPrintPage(int64_t documentId, int pageIndex, double scale, double dpr, int rotation) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_running.load()) {
         Q_EMIT printPageFailed(documentId, pageIndex);
         return;
     }
-    m_controlQueue.push_back({[this, documentId, pageIndex, scale, dpr]() {
+    m_controlQueue.push_back({[this, documentId, pageIndex, scale, dpr, rotation]() {
         noteProgress(ipc::WorkerOp::Print);
         struct PrintGuard {
             RenderWorker* w;
@@ -231,7 +231,7 @@ void RenderWorker::requestPrintPage(int64_t documentId, int pageIndex, double sc
             Q_EMIT printPageFailed(documentId, pageIndex);
             return;
         }
-        PixelBuffer buf = page->renderWholePage(scale, dpr);
+        PixelBuffer buf = page->renderWholePage(scale, dpr, rotation);
         if (buf.isValid()) {
             Q_EMIT printPageReady(documentId, pageIndex, buf);
         } else {

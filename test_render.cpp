@@ -237,6 +237,51 @@ static void generateComplexPdfFixture(const std::string& path) {
     out.write(pdf.data(), pdf.size());
 }
 
+static void generateCornerColorPdfFixture(const std::string& path) {
+    std::string contentStream;
+    // White background for 400 x 600 pt page
+    contentStream += "1.0 1.0 1.0 rg 0 0 400 600 re f\n";
+    // Top-Left corner (x: 0..100, y: 500..600): Pure Red
+    contentStream += "1.0 0.0 0.0 rg 0 500 100 100 re f\n";
+    // Top-Right corner (x: 300..400, y: 500..600): Pure Green
+    contentStream += "0.0 1.0 0.0 rg 300 500 100 100 re f\n";
+    // Bottom-Right corner (x: 300..400, y: 0..100): Pure Blue
+    contentStream += "0.0 0.0 1.0 rg 300 0 100 100 re f\n";
+    // Bottom-Left corner (x: 0..100, y: 0..100): Pure Yellow (Red + Green)
+    contentStream += "1.0 1.0 0.0 rg 0 0 100 100 re f\n";
+
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 600] /Contents 4 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Length " + std::to_string(contentStream.size()) + " >>\nstream\n";
+    pdf += contentStream;
+    pdf += "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 5\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), pdf.size());
+}
+
 static void generateSubpixelPdfFixture(const std::string& path) {
     std::string contentStream;
     // White background
@@ -1642,12 +1687,14 @@ int main(int argc, char* argv[]) {
     }
 
     // Test 20: Rotated whole-page and tile rendering (0, 90, 180, 270 degrees)
-    std::cout << "[TEST 20] Testing rotated whole-page and tile rendering (0, 90, 180, 270 deg)..." << std::endl;
+    std::cout << "[TEST 20] Testing rotated whole-page, thumbnail, and tile rendering with asymmetric corner-color fixture..." << std::endl;
     {
-        std::string rotPath = "text_test.pdf";
+        const std::string cornerFixturePath = "corner_color_test.pdf";
+        generateCornerColorPdfFixture(cornerFixturePath);
+
         auto rotDoc = pdf::createDocument();
-        if (rotDoc->loadFromFile(rotPath) != pdf::DocumentError::None) {
-            std::cerr << "[FAIL] Failed to load text_test.pdf for rotation test" << std::endl;
+        if (rotDoc->loadFromFile(cornerFixturePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to load corner_color_test.pdf for rotation test" << std::endl;
             return 1;
         }
         auto page = rotDoc->getPage(0);
@@ -1656,80 +1703,137 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Render unrotated whole page
+        auto getPixelColor = [](const pdf::PixelBuffer& buf, int x, int y) -> std::tuple<uint8_t, uint8_t, uint8_t> {
+            const uint32_t* row = reinterpret_cast<const uint32_t*>(buf.data() + y * buf.stride());
+            uint32_t px = row[x];
+            return {static_cast<uint8_t>((px >> 16) & 0xFF),
+                    static_cast<uint8_t>((px >> 8) & 0xFF),
+                    static_cast<uint8_t>(px & 0xFF)};
+        };
+
+        auto isRed = [](const std::tuple<uint8_t, uint8_t, uint8_t>& c) {
+            return std::get<0>(c) > 200 && std::get<1>(c) < 50 && std::get<2>(c) < 50;
+        };
+        auto isGreen = [](const std::tuple<uint8_t, uint8_t, uint8_t>& c) {
+            return std::get<0>(c) < 50 && std::get<1>(c) > 200 && std::get<2>(c) < 50;
+        };
+        auto isBlue = [](const std::tuple<uint8_t, uint8_t, uint8_t>& c) {
+            return std::get<0>(c) < 50 && std::get<1>(c) < 50 && std::get<2>(c) > 200;
+        };
+        auto isYellow = [](const std::tuple<uint8_t, uint8_t, uint8_t>& c) {
+            return std::get<0>(c) > 200 && std::get<1>(c) > 200 && std::get<2>(c) < 50;
+        };
+
+        // 1. Unrotated 0 deg: 400 x 600 px
+        // TL=Red, TR=Green, BR=Blue, BL=Yellow
         pdf::PixelBuffer buf0 = page->renderWholePage(1.0, 1.0, 0);
-        if (!buf0.isValid()) {
-            std::cerr << "[FAIL] Unrotated whole page render failed" << std::endl;
+        if (!buf0.isValid() || buf0.width() != 400 || buf0.height() != 600) {
+            std::cerr << "[FAIL] 0 deg whole page dimensions incorrect: " << buf0.width() << "x" << buf0.height() << std::endl;
             return 1;
         }
-        int w0 = buf0.width();
-        int h0 = buf0.height();
+        if (!isRed(getPixelColor(buf0, 50, 50)) ||
+            !isGreen(getPixelColor(buf0, 350, 50)) ||
+            !isBlue(getPixelColor(buf0, 350, 550)) ||
+            !isYellow(getPixelColor(buf0, 50, 550))) {
+            std::cerr << "[FAIL] 0 deg corner colors incorrect" << std::endl;
+            return 1;
+        }
 
-        // Render at 90 degrees
+        // 2. Rotated 90 deg: 600 x 400 px
+        // TL=Yellow, TR=Red, BR=Green, BL=Blue
         pdf::PixelBuffer buf90 = page->renderWholePage(1.0, 1.0, 90);
-        if (!buf90.isValid() || buf90.width() != h0 || buf90.height() != w0) {
-            std::cerr << "[FAIL] Rotated 90 deg whole page dimensions incorrect: expected "
-                      << h0 << "x" << w0 << ", got " << buf90.width() << "x" << buf90.height() << std::endl;
+        if (!buf90.isValid() || buf90.width() != 600 || buf90.height() != 400) {
+            std::cerr << "[FAIL] 90 deg whole page dimensions incorrect: " << buf90.width() << "x" << buf90.height() << std::endl;
+            return 1;
+        }
+        if (!isYellow(getPixelColor(buf90, 50, 50)) ||
+            !isRed(getPixelColor(buf90, 550, 50)) ||
+            !isGreen(getPixelColor(buf90, 550, 350)) ||
+            !isBlue(getPixelColor(buf90, 50, 350))) {
+            std::cerr << "[FAIL] 90 deg corner colors incorrect (orientation mismatch)" << std::endl;
             return 1;
         }
 
-        // Render at 180 degrees
+        // 3. Rotated 180 deg: 400 x 600 px
+        // TL=Blue, TR=Yellow, BR=Red, BL=Green
         pdf::PixelBuffer buf180 = page->renderWholePage(1.0, 1.0, 180);
-        if (!buf180.isValid() || buf180.width() != w0 || buf180.height() != h0) {
-            std::cerr << "[FAIL] Rotated 180 deg whole page dimensions incorrect: expected "
-                      << w0 << "x" << h0 << ", got " << buf180.width() << "x" << buf180.height() << std::endl;
+        if (!buf180.isValid() || buf180.width() != 400 || buf180.height() != 600) {
+            std::cerr << "[FAIL] 180 deg whole page dimensions incorrect: " << buf180.width() << "x" << buf180.height() << std::endl;
+            return 1;
+        }
+        if (!isBlue(getPixelColor(buf180, 50, 50)) ||
+            !isYellow(getPixelColor(buf180, 350, 50)) ||
+            !isRed(getPixelColor(buf180, 350, 550)) ||
+            !isGreen(getPixelColor(buf180, 50, 550))) {
+            std::cerr << "[FAIL] 180 deg corner colors incorrect (orientation mismatch)" << std::endl;
             return 1;
         }
 
-        // Render at 270 degrees
+        // 4. Rotated 270 deg: 600 x 400 px
+        // TL=Green, TR=Blue, BR=Yellow, BL=Red
         pdf::PixelBuffer buf270 = page->renderWholePage(1.0, 1.0, 270);
-        if (!buf270.isValid() || buf270.width() != h0 || buf270.height() != w0) {
-            std::cerr << "[FAIL] Rotated 270 deg whole page dimensions incorrect: expected "
-                      << h0 << "x" << w0 << ", got " << buf270.width() << "x" << buf270.height() << std::endl;
+        if (!buf270.isValid() || buf270.width() != 600 || buf270.height() != 400) {
+            std::cerr << "[FAIL] 270 deg whole page dimensions incorrect: " << buf270.width() << "x" << buf270.height() << std::endl;
+            return 1;
+        }
+        if (!isGreen(getPixelColor(buf270, 50, 50)) ||
+            !isBlue(getPixelColor(buf270, 550, 50)) ||
+            !isYellow(getPixelColor(buf270, 550, 350)) ||
+            !isRed(getPixelColor(buf270, 50, 350))) {
+            std::cerr << "[FAIL] 270 deg corner colors incorrect (orientation mismatch)" << std::endl;
             return 1;
         }
 
-        // Test rotated tile rendering at 90 degrees
-        int tileW = h0 / 2;
-        int tileH = w0 / 2;
-        pdf::PixelBuffer tile90 = page->renderTile({0, 0, tileW, tileH}, 1.0, 1.0, 90);
-        if (!tile90.isValid() || tile90.width() != tileW || tile90.height() != tileH) {
-            std::cerr << "[FAIL] Rotated 90 deg tile render failed or wrong dimensions: expected "
-                      << tileW << "x" << tileH << ", got " << tile90.width() << "x" << tile90.height() << std::endl;
-            return 1;
-        }
-
-        // Test rotated tile rendering at 270 degrees
-        pdf::PixelBuffer tile270 = page->renderTile({tileW, 0, h0 - tileW, tileH}, 1.0, 1.0, 270);
-        if (!tile270.isValid() || tile270.width() != (h0 - tileW) || tile270.height() != tileH) {
-            std::cerr << "[FAIL] Rotated 270 deg tile render failed or wrong dimensions: expected "
-                      << (h0 - tileW) << "x" << tileH << ", got " << tile270.width() << "x" << tile270.height() << std::endl;
-            return 1;
-        }
-
-        // Verify that 90 deg render is non-blank (contains glyph pixels)
-        bool hasContent = false;
-        const uint8_t* scan90 = buf90.data();
-        for (int y = 0; y < buf90.height(); ++y) {
-            const uint32_t* row = reinterpret_cast<const uint32_t*>(scan90 + y * buf90.stride());
-            for (int x = 0; x < buf90.width(); ++x) {
-                uint32_t pixel = row[x];
-                uint8_t b = pixel & 0xFF;
-                uint8_t g = (pixel >> 8) & 0xFF;
-                uint8_t r = (pixel >> 16) & 0xFF;
-                if (r < 250 || g < 250 || b < 250) {
-                    hasContent = true;
-                    break;
+        // 5. Stitched tile equality at 90 deg (2x2 grid, each tile 300 x 200 px)
+        pdf::PixelBuffer stitched90 = pdf::PixelBuffer::allocate(600, 400, pdf::PixelFormat::BGRX8888);
+        for (int ty = 0; ty < 2; ++ty) {
+            for (int tx = 0; tx < 2; ++tx) {
+                int x = tx * 300;
+                int y = ty * 200;
+                pdf::PixelBuffer tile = page->renderTile({x, y, 300, 200}, 1.0, 1.0, 90);
+                if (!tile.isValid() || tile.width() != 300 || tile.height() != 200) {
+                    std::cerr << "[FAIL] 90 deg tile render failed at (" << x << ", " << y << ")" << std::endl;
+                    return 1;
+                }
+                for (int r = 0; r < 200; ++r) {
+                    const uint8_t* srcRow = tile.data() + r * tile.stride();
+                    uint8_t* dstRow = stitched90.data() + (y + r) * stitched90.stride() + x * 4;
+                    std::memcpy(dstRow, srcRow, 300 * 4);
                 }
             }
-            if (hasContent) break;
         }
-        if (!hasContent) {
-            std::cerr << "[FAIL] Rotated 90 deg whole page appears completely white/blank" << std::endl;
+
+        // Compare stitched90 against buf90 byte-by-byte
+        int diffCount = 0;
+        for (int y = 0; y < 400; ++y) {
+            const uint8_t* rowA = buf90.data() + y * buf90.stride();
+            const uint8_t* rowB = stitched90.data() + y * stitched90.stride();
+            if (std::memcmp(rowA, rowB, 600 * 4) != 0) {
+                ++diffCount;
+            }
+        }
+        if (diffCount > 0) {
+            std::cerr << "[FAIL] Stitched 90 deg tiles do not match whole page 90 deg render! Mismatched rows: " << diffCount << std::endl;
             return 1;
         }
 
-        std::cout << "  -> Passed: Rotated whole-page (90, 180, 270 deg) and rotated tiles rendered with correct swapped dimensions and non-blank content." << std::endl;
+        // 6. Thumbnail rotated rendering check at 90 deg
+        pdf::PixelBuffer thumb90 = page->renderThumbnail(150, 90);
+        if (!thumb90.isValid() || thumb90.width() != 150) {
+            std::cerr << "[FAIL] Rotated 90 deg thumbnail failed or wrong width: " << thumb90.width() << std::endl;
+            return 1;
+        }
+        // At 90 deg (600x400 aspect ratio 3:2), targetWidth=150 should produce targetHeight=100
+        if (thumb90.height() != 100) {
+            std::cerr << "[FAIL] Rotated 90 deg thumbnail height incorrect: expected 100, got " << thumb90.height() << std::endl;
+            return 1;
+        }
+        if (!isYellow(getPixelColor(thumb90, 15, 15)) || !isRed(getPixelColor(thumb90, 135, 15))) {
+            std::cerr << "[FAIL] Rotated 90 deg thumbnail corner colors incorrect" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Asymmetric corner-colors verified across 0, 90, 180, 270 deg; 90 deg stitched tiles byte-equal to whole page; rotated thumbnail aspect and orientation verified." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

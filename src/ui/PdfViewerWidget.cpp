@@ -1,5 +1,40 @@
 ﻿#include "PdfViewerWidget.h"
 #include "ImageUtils.h"
+
+namespace {
+
+// Rotates a page-point rectangle into displayed page-point coordinates [px, py, pw, ph]
+void rotateRectPointsForDisplay(const pdf::PageCharBox& r, double pageW, double pageH, int rotation,
+                                double& outPx, double& outPy, double& outPw, double& outPh) {
+    const int normRot = ((rotation % 360) + 360) % 360;
+    outPx = r.left;
+    outPy = r.top;
+    outPw = r.width();
+    outPh = r.height();
+
+    switch (normRot) {
+        case 90:
+            outPx = pageH - r.bottom;
+            outPy = r.left;
+            outPw = r.height();
+            outPh = r.width();
+            break;
+        case 180:
+            outPx = pageW - r.right;
+            outPy = pageH - r.bottom;
+            break;
+        case 270:
+            outPx = r.top;
+            outPy = pageW - r.right;
+            outPw = r.height();
+            outPh = r.width();
+            break;
+        default:
+            break;
+    }
+}
+
+} // namespace
 #include <QPainter>
 #include <QFont>
 #include <QFontMetrics>
@@ -344,7 +379,7 @@ QString PdfViewerWidget::pageLabel(int pageIndex) const {
 
 void PdfViewerWidget::requestThumbnail(int pageIndex, int targetWidth) {
     if (m_hasDocument && pageIndex >= 0 && pageIndex < m_pageCount) {
-        m_renderWorker.requestThumbnail(m_currentDocumentId, pageIndex, targetWidth);
+        m_renderWorker.requestThumbnail(m_currentDocumentId, pageIndex, targetWidth, m_rotation);
     }
 }
 
@@ -407,20 +442,51 @@ void PdfViewerWidget::setRotation(int degrees) {
     if (m_rotation == normalized) {
         return;
     }
+    if (!isDocumentOpen()) {
+        m_rotation = normalized;
+        m_layout.setRotation(m_rotation);
+        Q_EMIT rotationChanged(m_rotation);
+        viewport()->update();
+        return;
+    }
+
+    const double dpr = effectiveDpr();
+    const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
+    const int64_t vpH = static_cast<int64_t>(std::round(viewport()->height() * dpr));
+    const int64_t centreDocX = m_docScrollX + vpW / 2;
+    const int64_t centreDocY = m_docScrollY + vpH / 2;
+
+    // Rotation is display-only, so the page-space point under the viewport centre is
+    // invariant across it. Remember that point before the relayout and scroll back to
+    // it afterwards, instead of jumping to the top of the current page.
+    const int anchorPage = m_layout.getPageAt(centreDocX, centreDocY);
+    double anchorPageX = 0.0;
+    double anchorPageY = 0.0;
+    const bool haveAnchor = anchorPage >= 0 &&
+        m_layout.documentToPagePoints(anchorPage, centreDocX, centreDocY, anchorPageX, anchorPageY);
+
     m_rotation = normalized;
     m_layout.setRotation(m_rotation);
 
-    if (isDocumentOpen()) {
-        const int page = std::clamp(m_currentPage, 0, std::max(0, pageCount() - 1));
-        const double dpr = effectiveDpr();
-        const int64_t vpW = static_cast<int64_t>(std::round(viewport()->width() * dpr));
-        m_layout.updateLayout(pdf::quantizeScale(m_scale), dpr, vpW);
-        updateScrollBars();
-        ++m_currentGeneration;
-        m_inFlightKeys.clear();
-        m_renderWorker.setGeneration(m_currentGeneration);
-        goToPage(page);
+    ++m_currentGeneration;
+    m_inFlightKeys.clear();
+    m_renderWorker.setGeneration(m_currentGeneration);
+
+    m_layout.updateLayout(pdf::quantizeScale(m_scale), dpr, vpW);
+    updateScrollBars();
+
+    int64_t newDocX = m_docScrollX;
+    int64_t newDocY = m_docScrollY;
+    if (haveAnchor) {
+        int64_t anchorDocX = 0;
+        int64_t anchorDocY = 0;
+        if (m_layout.pagePointsToDocument(anchorPage, anchorPageX, anchorPageY, anchorDocX, anchorDocY)) {
+            newDocX = anchorDocX - vpW / 2;
+            newDocY = anchorDocY - vpH / 2;
+        }
     }
+    setDocScrollPosition(newDocX, newDocY);
+
     Q_EMIT rotationChanged(m_rotation);
     viewport()->update();
 }
@@ -437,7 +503,7 @@ QImage PdfViewerWidget::renderPageForPrint(int pageIndex, double scale, double d
     if (!isDocumentOpen() || pageIndex < 0 || pageIndex >= m_pageCount) {
         return {};
     }
-    pdf::PixelBuffer buf = m_renderWorker.renderPageForPrintSync(m_currentDocumentId, pageIndex, scale, dpr);
+    pdf::PixelBuffer buf = m_renderWorker.renderPageForPrintSync(m_currentDocumentId, pageIndex, scale, dpr, m_rotation);
     return toQImage(buf, dpr).copy();
 }
 
@@ -473,7 +539,12 @@ void PdfViewerWidget::goToPageImpl(int pageIndex, std::optional<double> targetYF
     int64_t targetDocY = pl.topPixel;
     if (targetYFraction && std::isfinite(*targetYFraction)) {
         const double topDownFraction = std::clamp(*targetYFraction, 0.0, 1.0);
-        targetDocY += static_cast<int64_t>(std::llround(topDownFraction * static_cast<double>(pl.heightPixel)));
+        int64_t docX = 0, docY = 0;
+        if (m_layout.pagePointsToDocument(pageIndex, 0.0, topDownFraction * pl.heightPoints, docX, docY)) {
+            targetDocY = docY;
+        } else {
+            targetDocY += static_cast<int64_t>(std::llround(topDownFraction * static_cast<double>(pl.heightPixel)));
+        }
     }
 
     m_navigating = true;
@@ -1063,21 +1134,8 @@ void PdfViewerWidget::drawSelection(QPainter& painter, int pageIndex, const layo
     QColor highlightColor = m_darkMode ? QColor(0, 140, 255, 120) : QColor(0, 120, 215, 90);
 
     for (const auto& r : rects) {
-        double px = r.left, py = r.top, pw = r.width(), ph = r.height();
-        if (m_rotation == 90) {
-            px = pl.heightPoints - r.bottom;
-            py = r.left;
-            pw = r.height();
-            ph = r.width();
-        } else if (m_rotation == 180) {
-            px = pl.widthPoints - r.right;
-            py = pl.heightPoints - r.bottom;
-        } else if (m_rotation == 270) {
-            px = r.top;
-            py = pl.widthPoints - r.right;
-            pw = r.height();
-            ph = r.width();
-        }
+        double px = 0.0, py = 0.0, pw = 0.0, ph = 0.0;
+        rotateRectPointsForDisplay(r, pl.widthPoints, pl.heightPoints, m_rotation, px, py, pw, ph);
         QRectF selRect(
             static_cast<qreal>(static_cast<double>(pl.leftPixel - scrollDocX) + px * effScale),
             static_cast<qreal>(static_cast<double>(pl.topPixel - scrollDocY) + py * effScale),
@@ -1165,21 +1223,8 @@ void PdfViewerWidget::drawSearchHighlights(QPainter& painter, int pageIndex, con
 
         const bool isActive = (static_cast<int>(i) == m_currentMatchIndex);
         for (const auto& r : match.rects) {
-            double px = r.left, py = r.top, pw = r.width(), ph = r.height();
-            if (m_rotation == 90) {
-                px = pl.heightPoints - r.bottom;
-                py = r.left;
-                pw = r.height();
-                ph = r.width();
-            } else if (m_rotation == 180) {
-                px = pl.widthPoints - r.right;
-                py = pl.heightPoints - r.bottom;
-            } else if (m_rotation == 270) {
-                px = r.top;
-                py = pl.widthPoints - r.right;
-                pw = r.height();
-                ph = r.width();
-            }
+            double px = 0.0, py = 0.0, pw = 0.0, ph = 0.0;
+            rotateRectPointsForDisplay(r, pl.widthPoints, pl.heightPoints, m_rotation, px, py, pw, ph);
             QRectF selRect(
                 static_cast<qreal>(static_cast<double>(pl.leftPixel - scrollDocX) + px * effScale),
                 static_cast<qreal>(static_cast<double>(pl.topPixel - scrollDocY) + py * effScale),
@@ -1212,27 +1257,12 @@ void PdfViewerWidget::scrollToMatch(const pdf::SearchMatch& match) {
     if (!match.rects.empty()) {
         matchLeftPt = 1e9; matchRightPt = -1e9; matchTopPt = 1e9; matchBottomPt = -1e9;
         for (const auto& rect : match.rects) {
-            double px0 = rect.left, py0 = rect.top, px1 = rect.right, py1 = rect.bottom;
-            if (m_rotation == 90) {
-                px0 = pl.heightPoints - rect.bottom;
-                py0 = rect.left;
-                px1 = pl.heightPoints - rect.top;
-                py1 = rect.right;
-            } else if (m_rotation == 180) {
-                px0 = pl.widthPoints - rect.right;
-                py0 = pl.heightPoints - rect.bottom;
-                px1 = pl.widthPoints - rect.left;
-                py1 = pl.heightPoints - rect.top;
-            } else if (m_rotation == 270) {
-                px0 = rect.top;
-                py0 = pl.widthPoints - rect.right;
-                px1 = rect.bottom;
-                py1 = pl.widthPoints - rect.left;
-            }
-            matchLeftPt = std::min(matchLeftPt, px0);
-            matchRightPt = std::max(matchRightPt, px1);
-            matchTopPt = std::min(matchTopPt, py0);
-            matchBottomPt = std::max(matchBottomPt, py1);
+            double px = 0.0, py = 0.0, pw = 0.0, ph = 0.0;
+            rotateRectPointsForDisplay(rect, pl.widthPoints, pl.heightPoints, m_rotation, px, py, pw, ph);
+            matchLeftPt = std::min(matchLeftPt, px);
+            matchRightPt = std::max(matchRightPt, px + pw);
+            matchTopPt = std::min(matchTopPt, py);
+            matchBottomPt = std::max(matchBottomPt, py + ph);
         }
     }
     const int64_t matchDocX = pl.leftPixel + static_cast<int64_t>(std::round(matchLeftPt * effScale));

@@ -117,10 +117,11 @@ QDataStream& operator>>(QDataStream& in, TileKey& key) {
     key.row = row;
     key.scaleMilli = sm;
     key.dprMilli = dm;
+    // rotation is a mandatory field of the v3 wire format. Do not probe atEnd():
+    // it reports the end of the enclosing message, not of this nested struct, so a
+    // guard here would consume the *next* field of the parent on an older payload.
     qint32 rot = 0;
-    if (!in.atEnd()) {
-        in >> rot;
-    }
+    in >> rot;
     key.rotation = rot;
     return in;
 }
@@ -168,9 +169,7 @@ QDataStream& operator>>(QDataStream& in, TileRenderRequest& req) {
     req.pageIndex = page;
     req.priority = prio;
     qint32 rot = 0;
-    if (!in.atEnd()) {
-        in >> rot;
-    }
+    in >> rot;
     req.rotation = (rot != 0) ? rot : req.key.rotation;
     return in;
 }
@@ -723,7 +722,8 @@ QDataStream& operator>>(QDataStream& in, WorkerControlResponse& response) {
 QDataStream& operator<<(QDataStream& out, const ThumbnailRequest& req) {
     out << static_cast<qint64>(req.documentId)
         << static_cast<qint32>(req.pageIndex)
-        << static_cast<qint32>(req.targetWidth);
+        << static_cast<qint32>(req.targetWidth)
+        << static_cast<qint32>(req.rotation);
     return out;
 }
 
@@ -731,10 +731,12 @@ QDataStream& operator>>(QDataStream& in, ThumbnailRequest& req) {
     qint64 docId = 0;
     qint32 pIdx = 0;
     qint32 tW = 0;
-    in >> docId >> pIdx >> tW;
+    qint32 rot = 0;
+    in >> docId >> pIdx >> tW >> rot;
     req.documentId = docId;
     req.pageIndex = pIdx;
     req.targetWidth = tW;
+    req.rotation = rot;
     return in;
 }
 
@@ -782,16 +784,19 @@ QDataStream& operator<<(QDataStream& out, const RenderPageRequest& req) {
     out << static_cast<qint64>(req.documentId)
         << static_cast<qint32>(req.pageIndex)
         << req.scale
-        << req.dpr;
+        << req.dpr
+        << static_cast<qint32>(req.rotation);
     return out;
 }
 
 QDataStream& operator>>(QDataStream& in, RenderPageRequest& req) {
     qint64 docId = 0;
     qint32 pIdx = 0;
-    in >> docId >> pIdx >> req.scale >> req.dpr;
+    qint32 rot = 0;
+    in >> docId >> pIdx >> req.scale >> req.dpr >> rot;
     req.documentId = docId;
     req.pageIndex = pIdx;
+    req.rotation = rot;
     return in;
 }
 

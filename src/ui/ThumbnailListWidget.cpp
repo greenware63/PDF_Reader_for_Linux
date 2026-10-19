@@ -65,6 +65,13 @@ void ThumbnailListWidget::setViewer(PdfViewerWidget* viewer) {
     if (m_viewer) {
         connect(m_viewer, &PdfViewerWidget::thumbnailReady, this, &ThumbnailListWidget::onThumbnailReady);
         connect(m_viewer, &PdfViewerWidget::thumbnailFailed, this, &ThumbnailListWidget::onThumbnailFailed);
+        connect(m_viewer, &PdfViewerWidget::rotationChanged, this, [this](int) {
+            m_loadedPages.clear();
+            m_requestedPages.clear();
+            if (isVisible()) {
+                requestVisibleThumbnails();
+            }
+        });
     }
 }
 

@@ -194,6 +194,7 @@ struct ThumbnailRequest {
     int64_t documentId{0};
     int pageIndex{0};
     int targetWidth{140};
+    int rotation{0};
 };
 
 struct ThumbnailResponse {
@@ -215,6 +216,7 @@ struct RenderPageRequest {
     int pageIndex{0};
     double scale{1.0};
     double dpr{2.0};
+    int rotation{0};
 };
 
 struct RenderPageResponse {

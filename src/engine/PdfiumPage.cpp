@@ -195,14 +195,19 @@ PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio, i
     return buffer;
 }
 
-PixelBuffer PdfiumPage::renderThumbnail(int targetWidth) {
+PixelBuffer PdfiumPage::renderThumbnail(int targetWidth, int rotation) {
     if (!m_page || m_width <= 0.0 || m_height <= 0.0 || targetWidth <= 0) {
         return {};
     }
 
+    const int normalizedRotate = ((rotation % 360) + 360) % 360;
+    const bool swapDimensions = (normalizedRotate == 90 || normalizedRotate == 270);
+    const double dispW = swapDimensions ? m_height : m_width;
+    const double dispH = swapDimensions ? m_width : m_height;
+
     const int targetW = std::clamp(targetWidth, 16, 1024);
-    const double scale = static_cast<double>(targetW) / m_width;
-    const double scaledHeight = m_height * scale;
+    const double scale = static_cast<double>(targetW) / dispW;
+    const double scaledHeight = dispH * scale;
     constexpr int MAX_THUMBNAIL_DIM = 2048;
     constexpr int64_t MAX_THUMBNAIL_PIXELS = 4 * 1024 * 1024;
     if (!std::isfinite(scaledHeight) || scaledHeight <= 0.0 ||
@@ -219,6 +224,14 @@ PixelBuffer PdfiumPage::renderThumbnail(int targetWidth) {
 
     std::memset(buffer.data(), 0xFF, buffer.sizeBytes());
 
+    int pdfiumRotate = 0;
+    switch (normalizedRotate) {
+        case 90:  pdfiumRotate = 1; break;
+        case 180: pdfiumRotate = 2; break;
+        case 270: pdfiumRotate = 3; break;
+        default:  pdfiumRotate = 0; break;
+    }
+
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
     FPDF_BITMAP bitmap = FPDFBitmap_CreateEx(
         targetW,
@@ -232,7 +245,7 @@ PixelBuffer PdfiumPage::renderThumbnail(int targetWidth) {
         return {};
     }
 
-    FPDF_RenderPageBitmap(bitmap, m_page, 0, 0, targetW, targetH, 0, FPDF_ANNOT);
+    FPDF_RenderPageBitmap(bitmap, m_page, 0, 0, targetW, targetH, pdfiumRotate, FPDF_ANNOT);
     FPDFBitmap_Destroy(bitmap);
     return buffer;
 }

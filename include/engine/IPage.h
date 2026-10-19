@@ -56,7 +56,7 @@ public:
      * @param targetWidth Desired thumbnail width in pixels.
      * @return PixelBuffer containing the rendered thumbnail.
      */
-    virtual PixelBuffer renderThumbnail(int targetWidth) = 0;
+    virtual PixelBuffer renderThumbnail(int targetWidth, int rotation = 0) = 0;
 
     /**
      * @brief Extracts text and character bounding boxes for the page.

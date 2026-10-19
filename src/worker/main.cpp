@@ -72,13 +72,6 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
         return false;
     }
 
-    // 0. Descriptor hygiene: close any inherited file descriptors above stderr (0, 1, 2)
-    // to ensure no sensitive files or parent IPC pipes leak into the untrusted worker process.
-    const int maxOpenFds = static_cast<int>(sysconf(_SC_OPEN_MAX));
-    for (int fd = 3; fd < (maxOpenFds > 0 ? maxOpenFds : 1024); ++fd) {
-        ::close(fd);
-    }
-
     // 0.1 Core dump & ptrace protection: prevent memory inspection and dump retention (T1, T5)
     if (prctl(PR_SET_DUMPABLE, 0) != 0) {
         errorMessage = "PR_SET_DUMPABLE failed: " + std::string(std::strerror(errno));
@@ -429,6 +422,17 @@ static int runIsolationSelftest(int testTcpPort, const std::string& testDbusSock
 }
 
 int main(int argc, char* argv[]) {
+#ifdef __linux__
+    // 0. Descriptor hygiene: close any inherited file descriptors above stderr (0, 1, 2)
+    // before initializing Qt or any libraries. This ensures no sensitive files or parent
+    // IPC descriptors leak into the worker process, while preserving Qt's internal
+    // event loop descriptors (eventfd / socketpair / timerfd) which are created by QCoreApplication.
+    const int maxOpenFds = static_cast<int>(sysconf(_SC_OPEN_MAX));
+    for (int fd = 3; fd < (maxOpenFds > 0 ? maxOpenFds : 1024); ++fd) {
+        ::close(fd);
+    }
+#endif
+
     // Headless event loop: no X11/Wayland connection needed in the worker process
     QCoreApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("pdf_worker"));

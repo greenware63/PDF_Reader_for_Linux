@@ -91,13 +91,13 @@ public:
      * @brief Requests rendering a miniature thumbnail for the given page.
      * Delivered via thumbnailReady() or thumbnailFailed().
      */
-    void requestThumbnail(int64_t documentId, int pageIndex, int targetWidth = 140);
+    void requestThumbnail(int64_t documentId, int pageIndex, int targetWidth = 140, int rotation = 0);
 
     /**
      * @brief Requests high-resolution rendering of a full page for printing or export.
      * Delivered via printPageReady() or printPageFailed().
      */
-    void requestPrintPage(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0);
+    void requestPrintPage(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0, int rotation = 0);
 
     /**
      * @brief Extracts pages [firstPage, lastPage] into a standalone vector PDF on the worker thread.

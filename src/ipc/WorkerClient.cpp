@@ -411,25 +411,25 @@ void WorkerClient::killWorkerForTesting() {
     }
 }
 
-void WorkerClient::requestThumbnail(int64_t documentId, int pageIndex, int targetWidth) {
+void WorkerClient::requestThumbnail(int64_t documentId, int pageIndex, int targetWidth, int rotation) {
     if (m_stopping || m_failureReported) {
         Q_EMIT thumbnailFailed(documentId, pageIndex);
         return;
     }
     sendMessage(MessageType::ThumbnailRequest,
-                serialize(ThumbnailRequest{documentId, pageIndex, targetWidth}));
+                serialize(ThumbnailRequest{documentId, pageIndex, targetWidth, rotation}));
 }
 
-void WorkerClient::requestPrintPage(int64_t documentId, int pageIndex, double scale, double dpr) {
+void WorkerClient::requestPrintPage(int64_t documentId, int pageIndex, double scale, double dpr, int rotation) {
     if (m_stopping || m_failureReported) {
         Q_EMIT printPageFailed(documentId, pageIndex);
         return;
     }
     sendMessage(MessageType::RenderPageRequest,
-                serialize(RenderPageRequest{documentId, pageIndex, scale, dpr}));
+                serialize(RenderPageRequest{documentId, pageIndex, scale, dpr, rotation}));
 }
 
-pdf::PixelBuffer WorkerClient::renderPageForPrintSync(int64_t documentId, int pageIndex, double scale, double dpr, int timeoutMs) {
+pdf::PixelBuffer WorkerClient::renderPageForPrintSync(int64_t documentId, int pageIndex, double scale, double dpr, int rotation, int timeoutMs) {
     if (!ensureConnected()) {
         return {};
     }
@@ -454,7 +454,7 @@ pdf::PixelBuffer WorkerClient::renderPageForPrintSync(int64_t documentId, int pa
     const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
     connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
 
-    requestPrintPage(documentId, pageIndex, scale, dpr);
+    requestPrintPage(documentId, pageIndex, scale, dpr, rotation);
     timeout.start(timeoutMs);
     loop.exec();
 

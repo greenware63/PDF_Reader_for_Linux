@@ -5,7 +5,10 @@
 namespace pdf::ipc {
 
 constexpr uint32_t IPC_MAGIC = 0x50444657; // 'PDFW'
-constexpr uint32_t IPC_PROTOCOL_VERSION = 2;
+// v3 added TileKey::rotation and TileRenderRequest::rotation. Bump this whenever
+// a serialised layout changes: the frame-level version check is the only thing
+// that turns a wire mismatch into a clean rejection instead of silent garbage.
+constexpr uint32_t IPC_PROTOCOL_VERSION = 3;
 constexpr uint32_t MAX_IPC_PAYLOAD_SIZE = 64 * 1024 * 1024;
 
 enum class WorkerOp : uint32_t {

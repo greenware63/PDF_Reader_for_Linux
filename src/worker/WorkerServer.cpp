@@ -262,7 +262,7 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
         case ipc::MessageType::ThumbnailRequest: {
             ipc::ThumbnailRequest req;
             if (ipc::deserialize(payload, req)) {
-                m_engineWorker.requestThumbnail(req.documentId, req.pageIndex, req.targetWidth);
+                m_engineWorker.requestThumbnail(req.documentId, req.pageIndex, req.targetWidth, req.rotation);
             }
             break;
         }
@@ -270,7 +270,7 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
         case ipc::MessageType::RenderPageRequest: {
             ipc::RenderPageRequest req;
             if (ipc::deserialize(payload, req)) {
-                m_engineWorker.requestPrintPage(req.documentId, req.pageIndex, req.scale, req.dpr);
+                m_engineWorker.requestPrintPage(req.documentId, req.pageIndex, req.scale, req.dpr, req.rotation);
             }
             break;
         }
