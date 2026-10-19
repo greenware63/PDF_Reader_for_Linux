@@ -12,6 +12,7 @@
 #include <sys/syscall.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/un.h>
@@ -78,9 +79,9 @@
 #ifndef __NR_io_uring_register
 #define __NR_io_uring_register 427
 #endif
-#ifndef __NR_socketcall
-#define __NR_socketcall 102
-#endif
+// NOTE: do not define a fallback __NR_socketcall. The number is architecture specific (102 is
+// socketcall on i386/arm but getuid on x86_64) and a fallback would silently deny an unrelated syscall.
+// x86_64/aarch64 have no socketcall, and the architecture check already kills every 32-bit call.
 #endif
 
 #if __has_include(<linux/landlock.h>)
@@ -597,18 +598,49 @@ static int runIsolationSelftest(int testTcpPort, const std::string& testDbusSock
         }
     }
 
-    // Probe 6: Syscall filter check (socketcall / 32-bit socket multiplexer)
+    // Probe 6: Seccomp syscall-filter checks. Each "must die" probe runs in a forked child: the filter
+    // answers forbidden syscalls with SECCOMP_RET_KILL_PROCESS (SIGSYS), so BLOCKED means the child was
+    // killed by SIGSYS. A child that survives means the filter let the call through.
     {
+        std::cout << std::flush;
+        auto killedBySigsys = [](void (*body)()) -> bool {
+            const pid_t child = fork();
+            if (child < 0) return false;
+            if (child == 0) { body(); _exit(0); }
+            int status = 0;
+            if (waitpid(child, &status, 0) != child) return false;
+            return WIFSIGNALED(status) && WTERMSIG(status) == SIGSYS;
+        };
+        auto report = [&](const char* name, bool blocked) {
+            std::cout << "[ISOLATION_SELFTEST] " << name << ": " << (blocked ? "BLOCKED" : "PERMITTED")
+                      << std::endl;
+        };
 #if defined(__x86_64__)
-        long sc = syscall(102, 0, nullptr);
-        if (sc < 0 && (errno == EPERM || errno == ENOSYS)) {
-            std::cout << "[ISOLATION_SELFTEST] socketcall: BLOCKED" << std::endl;
-        } else {
-            std::cout << "[ISOLATION_SELFTEST] socketcall: PERMITTED" << std::endl;
-        }
+        // 32-bit ABI entry (int 0x80, i386 execve = 11). Pointer width is irrelevant: the architecture
+        // check must kill the process before the kernel looks at the arguments.
+        report("abi32_execve", killedBySigsys([] {
+            long ret;
+            __asm__ volatile("int $0x80" : "=a"(ret) : "a"(11), "b"("/bin/true"), "c"(0), "d"(0) : "memory");
+            (void)ret;
+        }));
+        // x32 ABI: any syscall number with bit 30 set.
+        report("x32_syscall", killedBySigsys([] { syscall(0x40000000L | 39L /* getpid */); }));
 #else
-        std::cout << "[ISOLATION_SELFTEST] socketcall: BLOCKED" << std::endl;
+        std::cout << "[ISOLATION_SELFTEST] abi32_execve: N/A (not x86_64)" << std::endl;
+        std::cout << "[ISOLATION_SELFTEST] x32_syscall: N/A (not x86_64)" << std::endl;
 #endif
+#ifdef __NR_io_uring_setup
+        report("io_uring", killedBySigsys([] { syscall(__NR_io_uring_setup, 1, nullptr); }));
+#else
+        std::cout << "[ISOLATION_SELFTEST] io_uring: N/A (no syscall number)" << std::endl;
+#endif
+        // Collateral check: an ordinary syscall must still work. (A wrong fallback syscall number once made
+        // the filter deny getuid on x86_64.)
+        errno = 0;
+        const long uidViaSyscall = syscall(SYS_getuid);
+        const bool getuidWorks = !(uidViaSyscall == -1 && errno == EPERM) &&
+                                 static_cast<uid_t>(uidViaSyscall) == getuid();
+        std::cout << "[ISOLATION_SELFTEST] getuid: " << (getuidWorks ? "OK" : "DENIED") << std::endl;
     }
 
     return 0;

@@ -462,8 +462,20 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] session_bus probe should be BLOCKED by seccomp on Linux." << std::endl;
             return 1;
         }
-        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] socketcall: BLOCKED"))) {
-            std::cerr << "[FAIL] socketcall probe should be BLOCKED by seccomp on Linux." << std::endl;
+#if defined(__x86_64__)
+        for (const char* probe : {"abi32_execve", "x32_syscall"}) {
+            if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] %1: BLOCKED").arg(QLatin1String(probe)))) {
+                std::cerr << "[FAIL] seccomp must kill the " << probe << " probe (SIGSYS)." << std::endl;
+                return 1;
+            }
+        }
+#endif
+        if (output.contains(QStringLiteral("[ISOLATION_SELFTEST] io_uring: PERMITTED"))) {
+            std::cerr << "[FAIL] io_uring_setup must be killed by seccomp." << std::endl;
+            return 1;
+        }
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] getuid: OK"))) {
+            std::cerr << "[FAIL] seccomp must not deny ordinary syscalls (getuid regression)." << std::endl;
             return 1;
         }
         if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] read_outside: PERMITTED")) ||
