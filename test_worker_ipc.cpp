@@ -748,10 +748,19 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "  -> Measured worker peak virtual memory (VmPeak): " << vmPeakKb << " kB ("
                       << (vmPeakKb / 1024) << " MB)" << std::endl;
-            constexpr quint64 RLIMIT_AS_KB = 4ULL * 1024 * 1024;
-            if (vmPeakKb >= RLIMIT_AS_KB) {
-                std::cerr << "[FAIL] Worker virtual memory exceeded 4 GiB RLIMIT_AS cap: " << vmPeakKb << " kB" << std::endl;
-                return 1;
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+            constexpr bool isAsan = true;
+#else
+            const bool isAsan = (vmPeakKb > 10ULL * 1024 * 1024) || qEnvironmentVariableIsSet("ASAN_OPTIONS");
+#endif
+            if (isAsan) {
+                std::cout << "  -> AddressSanitizer detected (shadow memory pre-allocation). Skipping 4 GiB RLIMIT_AS upper bound check." << std::endl;
+            } else {
+                constexpr quint64 RLIMIT_AS_KB = 4ULL * 1024 * 1024;
+                if (vmPeakKb >= RLIMIT_AS_KB) {
+                    std::cerr << "[FAIL] Worker virtual memory exceeded 4 GiB RLIMIT_AS cap: " << vmPeakKb << " kB" << std::endl;
+                    return 1;
+                }
             }
             if (vmPeakKb < 10240) {
                 std::cerr << "[FAIL] Unreasonable VmPeak measurement: " << vmPeakKb << " kB" << std::endl;
