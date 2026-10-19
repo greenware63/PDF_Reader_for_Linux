@@ -18,11 +18,69 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#if __has_include(<linux/audit.h>)
+#include <linux/audit.h>
+#endif
 #if __has_include(<linux/seccomp.h>) && __has_include(<linux/filter.h>)
 #include <linux/seccomp.h>
 #include <linux/filter.h>
 #include <cstddef>
+#include <vector>
 #define PDF_WORKER_HAS_SECCOMP_HEADERS 1
+#endif
+
+#ifndef AUDIT_ARCH_X86_64
+#define AUDIT_ARCH_X86_64 0xc000003e
+#endif
+#ifndef AUDIT_ARCH_AARCH64
+#define AUDIT_ARCH_AARCH64 0xc00000b7
+#endif
+#ifndef AUDIT_ARCH_ARM
+#define AUDIT_ARCH_ARM 0x40000028
+#endif
+#ifndef AUDIT_ARCH_I386
+#define AUDIT_ARCH_I386 0x40000003
+#endif
+
+#if defined(__x86_64__)
+#define SECCOMP_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define SECCOMP_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#elif defined(__arm__)
+#define SECCOMP_AUDIT_ARCH AUDIT_ARCH_ARM
+#elif defined(__i386__)
+#define SECCOMP_AUDIT_ARCH AUDIT_ARCH_I386
+#endif
+
+#ifndef SECCOMP_RET_KILL_PROCESS
+#define SECCOMP_RET_KILL_PROCESS 0x80000000U
+#endif
+#ifndef SECCOMP_RET_KILL
+#define SECCOMP_RET_KILL 0x00000000U
+#endif
+#ifndef SECCOMP_RET_ERRNO
+#define SECCOMP_RET_ERRNO 0x00050000U
+#endif
+#ifndef SECCOMP_RET_ALLOW
+#define SECCOMP_RET_ALLOW 0x7fff0000U
+#endif
+#ifndef SECCOMP_RET_DATA
+#define SECCOMP_RET_DATA 0x0000ffffU
+#endif
+
+#if defined(__x86_64__)
+#ifndef __NR_io_uring_setup
+#define __NR_io_uring_setup 425
+#endif
+#ifndef __NR_io_uring_enter
+#define __NR_io_uring_enter 426
+#endif
+#ifndef __NR_io_uring_register
+#define __NR_io_uring_register 427
+#endif
+#ifndef __NR_socketcall
+#define __NR_socketcall 102
+#endif
 #endif
 
 #if __has_include(<linux/landlock.h>)
@@ -129,54 +187,143 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
         return false;
     }
 
-#if defined(PDF_WORKER_HAS_SECCOMP_HEADERS) && defined(PR_SET_SECCOMP) && defined(SECCOMP_MODE_FILTER) && defined(__NR_execve)
-    // 4. Seccomp BPF filter: eliminate process execution and network vectors (T1, T2, T10)
-    // Denies execve/execveat, connect, and non-AF_UNIX sockets.
-    struct sock_filter seccompFilter[] = {
-        // 0: Load syscall number
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, nr))),
+#if defined(PDF_WORKER_HAS_SECCOMP_HEADERS) && defined(PR_SET_SECCOMP) && defined(SECCOMP_MODE_FILTER)
+    // 4. Seccomp BPF filter: eliminate process execution, async kernel evasion, and network vectors (T1, T2, T10)
+    // - Validates architecture: mismatches (e.g. 32-bit int 0x80 on x86_64) terminate the process immediately
+    // - Rejects x32 ABI calls (nr >= 0x40000000)
+    // - Terminates process (KILL_PROCESS) on dangerous syscalls (execve, execveat, io_uring_*, ptrace, bpf, unshare, kexec_*)
+    // - Denies with EPERM on network syscalls (connect, socketcall, non-AF_UNIX socket)
+    // - Automatically computes relative jump offsets to eliminate manual offset counting errors
+    std::vector<sock_filter> bpfCode;
+    std::vector<size_t> jumpsToKill;
+    std::vector<size_t> jumpsToDeny;
+    std::vector<size_t> jumpsToAllow;
 
-        // 1: Deny execve -> jumps 5 to index 7 (DENY)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 5, 0),
-
-#ifdef __NR_execveat
-        // 2: Deny execveat -> jumps 4 to index 7 (DENY)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execveat, 4, 0),
-#else
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 4, 0),
+#if defined(SECCOMP_AUDIT_ARCH)
+    // Step 1: Validate architecture. Mismatches jump to KILL_PROCESS.
+    bpfCode.push_back(sock_filter{BPF_LD | BPF_W | BPF_ABS, 0, 0, static_cast<__u32>(offsetof(struct seccomp_data, arch))});
+    size_t archJump = bpfCode.size();
+    bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, SECCOMP_AUDIT_ARCH});
 #endif
 
-#ifdef __NR_connect
-        // 3: Deny connect (TCP/UDP, external sockets, D-Bus session bus) -> jumps 3 to index 7 (DENY)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 3, 0),
-#else
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 3, 0),
+    // Step 2: Load syscall number
+    bpfCode.push_back(sock_filter{BPF_LD | BPF_W | BPF_ABS, 0, 0, static_cast<__u32>(offsetof(struct seccomp_data, nr))});
+
+#if defined(__x86_64__)
+    // Step 3: Reject x32 ABI calls (bit 30 set, nr >= 0x40000000)
+    size_t x32Jump = bpfCode.size();
+    bpfCode.push_back(sock_filter{BPF_JMP | BPF_JGE | BPF_K, 0, 0, 0x40000000U});
+    jumpsToKill.push_back(x32Jump);
 #endif
 
-#ifdef __NR_socket
-        // 4: Check socket syscall: if match, jump 0 to index 5; else jump 3 to index 8 (ALLOW)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 0, 3),
-
-        // 5: Load low 32 bits of args[0] (socket domain / family)
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, args[0]))),
-
-        // 6: If domain == AF_UNIX, jump 1 to index 8 (ALLOW); else fallthrough to index 7 (DENY)
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, 1, 0),
-#else
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, nr))),
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, nr))),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 0, 1),
-#endif
-
-        // 7: DENY: return EPERM
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
-
-        // 8: ALLOW: return ALLOW
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+    auto addKillJump = [&](uint32_t syscallNr) {
+        jumpsToKill.push_back(bpfCode.size());
+        bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, syscallNr});
     };
+
+    auto addDenyJump = [&](uint32_t syscallNr) {
+        jumpsToDeny.push_back(bpfCode.size());
+        bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, syscallNr});
+    };
+
+    // Step 4: Syscalls that immediately terminate the worker process (KILL_PROCESS)
+#ifdef __NR_execve
+    addKillJump(__NR_execve);
+#endif
+#ifdef __NR_execveat
+    addKillJump(__NR_execveat);
+#endif
+#ifdef __NR_ptrace
+    addKillJump(__NR_ptrace);
+#endif
+#ifdef __NR_bpf
+    addKillJump(__NR_bpf);
+#endif
+#ifdef __NR_unshare
+    addKillJump(__NR_unshare);
+#endif
+#ifdef __NR_kexec_load
+    addKillJump(__NR_kexec_load);
+#endif
+#ifdef __NR_kexec_file_load
+    addKillJump(__NR_kexec_file_load);
+#endif
+#ifdef __NR_io_uring_setup
+    addKillJump(__NR_io_uring_setup);
+#endif
+#ifdef __NR_io_uring_enter
+    addKillJump(__NR_io_uring_enter);
+#endif
+#ifdef __NR_io_uring_register
+    addKillJump(__NR_io_uring_register);
+#endif
+
+    // Step 5: Syscalls that return EPERM (networking & sockets)
+#ifdef __NR_connect
+    addDenyJump(__NR_connect);
+#endif
+#ifdef __NR_socketcall
+    addDenyJump(__NR_socketcall);
+#endif
+
+    // Step 6: Socket domain inspection (only AF_UNIX is allowed)
+#ifdef __NR_socket
+    size_t socketCheck = bpfCode.size();
+    bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, __NR_socket});
+
+    size_t notSocketJump = bpfCode.size();
+    bpfCode.push_back(sock_filter{BPF_JMP | BPF_JA, 0, 0, 0});
+    jumpsToAllow.push_back(notSocketJump);
+
+    bpfCode[socketCheck].jt = static_cast<__u8>(bpfCode.size() - (socketCheck + 1));
+
+    bpfCode.push_back(sock_filter{BPF_LD | BPF_W | BPF_ABS, 0, 0, static_cast<__u32>(offsetof(struct seccomp_data, args[0]))});
+
+    size_t domainJump = bpfCode.size();
+    bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, AF_UNIX});
+    jumpsToAllow.push_back(domainJump);
+    jumpsToDeny.push_back(domainJump);
+#endif
+
+    // Step 7: Terminal actions
+    size_t killIndex = bpfCode.size();
+    bpfCode.push_back(sock_filter{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS});
+
+    size_t denyIndex = bpfCode.size();
+    bpfCode.push_back(sock_filter{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)});
+
+    size_t allowIndex = bpfCode.size();
+    bpfCode.push_back(sock_filter{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW});
+
+    // Step 8: Resolve relative jump offsets
+#if defined(SECCOMP_AUDIT_ARCH)
+    bpfCode[archJump].jf = static_cast<__u8>(killIndex - (archJump + 1));
+#endif
+    for (size_t idx : jumpsToKill) {
+        bpfCode[idx].jt = static_cast<__u8>(killIndex - (idx + 1));
+    }
+    for (size_t idx : jumpsToDeny) {
+#ifdef __NR_socket
+        if (idx == domainJump) {
+            bpfCode[idx].jf = static_cast<__u8>(denyIndex - (idx + 1));
+            continue;
+        }
+#endif
+        bpfCode[idx].jt = static_cast<__u8>(denyIndex - (idx + 1));
+    }
+    for (size_t idx : jumpsToAllow) {
+#ifdef __NR_socket
+        if (idx == notSocketJump) {
+            bpfCode[idx].k = static_cast<__u32>(allowIndex - (notSocketJump + 1));
+            continue;
+        }
+#endif
+        bpfCode[idx].jt = static_cast<__u8>(allowIndex - (idx + 1));
+    }
+
     struct sock_fprog seccompProg = {
-        .len = static_cast<unsigned short>(sizeof(seccompFilter) / sizeof(seccompFilter[0])),
-        .filter = seccompFilter,
+        .len = static_cast<unsigned short>(bpfCode.size()),
+        .filter = bpfCode.data(),
     };
     if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &seccompProg) != 0) {
         errorMessage = "prctl(PR_SET_SECCOMP) filter installation failed: " + std::string(std::strerror(errno));
@@ -448,6 +595,20 @@ static int runIsolationSelftest(int testTcpPort, const std::string& testDbusSock
         } else {
             std::cout << "[ISOLATION_SELFTEST] dev_shm_foreign: INCONCLUSIVE (no test marker provided)" << std::endl;
         }
+    }
+
+    // Probe 6: Syscall filter check (socketcall / 32-bit socket multiplexer)
+    {
+#if defined(__x86_64__)
+        long sc = syscall(102, 0, nullptr);
+        if (sc < 0 && (errno == EPERM || errno == ENOSYS)) {
+            std::cout << "[ISOLATION_SELFTEST] socketcall: BLOCKED" << std::endl;
+        } else {
+            std::cout << "[ISOLATION_SELFTEST] socketcall: PERMITTED" << std::endl;
+        }
+#else
+        std::cout << "[ISOLATION_SELFTEST] socketcall: BLOCKED" << std::endl;
+#endif
     }
 
     return 0;

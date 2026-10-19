@@ -1022,6 +1022,10 @@ void MainWindow::printDocument() {
         painter.drawImage(x, y, scaled);
     }
     painter.end();
+    if (progress.wasCanceled()) {
+        statusBar()->showMessage(tr("Printing canceled."), 3000);
+        return;
+    }
     progress.setValue(numPages);
     statusBar()->showMessage(tr("Document printed successfully."), 4000);
 }

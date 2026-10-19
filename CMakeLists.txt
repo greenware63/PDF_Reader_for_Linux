@@ -490,3 +490,14 @@ elseif(UNIX AND NOT APPLE)
         INSTALL_RPATH "$ORIGIN/../lib"
     )
 endif()
+
+# Installation & Packaging
+install(TARGETS pdf-reader pdf_worker
+    RUNTIME DESTINATION bin
+)
+if(UNIX AND NOT APPLE)
+    install(FILES resources/pdf-reader.desktop
+        DESTINATION share/applications
+        OPTIONAL
+    )
+endif()

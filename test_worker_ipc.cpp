@@ -462,6 +462,10 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] session_bus probe should be BLOCKED by seccomp on Linux." << std::endl;
             return 1;
         }
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] socketcall: BLOCKED"))) {
+            std::cerr << "[FAIL] socketcall probe should be BLOCKED by seccomp on Linux." << std::endl;
+            return 1;
+        }
         if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] read_outside: PERMITTED")) ||
             !output.contains(QStringLiteral("[ISOLATION_SELFTEST] dev_shm_foreign: PERMITTED"))) {
             std::cerr << "[FAIL] Probes failed to report expected baseline access: " << output.toStdString() << std::endl;
