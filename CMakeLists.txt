@@ -337,6 +337,20 @@ target_link_libraries(test_worker_ipc PRIVATE
     Qt6::Network
 )
 
+# IPC message deserialization fuzz test
+add_executable(fuzz_ipc_messages
+    tests/fuzz/fuzz_ipc_messages.cpp
+)
+target_include_directories(fuzz_ipc_messages PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(fuzz_ipc_messages PRIVATE
+    pdf_ipc
+    Qt6::Core
+    Qt6::Network
+)
+
 # Redaction engine tests (need zlib for the independent inspector's inflate; skipped when absent)
 find_package(ZLIB QUIET)
 if(ZLIB_FOUND AND UNIX)
@@ -388,6 +402,11 @@ if(TARGET test_redaction)
     )
 endif()
 
+add_test(
+    NAME IpcFuzzTestSuite
+    COMMAND fuzz_ipc_messages
+)
+
 if(WIN32)
     get_filename_component(COMPILER_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     get_filename_component(QT_BIN_DIR "${Qt6Core_DIR}/../../../bin" ABSOLUTE)
@@ -411,6 +430,9 @@ if(WIN32)
     set_tests_properties(WorkerIpcTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
     )
+    set_tests_properties(IpcFuzzTestSuite PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR}"
+    )
 endif()
 
 # Scoped workaround specifically for Windows MinGW GCC >= 15 toolchain (CWG 2387 bug in Qt 6.7.2 qcomparehelpers.h)
@@ -421,6 +443,7 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION
     target_link_options(test_password_prompt PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(pdf_worker PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_worker_ipc PRIVATE -Wl,--allow-multiple-definition)
+    target_link_options(fuzz_ipc_messages PRIVATE -Wl,--allow-multiple-definition)
 endif()
 
 # Deployment & RPATH handling

@@ -130,23 +130,56 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
     }
 
 #if defined(PDF_WORKER_HAS_SECCOMP_HEADERS) && defined(PR_SET_SECCOMP) && defined(SECCOMP_MODE_FILTER) && defined(__NR_execve)
-    // 4. Seccomp BPF filter: deny execve and execveat to eliminate process execution vectors (T1, T2)
-    struct sock_filter seccompExecveFilter[] = {
+    // 4. Seccomp BPF filter: eliminate process execution and network vectors (T1, T2, T10)
+    // Denies execve/execveat, connect, and non-AF_UNIX sockets.
+    struct sock_filter seccompFilter[] = {
+        // 0: Load syscall number
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, nr))),
+
+        // 1: Deny execve -> jumps 5 to index 7 (DENY)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 5, 0),
+
+#ifdef __NR_execveat
+        // 2: Deny execveat -> jumps 4 to index 7 (DENY)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execveat, 4, 0),
+#else
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 4, 0),
+#endif
+
+#ifdef __NR_connect
+        // 3: Deny connect (TCP/UDP, external sockets, D-Bus session bus) -> jumps 3 to index 7 (DENY)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 3, 0),
+#else
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 3, 0),
+#endif
+
+#ifdef __NR_socket
+        // 4: Check socket syscall: if match, jump 0 to index 5; else jump 3 to index 8 (ALLOW)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 0, 3),
+
+        // 5: Load low 32 bits of args[0] (socket domain / family)
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, args[0]))),
+
+        // 6: If domain == AF_UNIX, jump 1 to index 8 (ALLOW); else fallthrough to index 7 (DENY)
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, 1, 0),
+#else
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, nr))),
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (offsetof(struct seccomp_data, nr))),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execve, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
-#ifdef __NR_execveat
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_execveat, 0, 1),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
 #endif
+
+        // 7: DENY: return EPERM
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+
+        // 8: ALLOW: return ALLOW
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
     };
-    struct sock_fprog seccompExecveProg = {
-        .len = static_cast<unsigned short>(sizeof(seccompExecveFilter) / sizeof(seccompExecveFilter[0])),
-        .filter = seccompExecveFilter,
+    struct sock_fprog seccompProg = {
+        .len = static_cast<unsigned short>(sizeof(seccompFilter) / sizeof(seccompFilter[0])),
+        .filter = seccompFilter,
     };
-    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &seccompExecveProg) != 0) {
-        errorMessage = "prctl(PR_SET_SECCOMP) denying execve failed: " + std::string(std::strerror(errno));
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &seccompProg) != 0) {
+        errorMessage = "prctl(PR_SET_SECCOMP) filter installation failed: " + std::string(std::strerror(errno));
         return false;
     }
 #endif

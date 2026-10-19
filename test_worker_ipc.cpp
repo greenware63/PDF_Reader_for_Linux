@@ -454,9 +454,15 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] write_tmp probe should be BLOCKED on Linux." << std::endl;
             return 1;
         }
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] open_tcp: BLOCKED"))) {
+            std::cerr << "[FAIL] open_tcp probe should be BLOCKED by seccomp on Linux." << std::endl;
+            return 1;
+        }
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] session_bus: BLOCKED"))) {
+            std::cerr << "[FAIL] session_bus probe should be BLOCKED by seccomp on Linux." << std::endl;
+            return 1;
+        }
         if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] read_outside: PERMITTED")) ||
-            !output.contains(QStringLiteral("[ISOLATION_SELFTEST] open_tcp: PERMITTED")) ||
-            !output.contains(QStringLiteral("[ISOLATION_SELFTEST] session_bus: PERMITTED")) ||
             !output.contains(QStringLiteral("[ISOLATION_SELFTEST] dev_shm_foreign: PERMITTED"))) {
             std::cerr << "[FAIL] Probes failed to report expected baseline access: " << output.toStdString() << std::endl;
             return 1;
