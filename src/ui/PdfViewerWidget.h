@@ -136,6 +136,7 @@ public:
     pdf::TileCache& cache() noexcept { return m_cache; }
     const layout::DocumentLayout& layout() const noexcept { return m_layout; }
     size_t inFlightCount() const noexcept { return m_inFlightKeys.size(); }
+    size_t transformedCacheSize() const noexcept { return m_transformedPixmapCache.size(); }
 
     /// Tiles drawn from a previous zoom level (scaled) because the current-zoom tile was not ready yet.
     size_t fallbackTilesDrawn() const noexcept { return m_fallbackTilesDrawn; }

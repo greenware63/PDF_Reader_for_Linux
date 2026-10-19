@@ -10,6 +10,7 @@
 #include <QStackedWidget>
 #include <QHeaderView>
 #include <QToolBar>
+#include <QToolButton>
 #include <QFileDialog>
 #include <QSaveFile>
 #include <QStatusBar>
@@ -390,7 +391,7 @@ void MainWindow::setupActions() {
     });
     m_toggleSidebarAction->setShortcut(QKeySequence(Qt::Key_F4));
 
-    QMenu* colorMenu = viewMenu->addMenu(tr("&Color Mode"));
+    m_colorMenu = viewMenu->addMenu(tr("&Color Mode"));
     auto* colorGroup = new QActionGroup(this);
     colorGroup->setExclusive(true);
 
@@ -398,12 +399,12 @@ void MainWindow::setupActions() {
     const ColorEntry colorEntries[] = {
         {ColorMode::Normal,       QT_TR_NOOP("&Normal (Light)"),         ""},
         {ColorMode::Inverted,     QT_TR_NOOP("&Dark Mode / Invert"),     "Ctrl+I"},
-        {ColorMode::Sepia,        QT_TR_NOOP("&Sepia (Warm Reading)"),   "Ctrl+Shift+S"},
-        {ColorMode::HighContrast, QT_TR_NOOP("&High Contrast"),          "Ctrl+Shift+H"},
+        {ColorMode::Sepia,        QT_TR_NOOP("&Sepia (Warm Reading)"),   "Ctrl+Alt+S"},
+        {ColorMode::HighContrast, QT_TR_NOOP("&High Contrast"),          "Ctrl+Alt+H"},
     };
 
     for (const auto& e : colorEntries) {
-        QAction* a = colorMenu->addAction(tr(e.text));
+        QAction* a = m_colorMenu->addAction(tr(e.text));
         a->setCheckable(true);
         if (e.shortcut && e.shortcut[0] != '\0') {
             a->setShortcut(QKeySequence(QString::fromLatin1(e.shortcut)));
@@ -534,10 +535,21 @@ void MainWindow::setupActions() {
     rotateCcwToolbarAction->setToolTip(tr("Rotate Counter-Clockwise (Ctrl+Shift+R)"));
 
     toolbar->addSeparator();
-    QAction* darkToolbarAction = toolbar->addAction(tr("🌙 Dark"), this, [this]() {
-        setDarkMode(!m_darkMode);
+    auto* themeButton = new QToolButton(toolbar);
+    themeButton->setText(tr("🌙 Theme"));
+    themeButton->setToolTip(tr("Color Mode / Reading Themes (Ctrl+I to toggle Dark Mode)"));
+    if (m_colorMenu) {
+        themeButton->setMenu(m_colorMenu);
+        themeButton->setPopupMode(QToolButton::MenuButtonPopup);
+    }
+    connect(themeButton, &QToolButton::clicked, this, [this]() {
+        if (m_colorMode == ColorMode::Normal) {
+            setColorMode(ColorMode::Inverted);
+        } else {
+            setColorMode(ColorMode::Normal);
+        }
     });
-    darkToolbarAction->setToolTip(tr("Toggle Dark Mode / Invert Colors (Ctrl+I)"));
+    toolbar->addWidget(themeButton);
 }
 
 void MainWindow::setColorMode(ColorMode mode) {

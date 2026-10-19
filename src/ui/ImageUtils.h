@@ -47,6 +47,7 @@ inline QImage toQImage(const pdf::PixelBuffer& buffer, double devicePixelRatio =
 /**
  * @brief Applies document color mode transformation (Invert, Sepia, HighContrast) to a QImage.
  * For Normal mode, returns the source image directly without copying.
+ * Uses continuous blending across color-spread thresholds to avoid contouring artifacts.
  */
 inline QImage applyColorMode(const QImage& src, ColorMode mode) {
     if (mode == ColorMode::Normal || src.isNull()) {
@@ -59,9 +60,8 @@ inline QImage applyColorMode(const QImage& src, ColorMode mode) {
         return result;
     }
 
-    if (result.format() != QImage::Format_ARGB32 &&
-        result.format() != QImage::Format_RGB32 &&
-        result.format() != QImage::Format_ARGB32_Premultiplied) {
+    // Ensure format is non-premultiplied 32-bit (ARGB32 or RGB32)
+    if (result.format() != QImage::Format_ARGB32 && result.format() != QImage::Format_RGB32) {
         result = result.convertToFormat(QImage::Format_ARGB32);
     }
 
@@ -97,14 +97,27 @@ inline QImage applyColorMode(const QImage& src, ColorMode mode) {
                 const int maxC = std::max({r, g, b});
                 const int minC = std::min({r, g, b});
                 const int lum = (299 * r + 587 * g + 114 * b) / 1000;
+                const int spread = maxC - minC;
 
-                if (maxC - minC < 28) {
-                    scanline[x] = qRgba(sepiaLut[lum][0], sepiaLut[lum][1], sepiaLut[lum][2], a);
+                const auto& lutRgb = sepiaLut[lum];
+                const int neutR = lutRgb[0];
+                const int neutG = lutRgb[1];
+                const int neutB = lutRgb[2];
+
+                const int tintR = (r * 251) / 255;
+                const int tintG = (g * 240) / 255;
+                const int tintB = (b * 217) / 255;
+
+                if (spread <= 16) {
+                    scanline[x] = qRgba(neutR, neutG, neutB, a);
+                } else if (spread >= 48) {
+                    scanline[x] = qRgba(tintR, tintG, tintB, a);
                 } else {
-                    const int nr = std::clamp((r * 251) / 255, 0, 255);
-                    const int ng = std::clamp((g * 240) / 255, 0, 255);
-                    const int nb = std::clamp((b * 217) / 255, 0, 255);
-                    scanline[x] = qRgba(nr, ng, nb, a);
+                    const double wBlend = static_cast<double>(spread - 16) / 32.0;
+                    const int outR = static_cast<int>(std::round(neutR + (tintR - neutR) * wBlend));
+                    const int outG = static_cast<int>(std::round(neutG + (tintG - neutG) * wBlend));
+                    const int outB = static_cast<int>(std::round(neutB + (tintB - neutB) * wBlend));
+                    scanline[x] = qRgba(std::clamp(outR, 0, 255), std::clamp(outG, 0, 255), std::clamp(outB, 0, 255), a);
                 }
             }
         }
@@ -138,14 +151,32 @@ inline QImage applyColorMode(const QImage& src, ColorMode mode) {
                 const int maxC = std::max({r, g, b});
                 const int minC = std::min({r, g, b});
                 const int lum = (299 * r + 587 * g + 114 * b) / 1000;
+                const int spread = maxC - minC;
 
-                if (maxC - minC < 32) {
-                    scanline[x] = qRgba(contrastLut[lum][0], contrastLut[lum][1], contrastLut[lum][2], a);
+                const auto& lutRgb = contrastLut[lum];
+                const int neutR = lutRgb[0];
+                const int neutG = lutRgb[1];
+                const int neutB = lutRgb[2];
+
+                // For chromatic pixels: preserve hue, invert lightness so dark colors on white
+                // become readable bright colors on dark background without flipping hue (e.g. red stays red)
+                const int lightnessRaw = (maxC + minC) / 2;
+                const int targetLightness = std::clamp(240 - lightnessRaw, 30, 235);
+                const int deltaL = targetLightness - lightnessRaw;
+                const int chromR = std::clamp(r + deltaL, 18, 255);
+                const int chromG = std::clamp(g + deltaL, 18, 255);
+                const int chromB = std::clamp(b + deltaL, 18, 255);
+
+                if (spread <= 16) {
+                    scanline[x] = qRgba(neutR, neutG, neutB, a);
+                } else if (spread >= 48) {
+                    scanline[x] = qRgba(chromR, chromG, chromB, a);
                 } else {
-                    const int ir = 255 - r;
-                    const int ig = 255 - g;
-                    const int ib = 255 - b;
-                    scanline[x] = qRgba(ir, ig, ib, a);
+                    const double wBlend = static_cast<double>(spread - 16) / 32.0;
+                    const int outR = static_cast<int>(std::round(neutR + (chromR - neutR) * wBlend));
+                    const int outG = static_cast<int>(std::round(neutG + (chromG - neutG) * wBlend));
+                    const int outB = static_cast<int>(std::round(neutB + (chromB - neutB) * wBlend));
+                    scanline[x] = qRgba(std::clamp(outR, 0, 255), std::clamp(outG, 0, 255), std::clamp(outB, 0, 255), a);
                 }
             }
         }

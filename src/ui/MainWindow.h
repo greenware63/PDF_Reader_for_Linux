@@ -61,6 +61,9 @@ public:
     /// PdfViewerWidget at specific tab index.
     PdfViewerWidget* viewerAt(int index) const;
 
+    /// Creates and adds a new document viewer tab.
+    PdfViewerWidget* createViewerTab(const QString& title = QString());
+
     /// Exports the currently active document to a PDF file. @return true on success.
     bool exportDocumentToPdf(const QString& outputPath, int fromPage = -1, int toPage = -1);
 
@@ -118,7 +121,6 @@ private:
     void closePasswordDialog();
     void loadRecentFiles();
     void updateRecentFilesMenu();
-    PdfViewerWidget* createViewerTab(const QString& title = QString());
     void connectViewer(PdfViewerWidget* viewer);
 
     FindBar* m_findBar{nullptr};
@@ -138,6 +140,7 @@ private:
     QStandardItemModel* m_outlineModel{nullptr};
     QLabel* m_outlineEmptyLabel{nullptr};
     QAction* m_toggleSidebarAction{nullptr};
+    QMenu* m_colorMenu{nullptr};
     QAction* m_colorModeActions[4]{nullptr, nullptr, nullptr, nullptr};
     QAction* m_darkModeAction{nullptr};
     QMenu* m_recentFilesMenu{nullptr};

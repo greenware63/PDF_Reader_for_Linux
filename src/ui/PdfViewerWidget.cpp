@@ -134,6 +134,7 @@ void PdfViewerWidget::retryFailedTiles() {
     m_cache.resetFailureHistory(); // explicit user retry also lifts the permanent-failure state
     m_cache.clearAllFailed();
     m_inFlightKeys.clear();
+    m_transformedPixmapCache.clear();
     viewport()->update();
 }
 
@@ -165,6 +166,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_cache.invalidateDocument(m_currentDocumentId);
     m_inFlightKeys.clear();
     m_pageTextCache.clear();
+    m_transformedPixmapCache.clear();
     clearSelection();
     clearSearch();
     m_currentDocumentId = nextDocId;
@@ -312,6 +314,7 @@ void PdfViewerWidget::closeDocument() {
     m_cache.invalidateDocument(m_currentDocumentId);
     m_inFlightKeys.clear();
     m_pageTextCache.clear();
+    m_transformedPixmapCache.clear();
     clearSelection();
     clearSearch();
     ++m_currentDocumentId;
@@ -481,6 +484,7 @@ void PdfViewerWidget::setRotation(int degrees) {
 
     ++m_currentGeneration;
     m_inFlightKeys.clear();
+    m_transformedPixmapCache.clear();
     m_renderWorker.setGeneration(m_currentGeneration);
 
     m_layout.updateLayout(pdf::quantizeScale(m_scale), dpr, vpW);
@@ -589,6 +593,7 @@ void PdfViewerWidget::setZoom(double zoom, const QPoint* anchorWidgetPos) {
         return;
     }
 
+    m_transformedPixmapCache.clear();
     rememberFallbackScale(pdf::quantizeScale(m_scale));
 
     const double dpr = effectiveDpr();
@@ -977,7 +982,7 @@ void PdfViewerWidget::drawErrorPlaceholder(QPainter& painter, const QRectF& rect
 void PdfViewerWidget::drawPendingPlaceholder(QPainter& painter, const QRectF& rect) {
     QColor placeholderColor;
     switch (m_colorMode) {
-        case ColorMode::Inverted:     placeholderColor = QColor("#1e1e1e"); break;
+        case ColorMode::Inverted:     placeholderColor = Qt::black; break;
         case ColorMode::HighContrast: placeholderColor = QColor("#121212"); break;
         case ColorMode::Sepia:        placeholderColor = QColor("#fbf0d9"); break;
         case ColorMode::Normal:
@@ -1755,7 +1760,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
             QColor shadowColor;
             switch (m_colorMode) {
                 case ColorMode::Inverted:
-                    pageBg = QColor("#1e1e1e");
+                    pageBg = Qt::black;
                     pageBorder = QColor(50, 50, 50);
                     shadowColor = QColor(0, 0, 0, 140);
                     break;
@@ -1831,8 +1836,18 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
                 } else {
                     QImage img = applyColorMode(toQImage(*cachedBuf), m_colorMode);
                     QPixmap pixmap = QPixmap::fromImage(img);
-                    if (m_transformedPixmapCache.size() > 128) {
-                        m_transformedPixmapCache.clear();
+                    if (m_transformedPixmapCache.size() >= 32) {
+                        // Prune entries outside the visible set to strictly bound cache memory
+                        for (auto iter = m_transformedPixmapCache.begin(); iter != m_transformedPixmapCache.end(); ) {
+                            if (std::find(visibleKeys.begin(), visibleKeys.end(), iter->first) == visibleKeys.end()) {
+                                iter = m_transformedPixmapCache.erase(iter);
+                            } else {
+                                ++iter;
+                            }
+                        }
+                        if (m_transformedPixmapCache.size() >= 32) {
+                            m_transformedPixmapCache.clear();
+                        }
                     }
                     m_transformedPixmapCache.emplace(key, pixmap);
                     painter.drawPixmap(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), pixmap);

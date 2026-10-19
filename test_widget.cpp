@@ -3554,9 +3554,60 @@ int main(int argc, char* argv[]) {
                 std::cerr << "[FAIL] Normal white expected (255, 255, 255)" << std::endl;
                 return 1;
             }
+
+            // Mid-gray (128, 128, 128) in Sepia
+            QImage grayPix(1, 1, QImage::Format_ARGB32);
+            grayPix.setPixel(0, 0, qRgb(128, 128, 128));
+            QImage sepiaMid = ui::applyColorMode(grayPix, ui::ColorMode::Sepia);
+            QRgb smRgb = sepiaMid.pixel(0, 0);
+            if (qRed(smRgb) < 62 || qRed(smRgb) > 251 ||
+                qGreen(smRgb) < 48 || qGreen(smRgb) > 240 ||
+                qBlue(smRgb) < 36 || qBlue(smRgb) > 217) {
+                std::cerr << "[FAIL] Sepia mid-gray outside bounds" << std::endl;
+                return 1;
+            }
+
+            // Alpha channel preservation across all modes
+            QImage alphaPix(1, 1, QImage::Format_ARGB32);
+            alphaPix.setPixel(0, 0, qRgba(120, 140, 160, 127));
+            for (auto m : {ui::ColorMode::Inverted, ui::ColorMode::Sepia, ui::ColorMode::HighContrast}) {
+                QImage trans = ui::applyColorMode(alphaPix, m);
+                if (qAlpha(trans.pixel(0, 0)) != 127) {
+                    std::cerr << "[FAIL] Alpha channel was not preserved in color mode " << static_cast<int>(m) << std::endl;
+                    return 1;
+                }
+            }
+
+            // Smooth continuous blending across spread threshold (no contour steps)
+            QImage nearCutoff1(1, 1, QImage::Format_ARGB32);
+            nearCutoff1.setPixel(0, 0, qRgb(140, 140, 113)); // spread = 27
+            QImage nearCutoff2(1, 1, QImage::Format_ARGB32);
+            nearCutoff2.setPixel(0, 0, qRgb(140, 140, 112)); // spread = 28
+            QImage out1 = ui::applyColorMode(nearCutoff1, ui::ColorMode::Sepia);
+            QImage out2 = ui::applyColorMode(nearCutoff2, ui::ColorMode::Sepia);
+            QRgb c1 = out1.pixel(0, 0);
+            QRgb c2 = out2.pixel(0, 0);
+            const int maxDelta = std::max({std::abs(qRed(c1) - qRed(c2)),
+                                           std::abs(qGreen(c1) - qGreen(c2)),
+                                           std::abs(qBlue(c1) - qBlue(c2))});
+            if (maxDelta > 3) {
+                std::cerr << "[FAIL] Sepia color jump across spread cutoff: delta=" << maxDelta << std::endl;
+                return 1;
+            }
+
+            // Colored pixel in HighContrast: preserve red hue (red stays red, not flipped to cyan)
+            QImage redText(1, 1, QImage::Format_ARGB32);
+            redText.setPixel(0, 0, qRgb(180, 20, 20)); // dark red text
+            QImage hcRed = ui::applyColorMode(redText, ui::ColorMode::HighContrast);
+            QRgb hrRgb = hcRed.pixel(0, 0);
+            if (qRed(hrRgb) <= qBlue(hrRgb) || qRed(hrRgb) <= qGreen(hrRgb)) {
+                std::cerr << "[FAIL] HighContrast inverted red hue to cyan: ("
+                          << qRed(hrRgb) << "," << qGreen(hrRgb) << "," << qBlue(hrRgb) << ")" << std::endl;
+                return 1;
+            }
         }
 
-        // 2. Viewport Widget theming and signals
+        // 2. Viewport Widget theming, cache clearing, and signals
         {
             ui::PdfViewerWidget viewer;
             viewer.resize(800, 600);
@@ -3609,6 +3660,12 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
+            // Transformed cache was populated during render
+            if (viewer.transformedCacheSize() == 0) {
+                std::cerr << "[FAIL] Expected transformedCacheSize > 0 when rendering in Sepia mode" << std::endl;
+                return 1;
+            }
+
             // Switch to High Contrast
             viewer.setColorMode(ui::ColorMode::HighContrast);
             QCoreApplication::processEvents();
@@ -3645,12 +3702,63 @@ int main(int argc, char* argv[]) {
                 std::cerr << "[FAIL] setDarkMode(false) expected to return to Normal mode" << std::endl;
                 return 1;
             }
+
+            // Test cache clearing on closeDocument
+            viewer.setColorMode(ui::ColorMode::Sepia);
+            {
+                QImage dummy(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+                QPainter p(&dummy);
+                viewer.viewport()->render(&p);
+            }
+            viewer.closeDocument();
+            if (viewer.transformedCacheSize() != 0) {
+                std::cerr << "[FAIL] closeDocument() did not clear transformedCacheSize" << std::endl;
+                return 1;
+            }
         }
 
-        // 3. MainWindow integration & QSettings persistence
+        // 3. ThumbnailListWidget Color Mode Synchronization
+        {
+            ui::PdfViewerWidget viewer;
+            viewer.resize(800, 600);
+            viewer.show();
+            QCoreApplication::processEvents();
+
+            std::string sampleDoc = "widget_test_colormodes.pdf";
+            if (viewer.openDocument(QString::fromStdString(sampleDoc)) == pdf::DocumentError::None) {
+                viewer.setColorMode(ui::ColorMode::Sepia);
+                ui::ThumbnailListWidget thumbList;
+                thumbList.setViewer(&viewer);
+                thumbList.setDocument(2, {QStringLiteral("1"), QStringLiteral("2")});
+                thumbList.show();
+                QCoreApplication::processEvents();
+
+                // Deliver a white thumbnail and verify transformed icon in Sepia
+                QImage mockThumb(60, 80, QImage::Format_ARGB32);
+                mockThumb.fill(qRgb(255, 255, 255));
+                Q_EMIT viewer.thumbnailReady(0, mockThumb);
+                QCoreApplication::processEvents();
+
+                if (!thumbList.isThumbnailLoaded(0)) {
+                    std::cerr << "[FAIL] Thumbnail 0 was not loaded" << std::endl;
+                    return 1;
+                }
+                auto icon = thumbList.item(0)->icon();
+                QImage iconImg = icon.pixmap(60, 80).toImage();
+                QRgb iconPix = iconImg.pixel(30, 40);
+                if (qRed(iconPix) != 251 || qGreen(iconPix) != 240 || qBlue(iconPix) != 217) {
+                    std::cerr << "[FAIL] Thumbnail icon in Sepia expected #FBF0D9, got RGB("
+                              << qRed(iconPix) << "," << qGreen(iconPix) << "," << qBlue(iconPix) << ")" << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // 4. MainWindow integration, new tab inheritance & QSettings hygiene
         {
             QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
             const QVariant prevColor = settings.value(QStringLiteral("colorMode"));
+            const QVariant prevDark = settings.value(QStringLiteral("darkMode"));
             {
                 ui::MainWindow window;
                 window.resize(1024, 768);
@@ -3658,6 +3766,12 @@ int main(int argc, char* argv[]) {
                 window.setColorMode(ui::ColorMode::Sepia);
                 if (window.colorMode() != ui::ColorMode::Sepia) {
                     std::cerr << "[FAIL] MainWindow setColorMode(Sepia) failed" << std::endl;
+                    return 1;
+                }
+
+                auto* newTabViewer = window.createViewerTab(QStringLiteral("Tab 2"));
+                if (!newTabViewer || newTabViewer->colorMode() != ui::ColorMode::Sepia) {
+                    std::cerr << "[FAIL] Newly created viewer tab did not inherit window colorMode" << std::endl;
                     return 1;
                 }
             }
@@ -3673,14 +3787,20 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
             }
+            // Restore both settings
             if (prevColor.isValid()) {
                 reread.setValue(QStringLiteral("colorMode"), prevColor);
             } else {
                 reread.remove(QStringLiteral("colorMode"));
             }
+            if (prevDark.isValid()) {
+                reread.setValue(QStringLiteral("darkMode"), prevDark);
+            } else {
+                reread.remove(QStringLiteral("darkMode"));
+            }
         }
 
-        std::cout << "  -> Passed: Reading color modes (Normal, Inverted, Sepia, HighContrast), LUT pixel transformations, viewport theming, and QSettings persistence verified." << std::endl;
+        std::cout << "  -> Passed: Reading color modes (Normal, Inverted, Sepia, HighContrast), continuous LUT transforms, hue preservation, alpha preservation, thumbnail sync, tab inheritance, and QSettings hygiene verified." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

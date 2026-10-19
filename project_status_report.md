@@ -51,7 +51,7 @@ flowchart LR
 | **Milestone 1** | **Thumbnails & Page Labels Sidebar** | Multi-tab sidebar (`QTabWidget`), PDF page label extraction via PDFium `FPDF_GetPageLabel`, lazy-loading miniature thumbnail grid with card styling, prefetching window, and two-way viewport synchronization. |
 | **Milestone 2** | **Multi-Document Tabs & Session Management** | Tabbed document interface (`QTabWidget`), dynamic tab add/close/switching (`Ctrl+T`, `Ctrl+W`, `Ctrl+Tab`), per-tab viewer isolation, and persistent Recent Files menu (`QSettings`) with clear option. |
 | **Milestone 3** | **Native CUPS Printing & Page Export** | Zero-PDFium UI printing via IPC `RenderPageRequest`, native print dialog (`QPrintDialog`), page ranges (`AllPages`, `CurrentPage`, `PageRange`), headless PDF export (`exportDocumentToPdf`), and print progress reporting. |
-| **Milestone 4** | **Dark Mode & Reading Themes** | High-performance LUT-based color mode post-processing (Normal, Invert/DarkMode, Sepia, HighContrast), GPU-accelerated transformed tile caching, synchronized sidebar thumbnails, View menu & toolbar theme actions, and QSettings persistence. |
+| **Milestone 4** | **Dark Mode & Reading Themes** | High-performance LUT-based color mode post-processing (Normal, Invert/DarkMode, Sepia, HighContrast) with continuous saturation blending and hue preservation, in-memory pixmap tile caching strictly bounded to 32 entries with invalidation on close/rotation/zoom, synchronized sidebar thumbnails, View menu & toolbar theme actions, and QSettings persistence. |
 
 ---
 
@@ -92,7 +92,7 @@ All 6 test suites in CTest pass with 0 failures:
 - `EngineRenderTestSuite`: PDFium core rendering, rotation, crop boxes.
 - `DocumentLayoutTestSuite`: Continuous vertical layout and 64-bit coordinates.
 - `TileCacheTestSuite`: LRU tile eviction, memory bounds, tombstone retries.
-- `ViewportWidgetTestSuite` (37 tests): Offscreen rendering, DPR injection (1.0, 1.5, 2.0), continuous scrolling under load, bookmark navigation, search cycling, worker crash containment, **ThumbnailListWidget IPC delivery and two-way viewport synchronization**, **Multi-Document Tabs and Recent Files session management**, and **Native printing rasterization over IPC with headless PDF export**.
+- `ViewportWidgetTestSuite` (43 tests): Offscreen rendering, DPR injection (1.0, 1.5, 2.0), continuous scrolling under load, bookmark navigation, search cycling, worker crash containment, **ThumbnailListWidget IPC delivery and two-way viewport synchronization**, **Multi-Document Tabs and Recent Files session management**, and **Native printing rasterization over IPC with headless PDF export**.
 - `PasswordPromptTestSuite`: Authentication workflow and invalid password rejection.
 - `WorkerIpcTestSuite` (8 tests): Direct IPC socket serialization, control ping/pong, crash recovery, and **isolated worker thumbnail rendering over IPC**.
 
@@ -120,7 +120,6 @@ flowchart TD
     Phase1 --> Phase2 --> Phase3
 ```
 
-### Next Immediate Target: Milestone 4 — Dark Mode / Night Inversion Shader
-- Color inversion / dark reading mode shader or tile post-processing.
-- High-contrast and sepia tone options for comfortable reading.
-- Toggle shortcut (`Ctrl+I` / `Ctrl+D`) and View menu integration.
+### Next Immediate Target: Phase 3 — Production Hardening & Distribution
+- **Milestone 5: libFuzzer / OSS-Fuzz IPC Harness**: Automated fuzzing harness for framed IPC messages and deserialize functions.
+- **Milestone 6: Flatpak & AppImage Packaging**: Sandboxed distribution packaging manifests for Linux desktop distributions.
