@@ -674,12 +674,10 @@ void RenderWorker::workerLoop() {
                 }
             }
 
-#ifdef PDF_WORKER_TEST_HOOKS
-            // Test hook: keep the tile in flight for a while to make timing-dependent behaviour observable
+            // Test hook: keep the tile in flight for a while when artificially configured (0 disables)
             if (const int delayMs = m_testRenderDelayMs.load(std::memory_order_relaxed); delayMs > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
-#endif
 
             // Deliver completed render whenever documentId matches active document.
             if (m_running.load() && req.documentId == m_activeDocumentId.load()) {

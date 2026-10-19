@@ -767,6 +767,7 @@ int main(int argc, char* argv[]) {
 
     // --- TEST 10: Resource-Limit Setup Failure Path ---
     std::cout << "[TEST 10] Testing explicit failure handling when resource-limit setup fails..." << std::endl;
+#ifdef PDF_WORKER_TEST_HOOKS
     {
         QProcess rlimitProc;
         rlimitProc.start(workerExe, QStringList() << QStringLiteral("--test-fail-rlimit"));
@@ -783,6 +784,9 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Failed resource limit explicitly aborted worker startup with error: "
                   << errOut.trimmed().toStdString() << std::endl;
     }
+#else
+    std::cout << "  -> Skipped: ENABLE_TEST_HOOKS is OFF (--test-fail-rlimit hook compiled out of shipping build)." << std::endl;
+#endif
 
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
