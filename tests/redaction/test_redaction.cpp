@@ -652,6 +652,12 @@ int main(int argc, char** argv) {
     for (auto [ok, n] : {std::pair{g_haveQpdf, "qpdf"}, {g_havePdftotext, "pdftotext"}, {g_havePdftoppm, "pdftoppm"}, {g_havePdfsig, "pdfsig"}}) std::cout << " " << n << (ok ? "=yes" : "=MISSING(skipped)");
     std::cout << "\n";
 
+    if (const char* req = std::getenv("REDACT_REQUIRE_WITNESSES"); req && std::string(req) == "1" && !g_skipped.empty()) {
+        std::cerr << "FATAL: REDACT_REQUIRE_WITNESSES=1 is set, but the following external witnesses are missing:\n";
+        for (const auto& m : g_skipped) std::cerr << "  - " << m << "\n";
+        return 1;
+    }
+
     FPDF_InitLibrary();
     runApiAbuse();
     runFixtures();
