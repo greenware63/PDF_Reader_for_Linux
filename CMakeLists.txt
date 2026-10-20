@@ -4,11 +4,34 @@ project(pdf-reader LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Sanitizer option (test-only; never ship with sanitizers enabled)
+# Usage: -DENABLE_SANITIZERS=asan  or  -DENABLE_SANITIZERS=tsan
+set(ENABLE_SANITIZERS "OFF" CACHE STRING "Enable sanitizer: OFF|asan|tsan")
+set(SANITIZER_VALID_VALUES "OFF;asan;tsan")
+if(NOT ENABLE_SANITIZERS IN_LIST SANITIZER_VALID_VALUES)
+    message(FATAL_ERROR "ENABLE_SANITIZERS must be one of: ${SANITIZER_VALID_VALUES} (got: ${ENABLE_SANITIZERS})")
+endif()
+
+if(ENABLE_SANITIZERS STREQUAL "asan")
+    message(STATUS "Sanitizer: AddressSanitizer + UndefinedBehaviorSanitizer")
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+elseif(ENABLE_SANITIZERS STREQUAL "tsan")
+    message(STATUS "Sanitizer: ThreadSanitizer")
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=thread)
+else()
+    message(STATUS "Sanitizer: none (shipping configuration)")
+endif()
+
 # Compiler warnings and security hardening flags
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic -Wconversion)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_compile_options(-fstack-protector-strong)
+        # Explicit linker hardening: PIE, full RELRO, immediate symbol resolution
+        add_compile_options(-fPIE)
+        add_link_options(-pie -Wl,-z,relro,-z,now)
 
         # Verify glibc >= 2.33 before enabling _FORTIFY_SOURCE=3
         include(CheckCXXSourceCompiles)

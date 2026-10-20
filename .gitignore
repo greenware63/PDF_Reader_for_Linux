@@ -7,7 +7,9 @@ out/
 # IDE files
 .idea/
 .vscode/
+.codex/
 *.user
+*.docx
 
 # Binaries & Libraries
 *.exe
