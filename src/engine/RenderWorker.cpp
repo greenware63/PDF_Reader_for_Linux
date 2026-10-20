@@ -545,9 +545,16 @@ void RenderWorker::workerLoop() {
     while (m_running.load()) {
 #ifdef PDF_WORKER_TEST_HOOKS
         if (m_testHangEngine.load(std::memory_order_relaxed)) {
+            // The engine thread itself records the hang (op=Tile, one heartbeat stamp) and then acknowledges
+            // it. The setter waits for that acknowledgement, so no progress write can land after it returns:
+            // previously this thread's own noteProgress(Idle) below could overwrite the setter's Tile, which
+            // made the hang invisible to the watchdog (it only flags non-Idle ops with a frozen heartbeat).
+            noteProgress(ipc::WorkerOp::Tile);
+            m_testHangParked.store(true, std::memory_order_release);
             while (m_testHangEngine.load(std::memory_order_relaxed) && m_running.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
+            m_testHangParked.store(false, std::memory_order_release);
         }
 #endif
         ControlTask ctrlTask;
@@ -573,6 +580,9 @@ void RenderWorker::workerLoop() {
             std::unique_lock<std::mutex> lock(m_mutex);
             m_cv.wait(lock, [&]() {
                 if (!m_running.load()) return true;
+#ifdef PDF_WORKER_TEST_HOOKS
+                if (m_testHangEngine.load(std::memory_order_relaxed)) return true;
+#endif
                 if (!m_controlQueue.empty()) return true;
                 if (!m_queue.empty()) return true;
                 if (!m_outlineQueue.empty()) return true;
@@ -583,6 +593,11 @@ void RenderWorker::workerLoop() {
             if (!m_running.load()) {
                 break;
             }
+#ifdef PDF_WORKER_TEST_HOOKS
+            if (m_testHangEngine.load(std::memory_order_relaxed)) {
+                continue; // back to the loop head, which parks this thread in the hang loop
+            }
+#endif
 
             const bool hasSearch = (m_activeSearch.searchId != 0 &&
                                     m_activeSearch.nextPageToSearch < m_activeSearch.totalPages &&

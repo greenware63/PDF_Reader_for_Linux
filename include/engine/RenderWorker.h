@@ -189,10 +189,21 @@ public:
      * @brief Test hook: artificially blocks the engine thread to simulate an unresponsive engine.
      */
     void setHangEngineForTesting(bool hang) noexcept {
-        m_testHangEngine.store(hang, std::memory_order_relaxed);
-        if (hang) {
-            noteProgress(ipc::WorkerOp::Tile);
-            m_cv.notify_all();
+        if (!hang) {
+            m_testHangEngine.store(false, std::memory_order_relaxed);
+            return;
+        }
+        m_testHangParked.store(false, std::memory_order_release);
+        m_testHangEngine.store(true, std::memory_order_relaxed);
+        { std::lock_guard<std::mutex> lock(m_mutex); } // order the store against the engine's wait predicate
+        m_cv.notify_all();
+        // Wait (bounded) until the engine thread has parked and recorded the hang, so the heartbeat is frozen
+        // from the moment this returns. If the engine is busy in a long task we return after the bound; the
+        // thread then parks as soon as it reaches the loop head.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+        while (!m_testHangParked.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
 #endif
@@ -265,6 +276,7 @@ private:
     std::atomic<int64_t> m_lastProgressEpochMs{0};
 #ifdef PDF_WORKER_TEST_HOOKS
     std::atomic<bool> m_testHangEngine{false};
+    std::atomic<bool> m_testHangParked{false};
 #endif
     std::atomic<int> m_testOpenDelayMs{0};
     std::atomic<int64_t> m_currentSearchId{0};
