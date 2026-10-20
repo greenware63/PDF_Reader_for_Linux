@@ -452,7 +452,6 @@ void RenderWorker::startSearch(int64_t documentId, int64_t searchId, const QStri
 
 void RenderWorker::cancelSearch() {
     m_currentSearchId.fetch_add(1);
-    noteProgress(ipc::WorkerOp::Idle);
 
     std::lock_guard<std::mutex> lock(m_mutex);
     m_activeSearch.searchId = 0;

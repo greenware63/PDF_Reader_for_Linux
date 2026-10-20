@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <chrono>
+#include <thread>
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
 #include "engine/PixelBuffer.h"
@@ -1447,6 +1449,34 @@ int main(int argc, char* argv[]) {
         std::string latinPath = "text_test.pdf";
         generateTextPdfFixture(latinPath, "Hello PDF World!");
         worker.openDocumentSync(102, latinPath);
+
+        worker.setRenderDelayForTesting(std::chrono::milliseconds(500));
+        pdf::TileRenderRequest inFlightTile;
+        inFlightTile.documentId = 102;
+        inFlightTile.pageIndex = 0;
+        inFlightTile.rect = pdf::PixelRect{0, 0, 64, 64};
+        inFlightTile.scale = 1.0;
+        inFlightTile.dpr = 1.0;
+        inFlightTile.key = pdf::TileKey::create(102, 0, 0, 0, 1.0, 1.0);
+        worker.enqueueRequest(inFlightTile);
+
+        const auto tileDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (worker.progressSnapshot().second != static_cast<uint32_t>(pdf::ipc::WorkerOp::Tile) &&
+               std::chrono::steady_clock::now() < tileDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (worker.progressSnapshot().second != static_cast<uint32_t>(pdf::ipc::WorkerOp::Tile)) {
+            std::cerr << "[FAIL] Worker did not enter the tile operation for cancellation watchdog test." << std::endl;
+            return 1;
+        }
+        worker.cancelSearch();
+        if (worker.progressSnapshot().second != static_cast<uint32_t>(pdf::ipc::WorkerOp::Tile)) {
+            std::cerr << "[FAIL] Cancelling search overwrote the in-flight tile operation status." << std::endl;
+            return 1;
+        }
+        worker.waitForIdle();
+        worker.setRenderDelayForTesting(std::chrono::milliseconds(0));
+
         matchCount = 0;
         deliveredMatches.clear();
         // Case-insensitive search
