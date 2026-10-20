@@ -34,17 +34,22 @@ jobs:
             libgl1-mesa-dev \
             libxkbcommon-dev
 
+      # The fault-injection hooks (watchdog hang/stall, rlimit failure tests) are compiled out of the shipping
+      # configuration, and the tests that need them print "Skipped" without them. The three legs below
+      # therefore build WITH hooks so those tests really run; the build-shipping job covers the OFF config.
       - name: Configure CMake (Release)
         if: matrix.build_type == 'Release'
         run: |
           cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TEST_HOOKS=ON
 
       - name: Configure CMake (AddressSanitizer / UndefinedBehaviorSanitizer)
         if: matrix.build_type == 'AddressSanitizer'
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DENABLE_TEST_HOOKS=ON \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
@@ -53,11 +58,20 @@ jobs:
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DENABLE_TEST_HOOKS=ON \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
 
       - name: Build Project
         run: cmake --build build
+
+      - name: Control - hook flags are present in the hooks-ON worker
+        if: matrix.build_type == 'Release'
+        # Guards the build-shipping assertion: if a flag is renamed, that check would pass vacuously.
+        run: |
+          for flag in test-hang-engine test-fail-rlimit; do
+            strings -el build/pdf_worker | grep -q -e "$flag"
+          done
 
       - name: Run CTest Test Suite
         env:
@@ -74,3 +88,46 @@ jobs:
           else
             ctest --test-dir build --output-on-failure
           fi
+
+  build-shipping:
+    name: Shipping config (test hooks OFF)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            qt6-base-dev \
+            libgl1-mesa-dev \
+            libxkbcommon-dev
+
+      - name: Configure with shipping defaults
+        run: cmake -B build-shipping -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Assert fault-injection hooks are disabled
+        run: cmake -LA -N build-shipping | grep -E "^ENABLE_TEST_HOOKS:BOOL=OFF$"
+
+      - name: Build
+        run: cmake --build build-shipping
+
+      - name: Assert hook flags are compiled out of the worker binary
+        # QStringLiteral stores text as UTF-16, so plain `strings` cannot see it: use -el.
+        run: |
+          for flag in test-hang-engine test-fail-rlimit; do
+            if strings -el build-shipping/pdf_worker | grep -q -e "$flag"; then
+              echo "pdf_worker still contains the --$flag hook" >&2
+              exit 1
+            fi
+          done
+
+      - name: Run CTest (hook-dependent tests skip themselves)
+        env:
+          QT_QPA_PLATFORM: "offscreen"
+        run: ctest --test-dir build-shipping --output-on-failure
