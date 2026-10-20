@@ -26,7 +26,8 @@ bool isRequestType(uint32_t type) {
         case ipc::MessageType::CancelSearchRequest:
         case ipc::MessageType::ThumbnailRequest:
         case ipc::MessageType::RenderPageRequest:
-        case ipc::MessageType::ExtractPagesRequest:
+                case ipc::MessageType::ExtractPagesRequest:
+        case ipc::MessageType::RedactDocumentRequest:
         case ipc::MessageType::SharedMemoryAck:
         case ipc::MessageType::WorkerControlRequest:
             return true;
@@ -69,6 +70,10 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
             this, &WorkerServer::onExtractPagesReady, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::extractPagesFailed,
             this, &WorkerServer::onExtractPagesFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::redactDocumentReady,
+            this, &WorkerServer::onRedactDocumentReady, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::redactDocumentFailed,
+            this, &WorkerServer::onRedactDocumentFailed, Qt::QueuedConnection);
 }
 
 WorkerServer::~WorkerServer() {
@@ -283,6 +288,14 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             break;
         }
 
+        case ipc::MessageType::RedactDocumentRequest: {
+            ipc::RedactDocumentRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestRedactDocument(req.documentId, req.redactions, req.dpi, req.edgeGrowPx);
+            }
+            break;
+        }
+
         case ipc::MessageType::SharedMemoryAck: {
             ipc::SharedMemoryAck ack;
             if (ipc::deserialize(payload, ack)) {
@@ -474,6 +487,19 @@ void WorkerServer::onExtractPagesReady(int64_t documentId, int firstPage, int la
 void WorkerServer::onExtractPagesFailed(int64_t documentId, int firstPage, int lastPage) {
     sendPacket(ipc::MessageType::ExtractPagesFailedResponse,
                ipc::serialize(ipc::ExtractPagesFailedResponse{documentId, firstPage, lastPage}));
+}
+
+void WorkerServer::onRedactDocumentReady(int64_t documentId, const ipc::RedactDocumentResponse& response) {
+    if (response.pdfBytes.size() > static_cast<qsizetype>(ipc::MAX_IPC_PAYLOAD_SIZE - 65536)) {
+        onRedactDocumentFailed(documentId, QStringLiteral("Redacted PDF exceeds maximum IPC payload limit (64MB)."));
+        return;
+    }
+    sendPacket(ipc::MessageType::RedactDocumentResponse, ipc::serialize(response));
+}
+
+void WorkerServer::onRedactDocumentFailed(int64_t documentId, const QString& errorMessage) {
+    sendPacket(ipc::MessageType::RedactDocumentFailedResponse,
+               ipc::serialize(ipc::RedactDocumentFailedResponse{documentId, errorMessage}));
 }
 
 } // namespace pdf::worker

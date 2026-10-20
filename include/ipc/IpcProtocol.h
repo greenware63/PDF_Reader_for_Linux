@@ -5,10 +5,10 @@
 namespace pdf::ipc {
 
 constexpr uint32_t IPC_MAGIC = 0x50444657; // 'PDFW'
-// v3 added TileKey::rotation and TileRenderRequest::rotation. Bump this whenever
-// a serialised layout changes: the frame-level version check is the only thing
+// v4 added RedactDocumentRequest, RedactDocumentResponse, RedactDocumentFailedResponse and WorkerOp::Redact.
+// Bump this whenever a serialised layout changes: the frame-level version check is the only thing
 // that turns a wire mismatch into a clean rejection instead of silent garbage.
-constexpr uint32_t IPC_PROTOCOL_VERSION = 3;
+constexpr uint32_t IPC_PROTOCOL_VERSION = 4;
 constexpr uint32_t MAX_IPC_PAYLOAD_SIZE = 64 * 1024 * 1024;
 
 enum class WorkerOp : uint32_t {
@@ -18,7 +18,8 @@ enum class WorkerOp : uint32_t {
     Thumbnail,
     Print,
     Extract,
-    Search
+    Search,
+    Redact
 };
 
 enum class MessageType : uint32_t {
@@ -68,6 +69,11 @@ enum class MessageType : uint32_t {
     ExtractPagesRequest = 73,
     ExtractPagesResponse = 74,
     ExtractPagesFailedResponse = 75,
+
+    // Redaction
+    RedactDocumentRequest = 80,
+    RedactDocumentResponse = 81,
+    RedactDocumentFailedResponse = 82,
 
     // Error / Diagnostic
     WorkerError = 99

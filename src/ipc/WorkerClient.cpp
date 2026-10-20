@@ -37,7 +37,9 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::RenderPageResponse:
         case MessageType::RenderPageFailedResponse:
         case MessageType::ExtractPagesResponse:
-        case MessageType::ExtractPagesFailedResponse:
+                case MessageType::ExtractPagesFailedResponse:
+        case MessageType::RedactDocumentResponse:
+        case MessageType::RedactDocumentFailedResponse:
         case MessageType::WorkerError:
         case MessageType::WorkerControlResponse:
             return true;
@@ -509,6 +511,80 @@ QByteArray WorkerClient::extractPagesSync(int64_t documentId, int firstPage, int
     return result;
 }
 
+void WorkerClient::requestRedactDocument(int64_t documentId,
+                                         const std::vector<PageRedactionItem>& redactions,
+                                         double dpi,
+                                         int edgeGrowPx) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT redactDocumentFailed(documentId, tr("Worker is stopped or failed."));
+        return;
+    }
+    sendMessage(MessageType::RedactDocumentRequest,
+                serialize(RedactDocumentRequest{documentId, redactions, dpi, edgeGrowPx}));
+}
+
+RedactDocumentResponse WorkerClient::redactDocumentSync(int64_t documentId,
+                                                       const std::vector<PageRedactionItem>& redactions,
+                                                       double dpi,
+                                                       int edgeGrowPx,
+                                                       int timeoutMs) {
+    if (!ensureConnected()) {
+        RedactDocumentResponse fail;
+        fail.documentId = documentId;
+        fail.success = false;
+        fail.errorMessage = tr("Worker connection unavailable.");
+        return fail;
+    }
+
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    RedactDocumentResponse result;
+    result.documentId = documentId;
+    result.success = false;
+
+    const auto readyConn = connect(this, &WorkerClient::redactDocumentReady, &loop,
+        [&](int64_t docId, const RedactDocumentResponse& response) {
+            if (docId == documentId) {
+                result = response;
+                loop.quit();
+            }
+        });
+
+    const auto failConn = connect(this, &WorkerClient::redactDocumentFailed, &loop,
+        [&](int64_t docId, const QString& error) {
+            if (docId == documentId) {
+                result.documentId = docId;
+                result.success = false;
+                result.errorMessage = error;
+                loop.quit();
+            }
+        });
+
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop,
+        [&](const QString& error) {
+            result.documentId = documentId;
+            result.success = false;
+            result.errorMessage = error;
+            loop.quit();
+        });
+
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestRedactDocument(documentId, redactions, dpi, edgeGrowPx);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+
+    if (!result.success && result.errorMessage.isEmpty()) {
+        result.errorMessage = tr("Timed out waiting for redaction to complete.");
+    }
+    return result;
+}
+
 void WorkerClient::stop() {
     if (m_stopping) {
         return;
@@ -785,6 +861,20 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
             ExtractPagesFailedResponse response;
             if (deserialize(payload, response)) {
                 Q_EMIT extractPagesFailed(response.documentId, response.firstPage, response.lastPage);
+            }
+            break;
+        }
+        case MessageType::RedactDocumentResponse: {
+            RedactDocumentResponse response;
+            if (deserialize(payload, response)) {
+                Q_EMIT redactDocumentReady(response.documentId, response);
+            }
+            break;
+        }
+        case MessageType::RedactDocumentFailedResponse: {
+            RedactDocumentFailedResponse response;
+            if (deserialize(payload, response)) {
+                Q_EMIT redactDocumentFailed(response.documentId, response.errorMessage);
             }
             break;
         }

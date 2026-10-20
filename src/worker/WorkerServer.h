@@ -48,6 +48,8 @@ private Q_SLOTS:
     void onPrintPageFailed(int64_t documentId, int pageIndex);
     void onExtractPagesReady(int64_t documentId, int firstPage, int lastPage, const QByteArray& pdfBytes);
     void onExtractPagesFailed(int64_t documentId, int firstPage, int lastPage);
+    void onRedactDocumentReady(int64_t documentId, const pdf::ipc::RedactDocumentResponse& response);
+    void onRedactDocumentFailed(int64_t documentId, const QString& errorMessage);
 
 private:
     void dispatchMessage(ipc::MessageType type, const QByteArray& payload);

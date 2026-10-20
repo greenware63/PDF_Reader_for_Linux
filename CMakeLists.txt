@@ -135,37 +135,6 @@ target_include_directories(pdf_cache PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# Core engine library
-add_library(pdf_engine STATIC
-    include/engine/IDocument.h
-    include/engine/IPage.h
-    include/engine/PixelBuffer.h
-    include/engine/PageText.h
-    include/engine/SearchTypes.h
-    include/engine/OutlineTypes.h
-    include/engine/RenderWorker.h
-    src/engine/SearchText.h
-    src/engine/SearchText.cpp
-    src/engine/PdfiumDocument.h
-    src/engine/PdfiumDocument.cpp
-    src/engine/PdfiumPage.h
-    src/engine/PdfiumPage.cpp
-    src/engine/RenderWorker.cpp
-)
-
-target_include_directories(pdf_engine PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-
-target_link_libraries(pdf_engine PUBLIC
-    pdf_layout
-    pdf_cache
-    Qt6::Core
-    Qt6::Gui
-    pdfium
-)
-
 # Burn-in redaction engine (see docs/REDACTION.md). Pure C++20, PDFium only: no Qt, no UI.
 add_library(pdf_redact STATIC
     include/redact/Redaction.h
@@ -200,6 +169,40 @@ target_link_libraries(pdf_ipc PUBLIC
     pdf_cache
     Qt6::Core
     Qt6::Network
+)
+
+
+# Core engine library
+add_library(pdf_engine STATIC
+    include/engine/IDocument.h
+    include/engine/IPage.h
+    include/engine/PixelBuffer.h
+    include/engine/PageText.h
+    include/engine/SearchTypes.h
+    include/engine/OutlineTypes.h
+    include/engine/RenderWorker.h
+    src/engine/SearchText.h
+    src/engine/SearchText.cpp
+    src/engine/PdfiumDocument.h
+    src/engine/PdfiumDocument.cpp
+    src/engine/PdfiumPage.h
+    src/engine/PdfiumPage.cpp
+    src/engine/RenderWorker.cpp
+)
+
+target_include_directories(pdf_engine PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(pdf_engine PUBLIC
+    pdf_layout
+    pdf_cache
+    pdf_redact
+    pdf_ipc
+    Qt6::Core
+    Qt6::Gui
+    pdfium
 )
 
 # Isolated PDFium rendering engine worker process

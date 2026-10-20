@@ -12,6 +12,8 @@
 #include <QToolBar>
 #include <QToolButton>
 #include <QFileDialog>
+#include <QApplication>
+#include <QMessageBox>
 #include <QSaveFile>
 #include <QStatusBar>
 #include <QMenuBar>
@@ -334,6 +336,16 @@ void MainWindow::connectViewer(PdfViewerWidget* viewer) {
             if (m_findBar) m_findBar->finishSearch(trunc);
         }
     });
+    connect(viewer, &PdfViewerWidget::redactionModeChanged, this, [this, viewer](bool enabled) {
+        if (viewer == currentViewer()) {
+            onRedactionModeChanged(enabled);
+        }
+    });
+    connect(viewer, &PdfViewerWidget::redactionMarksChanged, this, [this, viewer]() {
+        if (viewer == currentViewer()) {
+            onRedactionMarksChanged();
+        }
+    });
 }
 
 void MainWindow::setupActions() {
@@ -384,6 +396,14 @@ void MainWindow::setupActions() {
         if (auto* v = currentViewer()) v->findPrevious();
     });
     findPreviousAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F3));
+
+    editMenu->addSeparator();
+    m_redactToggleAction = editMenu->addAction(tr("&Redact Mode"), this, &MainWindow::toggleRedactionMode);
+    m_redactToggleAction->setCheckable(true);
+    m_redactToggleAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_R));
+    m_markSelectionRedactAction = editMenu->addAction(tr("Mark &Selection for Redaction"), this, &MainWindow::markSelectionForRedaction);
+    m_clearRedactionsAction = editMenu->addAction(tr("Clear Redaction &Marks"), this, &MainWindow::clearRedactionMarks);
+    m_applyRedactionsAction = editMenu->addAction(tr("&Apply and Save Redacted Copy..."), this, &MainWindow::applyAndSaveRedactions);
 
     QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
     m_toggleSidebarAction = viewMenu->addAction(tr("&Sidebar"), this, [this]() {
@@ -479,6 +499,9 @@ void MainWindow::setupActions() {
     toolbar->setMovable(false);
 
     toolbar->addAction(openAction);
+    QAction* redactBtn = toolbar->addAction(tr("🛡️ Redact"), this, &MainWindow::toggleRedactionMode);
+    redactBtn->setCheckable(true);
+    redactBtn->setToolTip(tr("Toggle Burn-in Redaction Mode (Ctrl+Alt+R)"));
     QAction* printToolbarAction = toolbar->addAction(tr("\U0001f5b6 Print"), this, &MainWindow::printDocument);
     printToolbarAction->setToolTip(tr("Print Document (Ctrl+P)"));
     toolbar->addSeparator();
@@ -533,6 +556,17 @@ void MainWindow::setupActions() {
         if (auto* v = currentViewer()) v->rotateCounterClockwise();
     });
     rotateCcwToolbarAction->setToolTip(tr("Rotate Counter-Clockwise (Ctrl+Shift+R)"));
+
+    // Contextual Redaction Toolbar
+    m_redactToolBar = addToolBar(tr("Redaction"));
+    m_redactToolBar->setMovable(false);
+    m_redactStatusLabel = new QLabel(tr(" Redact Mode: Draw boxes or select text to mark "), this);
+    m_redactToolBar->addWidget(m_redactStatusLabel);
+    m_redactToolBar->addAction(m_markSelectionRedactAction);
+    m_redactToolBar->addAction(m_clearRedactionsAction);
+    m_redactToolBar->addSeparator();
+    m_redactToolBar->addAction(m_applyRedactionsAction);
+    m_redactToolBar->hide();
 
     toolbar->addSeparator();
     auto* themeButton = new QToolButton(toolbar);
@@ -776,6 +810,8 @@ void MainWindow::onCurrentTabChanged(int index) {
             m_thumbnailWidget->setCurrentPage(m_viewer->currentPage());
         }
         onOutlineReady(m_viewer->outline());
+        onRedactionModeChanged(m_viewer->isRedactionMode());
+        onRedactionMarksChanged();
     } else {
         setWindowTitle(tr("PDF Reader - Linux Prototype"));
         if (m_pageStatusLabel) {
@@ -1269,6 +1305,146 @@ void MainWindow::onOutlineItemClicked(const QModelIndex& index) {
         m_outlineView->setCurrentIndex(index);
         v->setFocus();
     }
+}
+
+void MainWindow::toggleRedactionMode() {
+    if (auto* v = currentViewer()) {
+        v->toggleRedactionMode();
+    }
+}
+
+void MainWindow::markSelectionForRedaction() {
+    if (auto* v = currentViewer()) {
+        v->markSelectionForRedaction();
+    }
+}
+
+void MainWindow::clearRedactionMarks() {
+    if (auto* v = currentViewer()) {
+        v->clearStagedRedactions();
+    }
+}
+
+void MainWindow::onRedactionModeChanged(bool enabled) {
+    if (m_redactToggleAction) {
+        m_redactToggleAction->setChecked(enabled);
+    }
+    if (m_redactToolBar) {
+        m_redactToolBar->setVisible(enabled);
+    }
+    onRedactionMarksChanged();
+}
+
+void MainWindow::onRedactionMarksChanged() {
+    auto* v = currentViewer();
+    const int count = v ? v->stagedRedactionCount() : 0;
+    if (m_redactStatusLabel) {
+        if (count == 0) {
+            m_redactStatusLabel->setText(tr(" Redact Mode: Click & drag on page, or select text and click 'Mark Selection' "));
+        } else {
+            m_redactStatusLabel->setText(tr(" Redact Mode: %1 mark%2 staged ").arg(count).arg(count == 1 ? "" : "s"));
+        }
+    }
+    if (m_clearRedactionsAction) {
+        m_clearRedactionsAction->setEnabled(count > 0);
+    }
+    if (m_applyRedactionsAction) {
+        m_applyRedactionsAction->setEnabled(count > 0);
+    }
+}
+
+void MainWindow::applyAndSaveRedactions() {
+    auto* viewer = currentViewer();
+    if (!viewer || !viewer->isDocumentOpen() || viewer->pageCount() <= 0) {
+        return;
+    }
+    if (!viewer->hasStagedRedactions()) {
+        QMessageBox::information(this, tr("Redaction"), tr("No redaction marks have been drawn. Click and drag on pages or use 'Mark Selection' first."));
+        return;
+    }
+
+    // Confirmation & Warning Dialog (normative guarantees G8, G9, G10 in docs/REDACTION.md)
+    QMessageBox warningBox(this);
+    warningBox.setIcon(QMessageBox::Warning);
+    warningBox.setWindowTitle(tr("Confirm Burn-in Redaction"));
+    warningBox.setText(tr("<h3>Apply Burn-in Redactions?</h3>"
+                          "<p>Redacted pages will be permanently <b>rasterized into image-only pages</b>. "
+                          "Underlying text, vectors, metadata, and form fields on redacted pages will be destroyed.</p>"
+                          "<p><b>Warning:</b> All digital signatures will be stripped or invalidated. Attachments will be removed.</p>"
+                          "<p>A new sanitized PDF will be written to the chosen destination; your original file is never modified.</p>"));
+    warningBox.setStandardButtons(QMessageBox::Ok | QMessageBox::Cancel);
+    warningBox.setDefaultButton(QMessageBox::Cancel);
+    if (warningBox.exec() != QMessageBox::Ok) {
+        return;
+    }
+
+    QString defaultName = QFileInfo(viewer->currentFilePath()).completeBaseName() + QStringLiteral("_redacted.pdf");
+    QString savePath = QFileDialog::getSaveFileName(
+        this,
+        tr("Save Redacted PDF Copy"),
+        defaultName,
+        tr("PDF Files (*.pdf)")
+    );
+    if (savePath.isEmpty()) {
+        return;
+    }
+    if (!savePath.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
+        savePath += QStringLiteral(".pdf");
+    }
+
+    // Collect redactions
+    std::vector<pdf::ipc::PageRedactionItem> ipcRedactions;
+    for (const auto& [page, rects] : viewer->stagedRedactions()) {
+        pdf::ipc::PageRedactionItem item;
+        item.pageIndex = page;
+        item.rects = rects;
+        ipcRedactions.push_back(std::move(item));
+    }
+
+    statusBar()->showMessage(tr("Applying burn-in redaction in sandboxed worker…"));
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+
+    auto response = viewer->renderWorker().redactDocumentSync(viewer->currentDocumentId(), ipcRedactions, 150.0, 1);
+    QApplication::restoreOverrideCursor();
+
+    if (!response.success) {
+        QMessageBox::critical(this, tr("Redaction Failed"),
+                              tr("Failed to apply redactions:\n%1").arg(response.errorMessage));
+        statusBar()->showMessage(tr("Redaction failed."), 5000);
+        return;
+    }
+
+    QFile outFile(savePath);
+    if (!outFile.open(QIODevice::WriteOnly)) {
+        QMessageBox::critical(this, tr("File Error"),
+                              tr("Cannot write redacted PDF to:\n%1\n\nError: %2").arg(savePath, outFile.errorString()));
+        statusBar()->showMessage(tr("Save failed."), 5000);
+        return;
+    }
+    outFile.write(response.pdfBytes);
+    outFile.close();
+
+    statusBar()->showMessage(tr("Successfully saved redacted copy: %1").arg(savePath), 6000);
+
+    // Summary report dialog
+    QString summary = tr("<p><b>Redacted PDF saved successfully!</b></p>"
+                         "<ul>"
+                         "<li><b>Pages:</b> %1</li>"
+                         "<li><b>Signatures stripped:</b> %2</li>"
+                         "<li><b>Attachments stripped:</b> %3</li>"
+                         "</ul>").arg(response.pageCount)
+                                 .arg(response.sourceSignatureCount)
+                                 .arg(response.sourceAttachmentCount);
+    if (!response.warnings.empty()) {
+        QStringList wList;
+        for (const auto& w : response.warnings) {
+            wList << w;
+        }
+        summary += tr("<p><b>Warnings:</b><br>%1</p>").arg(wList.join(QStringLiteral("<br>")));
+    }
+    QMessageBox::information(this, tr("Redaction Complete"), summary);
+
+    viewer->clearStagedRedactions();
 }
 
 } // namespace ui

@@ -54,6 +54,15 @@ public:
     void requestExtractPages(int64_t documentId, int firstPage, int lastPage);
     QByteArray extractPagesSync(int64_t documentId, int firstPage, int lastPage, int timeoutMs = 60000);
     pdf::PixelBuffer renderPageForPrintSync(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0, int rotation = 0, int timeoutMs = 10000);
+    void requestRedactDocument(int64_t documentId,
+                               const std::vector<PageRedactionItem>& redactions,
+                               double dpi = 150.0,
+                               int edgeGrowPx = 1);
+    RedactDocumentResponse redactDocumentSync(int64_t documentId,
+                                             const std::vector<PageRedactionItem>& redactions,
+                                             double dpi = 150.0,
+                                             int edgeGrowPx = 1,
+                                             int timeoutMs = 60000);
 
 Q_SIGNALS:
     void tileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key,
@@ -74,6 +83,8 @@ Q_SIGNALS:
     void printPageFailed(int64_t documentId, int pageIndex);
     void extractPagesReady(int64_t documentId, int firstPage, int lastPage, const QByteArray& pdfBytes);
     void extractPagesFailed(int64_t documentId, int firstPage, int lastPage);
+    void redactDocumentReady(int64_t documentId, const pdf::ipc::RedactDocumentResponse& response);
+    void redactDocumentFailed(int64_t documentId, const QString& errorMessage);
 
 private Q_SLOTS:
     void onSocketConnected();

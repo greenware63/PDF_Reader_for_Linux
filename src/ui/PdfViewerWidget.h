@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <vector>
+#include <map>
 #include <cstdint>
 #include <unordered_set>
 #include <unordered_map>
@@ -169,6 +170,17 @@ public:
     QString pageLabel(int pageIndex) const;
     const std::vector<QString>& pageLabels() const noexcept { return m_pageLabels; }
     void requestThumbnail(int pageIndex, int targetWidth = 140);
+    // Redaction APIs
+    bool isRedactionMode() const noexcept { return m_redactionMode; }
+    void setRedactionMode(bool enabled);
+    void toggleRedactionMode() { setRedactionMode(!m_redactionMode); }
+    void clearStagedRedactions();
+    bool hasStagedRedactions() const noexcept { return !m_stagedRedactions.empty(); }
+    int stagedRedactionCount() const noexcept;
+    const std::map<int, std::vector<pdf::ipc::RedactRect>>& stagedRedactions() const noexcept { return m_stagedRedactions; }
+    void addStagedRedaction(int pageIndex, const pdf::ipc::RedactRect& rect);
+    void markSelectionForRedaction();
+
 
 Q_SIGNALS:
     void documentLoaded(const QString& title, int pages);
@@ -189,6 +201,8 @@ Q_SIGNALS:
     void colorModeChanged(ui::ColorMode mode);
     void viewModeChanged(layout::ViewMode mode);
     void rotationChanged(int degrees);
+    void redactionModeChanged(bool enabled);
+    void redactionMarksChanged();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -243,6 +257,8 @@ private:
     void drawSelection(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale);
     void drawSearchHighlights(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale);
     void scrollToMatch(const pdf::SearchMatch& match);
+    void drawRedactionOverlays(QPainter& painter, const layout::ViewportRange& visPages,
+                               int64_t scrollDocX, int64_t scrollDocY, double effScale);
 
     QString openErrorMessage(pdf::DocumentError error, const QString& filePath) const;
     void applyOpenedDocument(int64_t newDocumentId, const QString& filePath, const pdf::OpenResult& result);
@@ -317,6 +333,13 @@ private:
     bool m_darkMode{false};
     int m_rotation{0};
     mutable std::unordered_map<pdf::TileKey, QPixmap, pdf::TileKeyHash> m_transformedPixmapCache;
+    // Redaction state
+    bool m_redactionMode{false};
+    std::map<int, std::vector<pdf::ipc::RedactRect>> m_stagedRedactions;
+    bool m_isRedacting{false};
+    int m_redactStartPage{-1};
+    QPointF m_redactStartDocPos;
+    QPointF m_redactCurrentDocPos;
 };
 
 } // namespace ui

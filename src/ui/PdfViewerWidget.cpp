@@ -306,6 +306,9 @@ void PdfViewerWidget::onDocumentOpened(int64_t documentId, pdf::OpenResult resul
 }
 
 void PdfViewerWidget::closeDocument() {
+    clearStagedRedactions();
+    m_isRedacting = false;
+    m_redactStartPage = -1;
     m_workerErrorMessage.clear();
     cancelPendingOpen();
     // Close document and page cache serially on worker thread
@@ -1465,6 +1468,19 @@ void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
         const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(event->position().x() * dpr));
         const int64_t docY = m_docScrollY + static_cast<int64_t>(std::round(event->position().y() * dpr));
 
+        if (m_redactionMode) {
+            int page = m_layout.getPageAt(docX, docY);
+            if (page >= 0) {
+                m_isRedacting = true;
+                m_redactStartPage = page;
+                m_redactStartDocPos = QPointF(static_cast<qreal>(docX), static_cast<qreal>(docY));
+                m_redactCurrentDocPos = m_redactStartDocPos;
+                viewport()->update();
+                event->accept();
+                return;
+            }
+        }
+
         int page = m_layout.getPageAt(docX, docY);
         if (page >= 0) {
             double px = 0.0, py = 0.0;
@@ -1490,6 +1506,15 @@ void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
+    if (m_isRedacting && isDocumentOpen()) {
+        const double dpr = effectiveDpr();
+        const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(event->position().x() * dpr));
+        const int64_t docY = m_docScrollY + static_cast<int64_t>(std::round(event->position().y() * dpr));
+        m_redactCurrentDocPos = QPointF(static_cast<qreal>(docX), static_cast<qreal>(docY));
+        viewport()->update();
+        event->accept();
+        return;
+    }
     if (m_isSelecting && isDocumentOpen()) {
         const double dpr = effectiveDpr();
         const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(event->position().x() * dpr));
@@ -1584,6 +1609,31 @@ void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void PdfViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton && m_isRedacting) {
+        m_isRedacting = false;
+        const int page = m_redactStartPage;
+        if (page >= 0 && isDocumentOpen()) {
+            const auto& pl = m_layout.getPageLayout(page);
+            const double effScale = m_layout.currentScale() * m_layout.currentDpr();
+            if (effScale > 0.0) {
+                double x0 = (std::min(m_redactStartDocPos.x(), m_redactCurrentDocPos.x()) - static_cast<double>(pl.leftPixel)) / effScale;
+                double y0 = (std::min(m_redactStartDocPos.y(), m_redactCurrentDocPos.y()) - static_cast<double>(pl.topPixel)) / effScale;
+                double x1 = (std::max(m_redactStartDocPos.x(), m_redactCurrentDocPos.x()) - static_cast<double>(pl.leftPixel)) / effScale;
+                double y1 = (std::max(m_redactStartDocPos.y(), m_redactCurrentDocPos.y()) - static_cast<double>(pl.topPixel)) / effScale;
+                x0 = std::max(0.0, std::min(pl.widthPoints, x0));
+                y0 = std::max(0.0, std::min(pl.heightPoints, y0));
+                x1 = std::max(0.0, std::min(pl.widthPoints, x1));
+                y1 = std::max(0.0, std::min(pl.heightPoints, y1));
+                if ((x1 - x0) >= 3.0 && (y1 - y0) >= 3.0) {
+                    addStagedRedaction(page, pdf::ipc::RedactRect{x0, y0, x1, y1});
+                }
+            }
+        }
+        m_redactStartPage = -1;
+        viewport()->update();
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::LeftButton && m_isSelecting) {
         m_isSelecting = false;
         if (m_selectionStart == m_selectionEnd) {
@@ -1952,9 +2002,156 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
         }
     }
 
+    // 7. Draw staged redactions and active redaction rubber-band
+    if (visPages.isValid()) {
+        const double effScale = qScale * qDpr;
+        drawRedactionOverlays(painter, visPages, scrollDocX, scrollDocY, effScale);
+    }
+
     painter.restore();
 
     drawLoadingOverlay(painter);
+}
+
+void PdfViewerWidget::setRedactionMode(bool enabled) {
+    if (m_redactionMode == enabled) {
+        return;
+    }
+    m_redactionMode = enabled;
+    if (m_redactionMode) {
+        clearSelection();
+    }
+    viewport()->setCursor(m_redactionMode ? Qt::CrossCursor : Qt::IBeamCursor);
+    viewport()->update();
+    Q_EMIT redactionModeChanged(m_redactionMode);
+}
+
+void PdfViewerWidget::clearStagedRedactions() {
+    if (m_stagedRedactions.empty()) {
+        return;
+    }
+    m_stagedRedactions.clear();
+    viewport()->update();
+    Q_EMIT redactionMarksChanged();
+}
+
+int PdfViewerWidget::stagedRedactionCount() const noexcept {
+    int count = 0;
+    for (const auto& [_, rects] : m_stagedRedactions) {
+        count += static_cast<int>(rects.size());
+    }
+    return count;
+}
+
+void PdfViewerWidget::addStagedRedaction(int pageIndex, const pdf::ipc::RedactRect& rect) {
+    if (pageIndex < 0 || pageIndex >= m_pageCount) {
+        return;
+    }
+    pdf::ipc::RedactRect norm{
+        std::min(rect.left, rect.right),
+        std::min(rect.top, rect.bottom),
+        std::max(rect.left, rect.right),
+        std::max(rect.top, rect.bottom)
+    };
+    if (norm.width() <= 0.0 || norm.height() <= 0.0) {
+        return;
+    }
+    m_stagedRedactions[pageIndex].push_back(norm);
+    viewport()->update();
+    Q_EMIT redactionMarksChanged();
+}
+
+void PdfViewerWidget::markSelectionForRedaction() {
+    if (!hasSelection()) {
+        return;
+    }
+    bool forward = (m_selectionStart.pageIndex < m_selectionEnd.pageIndex) ||
+                   (m_selectionStart.pageIndex == m_selectionEnd.pageIndex && m_selectionStart.charIndex <= m_selectionEnd.charIndex);
+    int p0 = forward ? m_selectionStart.pageIndex : m_selectionEnd.pageIndex;
+    int p1 = forward ? m_selectionEnd.pageIndex : m_selectionStart.pageIndex;
+    int c0 = forward ? m_selectionStart.charIndex : m_selectionEnd.charIndex;
+    int c1 = forward ? m_selectionEnd.charIndex : m_selectionStart.charIndex;
+
+    bool addedAny = false;
+    for (int p = p0; p <= p1; ++p) {
+        auto it = m_pageTextCache.find(p);
+        if (it == m_pageTextCache.end() || !it->second) {
+            continue;
+        }
+        const auto& pt = *it->second;
+        int startChar = (p == p0) ? c0 : 0;
+        int endChar = (p == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
+        auto rects = pt.getSelectionRects(startChar, endChar);
+        const auto& pl = m_layout.getPageLayout(p);
+        for (const auto& r : rects) {
+            double px = 0.0, py = 0.0, pw = 0.0, ph = 0.0;
+            rotateRectPointsForDisplay(r, pl.widthPoints, pl.heightPoints, m_rotation, px, py, pw, ph);
+            pdf::ipc::RedactRect redactRect{
+                std::min(px, px + pw),
+                std::min(py, py + ph),
+                std::max(px, px + pw),
+                std::max(py, py + ph)
+            };
+            m_stagedRedactions[p].push_back(redactRect);
+            addedAny = true;
+        }
+    }
+    clearSelection();
+    if (addedAny) {
+        viewport()->update();
+        Q_EMIT redactionMarksChanged();
+    }
+}
+
+void PdfViewerWidget::drawRedactionOverlays(QPainter& painter, const layout::ViewportRange& visPages,
+                                           int64_t scrollDocX, int64_t scrollDocY, double effScale) {
+    if (!visPages.isValid() || effScale <= 0.0) {
+        return;
+    }
+
+    // Draw committed staged redactions
+    for (int p = visPages.firstVisiblePage; p <= visPages.lastVisiblePage; ++p) {
+        auto it = m_stagedRedactions.find(p);
+        if (it == m_stagedRedactions.end() || it->second.empty()) {
+            continue;
+        }
+        const auto& pl = m_layout.getPageLayout(p);
+        for (const auto& r : it->second) {
+            const qreal rx = static_cast<qreal>(static_cast<double>(pl.leftPixel - scrollDocX) + r.left * effScale);
+            const qreal ry = static_cast<qreal>(static_cast<double>(pl.topPixel - scrollDocY) + r.top * effScale);
+            const qreal rw = static_cast<qreal>(r.width() * effScale);
+            const qreal rh = static_cast<qreal>(r.height() * effScale);
+            QRectF box(rx, ry, rw, rh);
+
+            // Semi-opaque dark mask
+            painter.fillRect(box, QColor(0, 0, 0, 190));
+            // Crimson red boundary
+            QPen pen(QColor(220, 20, 60), 2);
+            painter.setPen(pen);
+            painter.drawRect(box);
+
+            // Small badge when box is sufficiently large
+            if (rw >= 40.0 && rh >= 16.0) {
+                painter.setFont(QFont(QStringLiteral("Arial"), 8, QFont::Bold));
+                painter.setPen(QColor(255, 255, 255, 230));
+                painter.drawText(box, Qt::AlignCenter, QStringLiteral("REDACT"));
+            }
+        }
+    }
+
+    // Draw active drag rubber-band
+    if (m_isRedacting && m_redactStartPage >= 0) {
+        const qreal rx = static_cast<qreal>(std::min(m_redactStartDocPos.x(), m_redactCurrentDocPos.x()) - static_cast<double>(scrollDocX));
+        const qreal ry = static_cast<qreal>(std::min(m_redactStartDocPos.y(), m_redactCurrentDocPos.y()) - static_cast<double>(scrollDocY));
+        const qreal rw = static_cast<qreal>(std::abs(m_redactCurrentDocPos.x() - m_redactStartDocPos.x()));
+        const qreal rh = static_cast<qreal>(std::abs(m_redactCurrentDocPos.y() - m_redactStartDocPos.y()));
+        QRectF dragBox(rx, ry, rw, rh);
+
+        painter.fillRect(dragBox, QColor(220, 20, 60, 70));
+        QPen dragPen(QColor(220, 20, 60), 2, Qt::DashLine);
+        painter.setPen(dragPen);
+        painter.drawRect(dragBox);
+    }
 }
 
 } // namespace ui

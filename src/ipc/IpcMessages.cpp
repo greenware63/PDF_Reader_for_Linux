@@ -872,4 +872,145 @@ QDataStream& operator>>(QDataStream& in, ExtractPagesFailedResponse& res) {
     return in;
 }
 
+// RedactRect
+QDataStream& operator<<(QDataStream& out, const RedactRect& r) {
+    out << r.left << r.top << r.right << r.bottom;
+    return out;
+}
+QDataStream& operator>>(QDataStream& in, RedactRect& r) {
+    in >> r.left >> r.top >> r.right >> r.bottom;
+    return in;
+}
+
+// PageRedactionItem
+QDataStream& operator<<(QDataStream& out, const PageRedactionItem& item) {
+    out << static_cast<qint32>(item.pageIndex) << static_cast<quint32>(item.rects.size());
+    for (const auto& r : item.rects) {
+        out << r;
+    }
+    return out;
+}
+QDataStream& operator>>(QDataStream& in, PageRedactionItem& item) {
+    qint32 pageIdx = 0;
+    quint32 count = 0;
+    in >> pageIdx >> count;
+    item.pageIndex = pageIdx;
+    if (count > 100000) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    item.rects.clear();
+    item.rects.reserve(count);
+    for (quint32 i = 0; i < count; ++i) {
+        RedactRect r;
+        in >> r;
+        item.rects.push_back(r);
+    }
+    return in;
+}
+
+// RedactDocumentRequest
+QDataStream& operator<<(QDataStream& out, const RedactDocumentRequest& req) {
+    out << static_cast<qint64>(req.documentId)
+        << static_cast<quint32>(req.redactions.size());
+    for (const auto& item : req.redactions) {
+        out << item;
+    }
+    out << req.dpi << static_cast<qint32>(req.edgeGrowPx);
+    return out;
+}
+QDataStream& operator>>(QDataStream& in, RedactDocumentRequest& req) {
+    qint64 docId = 0;
+    quint32 count = 0;
+    in >> docId >> count;
+    req.documentId = docId;
+    if (count > 10000) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    req.redactions.clear();
+    req.redactions.reserve(count);
+    for (quint32 i = 0; i < count; ++i) {
+        PageRedactionItem item;
+        in >> item;
+        req.redactions.push_back(std::move(item));
+    }
+    qint32 eg = 0;
+    in >> req.dpi >> eg;
+    req.edgeGrowPx = eg;
+    return in;
+}
+
+// RedactDocumentResponse
+QDataStream& operator<<(QDataStream& out, const RedactDocumentResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << res.success
+        << res.errorMessage
+        << res.pdfBytes
+        << static_cast<qint32>(res.pageCount)
+        << static_cast<qint32>(res.sourceSignatureCount)
+        << static_cast<qint32>(res.sourceAttachmentCount)
+        << res.sourceWasEncrypted;
+
+    out << static_cast<quint32>(res.warnings.size());
+    for (const auto& w : res.warnings) {
+        out << w;
+    }
+    out << static_cast<quint32>(res.verification.size());
+    for (const auto& v : res.verification) {
+        out << v;
+    }
+    return out;
+}
+QDataStream& operator>>(QDataStream& in, RedactDocumentResponse& res) {
+    qint64 docId = 0;
+    qint32 pc = 0, sigs = 0, atts = 0;
+    in >> docId >> res.success >> res.errorMessage >> res.pdfBytes >> pc >> sigs >> atts >> res.sourceWasEncrypted;
+    res.documentId = docId;
+    res.pageCount = pc;
+    res.sourceSignatureCount = sigs;
+    res.sourceAttachmentCount = atts;
+
+    quint32 warnCount = 0;
+    in >> warnCount;
+    if (warnCount > 1000) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    res.warnings.clear();
+    res.warnings.reserve(warnCount);
+    for (quint32 i = 0; i < warnCount; ++i) {
+        QString w;
+        in >> w;
+        res.warnings.push_back(std::move(w));
+    }
+
+    quint32 verifCount = 0;
+    in >> verifCount;
+    if (verifCount > 1000) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    res.verification.clear();
+    res.verification.reserve(verifCount);
+    for (quint32 i = 0; i < verifCount; ++i) {
+        QString v;
+        in >> v;
+        res.verification.push_back(std::move(v));
+    }
+    return in;
+}
+
+// RedactDocumentFailedResponse
+QDataStream& operator<<(QDataStream& out, const RedactDocumentFailedResponse& res) {
+    out << static_cast<qint64>(res.documentId) << res.errorMessage;
+    return out;
+}
+QDataStream& operator>>(QDataStream& in, RedactDocumentFailedResponse& res) {
+    qint64 docId = 0;
+    in >> docId >> res.errorMessage;
+    res.documentId = docId;
+    return in;
+}
+
 } // namespace pdf::ipc

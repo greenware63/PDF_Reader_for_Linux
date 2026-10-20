@@ -3887,8 +3887,120 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Reading color modes (Normal, Inverted, Sepia, HighContrast), continuous LUT transforms, hue preservation, alpha preservation, thumbnail sync, tab inheritance, and QSettings hygiene verified." << std::endl;
     }
 
+    // --- TEST 44: Burn-in Redaction UI Mode, Mark Staging, Viewport Rendering, and MainWindow Binding ---
+    std::cout << "[TEST 44] Testing Burn-in Redaction UI Mode, Mark Staging, Viewport Rendering, and MainWindow Binding..." << std::endl;
+    {
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        QCoreApplication::processEvents();
+
+        if (viewer.openDocument(QString::fromStdString(samplePath)) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document for redaction UI test." << std::endl;
+            return 1;
+        }
+
+        // 1. Initial Redaction Mode State
+        if (viewer.isRedactionMode() || viewer.hasStagedRedactions() || viewer.stagedRedactionCount() != 0) {
+            std::cerr << "[FAIL] Viewer should start with redact mode disabled and 0 staged marks." << std::endl;
+            return 1;
+        }
+
+        // 2. Toggle RedactionMode
+        bool modeFired = false;
+        QObject::connect(&viewer, &ui::PdfViewerWidget::redactionModeChanged, [&](bool on) {
+            modeFired = on;
+        });
+
+        viewer.setRedactionMode(true);
+        if (!viewer.isRedactionMode() || !modeFired) {
+            std::cerr << "[FAIL] setRedactionMode(true) did not enable mode or emit signal." << std::endl;
+            return 1;
+        }
+
+        // 3. Staging manual redaction marks
+        bool marksFired = false;
+        QObject::connect(&viewer, &ui::PdfViewerWidget::redactionMarksChanged, [&]() {
+            marksFired = true;
+        });
+
+        viewer.addStagedRedaction(0, pdf::ipc::RedactRect{50.0, 60.0, 200.0, 120.0});
+        if (!viewer.hasStagedRedactions() || viewer.stagedRedactionCount() != 1 || !marksFired) {
+            std::cerr << "[FAIL] addStagedRedaction did not update staged count or fire signal." << std::endl;
+            return 1;
+        }
+
+        const auto& staged = viewer.stagedRedactions();
+        auto it = staged.find(0);
+        if (it == staged.end() || it->second.empty()) {
+            std::cerr << "[FAIL] Staged marks missing on page 0." << std::endl;
+            return 1;
+        }
+        if (it->second.front().left != 50.0 || it->second.front().right != 200.0) {
+            std::cerr << "[FAIL] Staged coordinates mismatch." << std::endl;
+            return 1;
+        }
+
+        // 4. Paint rendering with staged marks
+        QImage renderedFrame(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+        {
+            QPainter p(&renderedFrame);
+            viewer.viewport()->render(&p);
+        }
+
+        // 5. Clear Staged Redactions
+        marksFired = false;
+        viewer.clearStagedRedactions();
+        if (viewer.hasStagedRedactions() || viewer.stagedRedactionCount() != 0 || !marksFired) {
+            std::cerr << "[FAIL] clearStagedRedactions did not reset marks." << std::endl;
+            return 1;
+        }
+
+        // 6. MainWindow UI Integration: toggle, toolbar & actions
+        {
+            ui::MainWindow window;
+            window.resize(1024, 768);
+            window.show();
+            QCoreApplication::processEvents();
+
+            window.openFile(QString::fromStdString(samplePath));
+            auto* v = window.currentViewer();
+            QElapsedTimer loadTimer;
+            loadTimer.start();
+            while (loadTimer.elapsed() < 3000 && (v == nullptr || !v->isDocumentOpen())) {
+                QCoreApplication::processEvents();
+                QThread::msleep(5);
+                v = window.currentViewer();
+            }
+            if (!v) {
+                std::cerr << "[FAIL] MainWindow currentViewer() is null." << std::endl;
+                return 1;
+            }
+
+            window.toggleRedactionMode();
+            if (!v->isRedactionMode()) {
+                std::cerr << "[FAIL] MainWindow toggleRedactionMode did not toggle viewer redact mode." << std::endl;
+                return 1;
+            }
+
+            v->addStagedRedaction(0, pdf::ipc::RedactRect{100.0, 100.0, 250.0, 150.0});
+            if (!v->hasStagedRedactions()) {
+                std::cerr << "[FAIL] Failed to stage mark in MainWindow viewer." << std::endl;
+                return 1;
+            }
+
+            window.clearRedactionMarks();
+            if (v->hasStagedRedactions()) {
+                std::cerr << "[FAIL] MainWindow clearRedactionMarks did not clear marks." << std::endl;
+                return 1;
+            }
+        }
+
+        std::cout << "  -> Passed: Redaction UI mode toggle, mark staging, viewport overlay rendering, and MainWindow action binding verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 43 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 44 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

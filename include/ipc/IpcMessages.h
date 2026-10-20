@@ -252,6 +252,46 @@ struct ExtractPagesFailedResponse {
     int lastPage{0};
 };
 
+struct RedactRect {
+    double left{0.0};
+    double top{0.0};
+    double right{0.0};
+    double bottom{0.0};
+
+    double width() const noexcept { return right - left; }
+    double height() const noexcept { return bottom - top; }
+};
+
+struct PageRedactionItem {
+    int pageIndex{0};
+    std::vector<RedactRect> rects;
+};
+
+struct RedactDocumentRequest {
+    int64_t documentId{0};
+    std::vector<PageRedactionItem> redactions;
+    double dpi{150.0};
+    int edgeGrowPx{1};
+};
+
+struct RedactDocumentResponse {
+    int64_t documentId{0};
+    bool success{false};
+    QString errorMessage;
+    QByteArray pdfBytes;
+    int pageCount{0};
+    int sourceSignatureCount{0};
+    int sourceAttachmentCount{0};
+    bool sourceWasEncrypted{false};
+    std::vector<QString> warnings;
+    std::vector<QString> verification;
+};
+
+struct RedactDocumentFailedResponse {
+    int64_t documentId{0};
+    QString errorMessage;
+};
+
 // Message stream operators
 QDataStream& operator<<(QDataStream& out, const ExtractPagesRequest& req);
 QDataStream& operator>>(QDataStream& in, ExtractPagesRequest& req);
@@ -259,6 +299,17 @@ QDataStream& operator<<(QDataStream& out, const ExtractPagesResponse& res);
 QDataStream& operator>>(QDataStream& in, ExtractPagesResponse& res);
 QDataStream& operator<<(QDataStream& out, const ExtractPagesFailedResponse& res);
 QDataStream& operator>>(QDataStream& in, ExtractPagesFailedResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const RedactRect& r);
+QDataStream& operator>>(QDataStream& in, RedactRect& r);
+QDataStream& operator<<(QDataStream& out, const PageRedactionItem& item);
+QDataStream& operator>>(QDataStream& in, PageRedactionItem& item);
+QDataStream& operator<<(QDataStream& out, const RedactDocumentRequest& req);
+QDataStream& operator>>(QDataStream& in, RedactDocumentRequest& req);
+QDataStream& operator<<(QDataStream& out, const RedactDocumentResponse& res);
+QDataStream& operator>>(QDataStream& in, RedactDocumentResponse& res);
+QDataStream& operator<<(QDataStream& out, const RedactDocumentFailedResponse& res);
+QDataStream& operator>>(QDataStream& in, RedactDocumentFailedResponse& res);
 
 // Message stream operators
 QDataStream& operator<<(QDataStream& out, const OpenDocumentRequest& req);

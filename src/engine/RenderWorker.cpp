@@ -1,5 +1,8 @@
 ﻿#include "engine/RenderWorker.h"
 #include "engine/SearchText.h"
+#include "redact/Redaction.h"
+#include "ipc/IpcMessages.h"
+#include <QFile>
 #include <QDateTime>
 #include <algorithm>
 
@@ -15,7 +18,8 @@ RenderWorker::RenderWorker(QObject* parent)
     qRegisterMetaType<pdf::SearchMatch>("pdf::SearchMatch");
     qRegisterMetaType<std::vector<pdf::SearchMatch>>("std::vector<pdf::SearchMatch>");
     qRegisterMetaType<pdf::OutlineItem>("pdf::OutlineItem");
-    qRegisterMetaType<std::vector<pdf::OutlineItem>>("std::vector<pdf::OutlineItem>");
+        qRegisterMetaType<std::vector<pdf::OutlineItem>>("std::vector<pdf::OutlineItem>");
+    qRegisterMetaType<pdf::ipc::RedactDocumentResponse>("pdf::ipc::RedactDocumentResponse");
 
     m_thread = std::thread(&RenderWorker::workerLoop, this);
 }
@@ -143,6 +147,8 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_activeDocumentId.store(documentId);
+                m_activeFilePath = filePath;
+                m_activePassword = password;
                 m_queue.clear();
             }
 
@@ -269,6 +275,86 @@ void RenderWorker::requestExtractPages(int64_t documentId, int firstPage, int la
     m_cv.notify_one();
 }
 
+void RenderWorker::requestRedactDocument(int64_t documentId,
+                                         const std::vector<ipc::PageRedactionItem>& redactions,
+                                         double dpi,
+                                         int edgeGrowPx) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load()) {
+        Q_EMIT redactDocumentFailed(documentId, QStringLiteral("Worker is shutting down."));
+        return;
+    }
+    m_controlQueue.push_back({[this, documentId, redactions, dpi, edgeGrowPx]() {
+        noteProgress(ipc::WorkerOp::Redact);
+        struct RedactGuard {
+            RenderWorker* w;
+            ~RedactGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        if (documentId != m_activeDocumentId.load() || m_activeFilePath.empty()) {
+            Q_EMIT redactDocumentFailed(documentId, QStringLiteral("Document is not open or active."));
+            return;
+        }
+
+        QFile file(QString::fromStdString(m_activeFilePath));
+        if (!file.open(QIODevice::ReadOnly)) {
+            Q_EMIT redactDocumentFailed(documentId, QStringLiteral("Cannot read source PDF file: %1").arg(file.errorString()));
+            return;
+        }
+        const QByteArray sourceBytes = file.readAll();
+        file.close();
+
+        std::vector<pdf::redact::PageRedactions> engineRedactions;
+        engineRedactions.reserve(redactions.size());
+        for (const auto& pr : redactions) {
+            pdf::redact::PageRedactions item;
+            item.pageIndex = pr.pageIndex;
+            item.rects.reserve(pr.rects.size());
+            for (const auto& r : pr.rects) {
+                item.rects.push_back(pdf::redact::Rect{r.left, r.top, r.right, r.bottom});
+            }
+            engineRedactions.push_back(std::move(item));
+        }
+
+        pdf::redact::Options opt;
+        opt.dpi = std::clamp(dpi, 72.0, 300.0);
+        opt.edgeGrowPx = std::clamp(edgeGrowPx, 0, 16);
+
+        pdf::redact::Result result = pdf::redact::redactDocument(
+            reinterpret_cast<const uint8_t*>(sourceBytes.constData()),
+            static_cast<size_t>(sourceBytes.size()),
+            m_activePassword,
+            engineRedactions,
+            opt
+        );
+
+        if (!result.ok()) {
+            Q_EMIT redactDocumentFailed(documentId, QString::fromStdString(result.message));
+            return;
+        }
+
+        ipc::RedactDocumentResponse response;
+        response.documentId = documentId;
+        response.success = true;
+        response.errorMessage = QString::fromStdString(result.message);
+        response.pdfBytes = QByteArray(reinterpret_cast<const char*>(result.pdf.data()),
+                                       static_cast<qsizetype>(result.pdf.size()));
+        response.pageCount = result.report.pageCount;
+        response.sourceSignatureCount = result.report.sourceSignatureCount;
+        response.sourceAttachmentCount = result.report.sourceAttachmentCount;
+        response.sourceWasEncrypted = result.report.sourceWasEncrypted;
+        for (const auto& w : result.report.warnings) {
+            response.warnings.push_back(QString::fromStdString(w));
+        }
+        for (const auto& v : result.report.verification) {
+            response.verification.push_back(QString::fromStdString(v));
+        }
+
+        Q_EMIT redactDocumentReady(documentId, response);
+    }});
+    m_cv.notify_one();
+}
+
 void RenderWorker::closeDocumentSync() {
     cancelSearch();
     auto promise = std::make_shared<std::promise<void>>();
@@ -284,6 +370,8 @@ void RenderWorker::closeDocumentSync() {
         m_queue.clear();
         m_outlineQueue.clear();
         m_activeDocumentId.store(0);
+        m_activeFilePath.clear();
+        m_activePassword.clear();
 
         m_controlQueue.push_back({[this, promise]() {
             m_workerPageCache.clear();

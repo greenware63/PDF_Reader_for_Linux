@@ -26,6 +26,11 @@
 
 namespace pdf {
 
+namespace ipc {
+struct PageRedactionItem;
+struct RedactDocumentResponse;
+} // namespace ipc
+
 struct TileRenderRequest {
     int64_t documentId{0};
     uint64_t generation{0};
@@ -104,6 +109,15 @@ public:
      * Delivered via extractPagesReady() or extractPagesFailed().
      */
     void requestExtractPages(int64_t documentId, int firstPage, int lastPage);
+
+    /**
+     * @brief Applies burn-in redactions to the active document and generates a sanitized raster PDF.
+     * Delivered via redactDocumentReady() or redactDocumentFailed().
+     */
+    void requestRedactDocument(int64_t documentId,
+                               const std::vector<ipc::PageRedactionItem>& redactions,
+                               double dpi = 150.0,
+                               int edgeGrowPx = 1);
 
     /**
      * @brief Sets current request generation. Discards queued requests with older generations.
@@ -239,6 +253,9 @@ Q_SIGNALS:
     /// Emitted when a page-range extraction to a standalone PDF completes.
     void extractPagesReady(int64_t documentId, int firstPage, int lastPage, const QByteArray& pdfBytes);
     void extractPagesFailed(int64_t documentId, int firstPage, int lastPage);
+    /// Emitted when burn-in redaction completes.
+    void redactDocumentReady(int64_t documentId, const pdf::ipc::RedactDocumentResponse& response);
+    void redactDocumentFailed(int64_t documentId, const QString& errorMessage);
     /// Emitted when text extraction for a page completes on the worker thread.
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
     /// Emitted when search finds matches on a page.
@@ -269,6 +286,8 @@ private:
 
     std::atomic<bool> m_running{true};
     std::atomic<int64_t> m_activeDocumentId{0};
+    std::string m_activeFilePath;
+    std::string m_activePassword;
     std::atomic<uint64_t> m_currentGeneration{0};
     std::atomic<size_t> m_cachedPageCount{0};
     std::atomic<int> m_testRenderDelayMs{0};

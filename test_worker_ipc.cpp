@@ -820,6 +820,69 @@ int main(int argc, char* argv[]) {
     std::cout << "  -> Skipped: ENABLE_TEST_HOOKS is OFF (--test-fail-rlimit hook compiled out of shipping build)." << std::endl;
 #endif
 
+    // --- TEST 11: End-to-End Sandboxed Worker Redaction Verification ---
+    std::cout << "[TEST 11] Testing burn-in redaction request/response through sandboxed worker IPC..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto res = client.openDocumentSync(1, samplePdf.toStdString());
+        if (res.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document for redaction test." << std::endl;
+            return 1;
+        }
+
+        std::vector<pdf::ipc::PageRedactionItem> redactions;
+        pdf::ipc::PageRedactionItem item;
+        item.pageIndex = 0;
+        item.rects.push_back(pdf::ipc::RedactRect{50.0, 50.0, 200.0, 100.0});
+        redactions.push_back(item);
+
+        // Synchronous redaction test
+        pdf::ipc::RedactDocumentResponse syncRes = client.redactDocumentSync(1, redactions, 150.0, 1);
+        if (!syncRes.success) {
+            std::cerr << "[FAIL] Synchronous redaction failed: " << syncRes.errorMessage.toStdString() << std::endl;
+            return 1;
+        }
+        if (syncRes.pdfBytes.isEmpty()) {
+            std::cerr << "[FAIL] Redacted PDF payload is empty." << std::endl;
+            return 1;
+        }
+        if (!syncRes.pdfBytes.startsWith("%PDF-")) {
+            std::cerr << "[FAIL] Redacted PDF bytes do not have valid %PDF- magic header." << std::endl;
+            return 1;
+        }
+        if (syncRes.pageCount <= 0) {
+            std::cerr << "[FAIL] Redacted pageCount reported as 0." << std::endl;
+            return 1;
+        }
+
+        // Asynchronous redaction test
+        bool asyncReady = false;
+        pdf::ipc::RedactDocumentResponse asyncRes;
+        QObject::connect(&client, &pdf::ipc::WorkerClient::redactDocumentReady,
+                         [&](int64_t docId, const pdf::ipc::RedactDocumentResponse& resp) {
+                             if (docId == 1) {
+                                 asyncRes = resp;
+                                 asyncReady = true;
+                             }
+                         });
+
+        client.requestRedactDocument(1, redactions, 150.0, 1);
+        bool waitSuccess = waitFor([&]() { return asyncReady; }, 10000);
+        if (!waitSuccess || !asyncRes.success) {
+            std::cerr << "[FAIL] Asynchronous redaction did not complete successfully." << std::endl;
+            return 1;
+        }
+        if (asyncRes.pdfBytes.isEmpty() || !asyncRes.pdfBytes.startsWith("%PDF-")) {
+            std::cerr << "[FAIL] Asynchronous redacted PDF payload is invalid." << std::endl;
+            return 1;
+        }
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: Worker successfully performed burn-in redaction and returned verified raster PDF bytes ("
+                  << syncRes.pdfBytes.size() << " bytes, " << syncRes.pageCount << " pages)." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

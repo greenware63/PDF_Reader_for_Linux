@@ -19,6 +19,7 @@ class QStandardItemModel;
 class QStackedWidget;
 class QModelIndex;
 class QMenu;
+class QToolBar;
 
 namespace ui {
 
@@ -99,6 +100,10 @@ public Q_SLOTS:
     void showFindBar();
     void printDocument();
     void exportAsPdf();
+    void toggleRedactionMode();
+    void markSelectionForRedaction();
+    void clearRedactionMarks();
+    void applyAndSaveRedactions();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -113,6 +118,8 @@ private Q_SLOTS:
     void onOutlineReady(const std::vector<pdf::OutlineItem>& outline);
     void onOutlineItemClicked(const QModelIndex& index);
     void onCurrentTabChanged(int index);
+    void onRedactionModeChanged(bool enabled);
+    void onRedactionMarksChanged();
 
 private:
     void setupUi();
@@ -150,6 +157,12 @@ private:
     bool m_darkMode{false};
     layout::ViewMode m_viewMode{layout::ViewMode::Continuous};
     QAction* m_viewModeActions[4]{nullptr, nullptr, nullptr, nullptr};
+    QAction* m_redactToggleAction{nullptr};
+    QToolBar* m_redactToolBar{nullptr};
+    QAction* m_markSelectionRedactAction{nullptr};
+    QAction* m_clearRedactionsAction{nullptr};
+    QAction* m_applyRedactionsAction{nullptr};
+    QLabel* m_redactStatusLabel{nullptr};
 };
 
 } // namespace ui

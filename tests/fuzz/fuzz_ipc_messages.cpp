@@ -125,6 +125,34 @@ void testPayloadWithAllTypes(const uint8_t* data, size_t size) {
         RenderPageResponse msg;
         deserialize(payload, msg);
     }
+    {
+        RenderPageFailedResponse msg;
+        deserialize(payload, msg);
+    }
+    {
+        ExtractPagesRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        ExtractPagesResponse msg;
+        deserialize(payload, msg);
+    }
+    {
+        ExtractPagesFailedResponse msg;
+        deserialize(payload, msg);
+    }
+    {
+        RedactDocumentRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        RedactDocumentResponse msg;
+        deserialize(payload, msg);
+    }
+    {
+        RedactDocumentFailedResponse msg;
+        deserialize(payload, msg);
+    }
 }
 
 } // namespace
@@ -182,6 +210,29 @@ int main(int argc, char* argv[]) {
     {
         WorkerControlRequest req{123, 50, 100, true, true};
         QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        RedactDocumentRequest req;
+        req.documentId = 55;
+        req.dpi = 150.0;
+        req.edgeGrowPx = 2;
+        PageRedactionItem item;
+        item.pageIndex = 0;
+        item.rects.push_back(RedactRect{10.0, 20.0, 100.0, 50.0});
+        req.redactions.push_back(item);
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        RedactDocumentResponse res;
+        res.documentId = 55;
+        res.success = true;
+        res.pdfBytes = QByteArray(512, '%');
+        res.pageCount = 1;
+        res.warnings.push_back(QStringLiteral("Signatures invalidated"));
+        res.verification.push_back(QStringLiteral("Checks passed"));
+        QByteArray b = serialize(res);
         corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
     }
 
