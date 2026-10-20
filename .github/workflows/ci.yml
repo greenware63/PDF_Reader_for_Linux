@@ -32,7 +32,9 @@ jobs:
             ninja-build \
             qt6-base-dev \
             libgl1-mesa-dev \
-            libxkbcommon-dev
+            libxkbcommon-dev \
+            qpdf \
+            poppler-utils
 
       # The fault-injection hooks (watchdog hang/stall, rlimit failure tests) are compiled out of the shipping
       # configuration, and the tests that need them print "Skipped" without them. The three legs below
@@ -50,8 +52,7 @@ jobs:
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DENABLE_TEST_HOOKS=ON \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+            -DENABLE_SANITIZERS=asan
 
       - name: Configure CMake (ThreadSanitizer)
         if: matrix.build_type == 'ThreadSanitizer'
@@ -59,8 +60,7 @@ jobs:
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DENABLE_TEST_HOOKS=ON \
-            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+            -DENABLE_SANITIZERS=tsan
 
       - name: Build Project
         run: cmake --build build
@@ -76,6 +76,8 @@ jobs:
       - name: Run CTest Test Suite
         env:
           QT_QPA_PLATFORM: "offscreen"
+          # Fail instead of silently skipping if qpdf/pdftotext/pdftoppm/pdfsig are missing.
+          REDACT_REQUIRE_WITNESSES: "1"
           ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
           TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1:suppressions=${{ github.workspace }}/ci/tsan_suppressions.txt"
@@ -106,7 +108,9 @@ jobs:
             ninja-build \
             qt6-base-dev \
             libgl1-mesa-dev \
-            libxkbcommon-dev
+            libxkbcommon-dev \
+            qpdf \
+            poppler-utils
 
       - name: Configure with shipping defaults
         run: cmake -B build-shipping -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -127,7 +131,17 @@ jobs:
             fi
           done
 
+      - name: Assert binary hardening (PIE, full RELRO, BIND_NOW)
+        run: |
+          for bin in pdf-reader pdf_worker; do
+            f="build-shipping/$bin"
+            readelf -hW "$f" | grep -q 'Type:.*DYN' || { echo "$bin is not PIE" >&2; exit 1; }
+            readelf -lW "$f" | grep -q 'GNU_RELRO' || { echo "$bin has no RELRO segment" >&2; exit 1; }
+            readelf -dW "$f" | grep -q -E 'BIND_NOW|FLAGS_1.*NOW' || { echo "$bin is not linked -z now" >&2; exit 1; }
+          done
+
       - name: Run CTest (hook-dependent tests skip themselves)
         env:
           QT_QPA_PLATFORM: "offscreen"
+          REDACT_REQUIRE_WITNESSES: "1"
         run: ctest --test-dir build-shipping --output-on-failure
