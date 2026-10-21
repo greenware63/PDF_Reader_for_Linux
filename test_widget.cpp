@@ -1,4 +1,5 @@
-﻿#include "ui/PdfViewerWidget.h"
+﻿#include "TestIsolation.h"
+#include "ui/PdfViewerWidget.h"
 #include "ui/ImageUtils.h"
 #include "ui/MainWindow.h"
 #include "ui/ThumbnailListWidget.h"
@@ -419,6 +420,7 @@ static void generateTextPdf(const std::string& path, const std::string& extraPag
 }
 
 int main(int argc, char* argv[]) {
+    const testsupport::IsolatedUserSettings isolatedSettings; // never touch the real ~/.config/PDFReader
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", "offscreen");
     }
