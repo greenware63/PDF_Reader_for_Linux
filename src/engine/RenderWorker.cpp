@@ -563,7 +563,7 @@ void RenderWorker::waitForIdle() {
     std::unique_lock<std::mutex> lock(m_mutex);
     m_idleCv.wait(lock, [&]() {
         return m_queue.empty() && m_controlQueue.empty() && m_outlineQueue.empty() &&
-               !m_isRendering && !m_isControlRunning && !m_isOutlineRunning &&
+               !m_isRendering && !m_isControlRunning && !m_isOutlineRunning && !m_isSearchRunning &&
                (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages);
     });
 }
@@ -717,6 +717,7 @@ void RenderWorker::workerLoop() {
                 hasOutlineTask = true;
             } else if (hasSearch) {
                 hasSearchTask = true;
+                m_isSearchRunning = true; // cleared by SearchRunGuard on every exit of the search branch
                 searchPageIndex = (m_activeSearch.startPage + m_activeSearch.nextPageToSearch) % m_activeSearch.totalPages;
                 ++m_activeSearch.nextPageToSearch;
                 searchDocId = m_activeSearch.documentId;
@@ -803,6 +804,23 @@ void RenderWorker::workerLoop() {
         }
 
         if (hasSearchTask) {
+            // The page was accounted for (nextPageToSearch) when picked, so the idle predicate alone
+            // would call the worker idle while this page is still being extracted and delivered.
+            // m_isSearchRunning closes that window; the guard clears it on every path out of here
+            // (including the early `continue`s) and wakes waitForIdle().
+            struct SearchRunGuard {
+                RenderWorker* w;
+                ~SearchRunGuard() {
+                    std::lock_guard<std::mutex> lock(w->m_mutex);
+                    w->m_isSearchRunning = false;
+                    if (w->m_queue.empty() && w->m_controlQueue.empty() && w->m_outlineQueue.empty() &&
+                        !w->m_isRendering && !w->m_isControlRunning && !w->m_isOutlineRunning &&
+                        (w->m_activeSearch.searchId == 0 ||
+                         w->m_activeSearch.nextPageToSearch >= w->m_activeSearch.totalPages)) {
+                        w->m_idleCv.notify_all();
+                    }
+                }
+            } searchRunGuard{this};
             noteProgress(ipc::WorkerOp::Search);
             if (!m_running.load() || searchId != m_currentSearchId.load() || searchDocId != m_activeDocumentId.load()) {
                 continue;
