@@ -179,7 +179,9 @@ public:
     int stagedRedactionCount() const noexcept;
     const std::map<int, std::vector<pdf::ipc::RedactRect>>& stagedRedactions() const noexcept { return m_stagedRedactions; }
     void addStagedRedaction(int pageIndex, const pdf::ipc::RedactRect& rect);
-    void markSelectionForRedaction();
+    /// Stages canonical-page-space marks for the current selection. Returns false (staging nothing)
+    /// if the text of any selected page could not be obtained: redaction is never silently partial.
+    bool markSelectionForRedaction();
 
 
 Q_SIGNALS:

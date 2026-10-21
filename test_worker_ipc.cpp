@@ -883,6 +883,79 @@ int main(int argc, char* argv[]) {
                   << syncRes.pdfBytes.size() << " bytes, " << syncRes.pageCount << " pages)." << std::endl;
     }
 
+    // --- TEST 12: A malformed redaction request is answered, never silently dropped ---
+    std::cout << "[TEST 12] Testing that malformed RedactDocumentRequest frames get a failure response..." << std::endl;
+    {
+        const QString badSocket = QStringLiteral("pdf_test_badredact_%1").arg(QCoreApplication::applicationPid());
+        QProcess badWorker;
+        badWorker.start(workerExe, QStringList() << QStringLiteral("--socket") << badSocket);
+        if (!badWorker.waitForStarted(3000)) {
+            std::cerr << "[FAIL] Failed to spawn worker for malformed-request test." << std::endl;
+            return 1;
+        }
+        QLocalSocket bad;
+#ifdef Q_OS_LINUX
+        bad.setSocketOptions(QLocalSocket::AbstractNamespaceOption);
+#endif
+        if (!waitFor([&]() {
+                if (bad.state() != QLocalSocket::ConnectedState && bad.state() != QLocalSocket::ConnectingState) {
+                    bad.connectToServer(badSocket);
+                }
+                return bad.state() == QLocalSocket::ConnectedState;
+            }, 5000)) {
+            std::cerr << "[FAIL] Could not connect to worker for malformed-request test." << std::endl;
+            badWorker.kill();
+            return 1;
+        }
+        QByteArray badIn;
+        QObject::connect(&bad, &QLocalSocket::readyRead, [&]() { badIn.append(bad.readAll()); });
+
+        auto expectFailure = [&](const QByteArray& payload, const char* label) -> bool {
+            badIn.clear();
+            bad.write(pdf::ipc::buildPacket(pdf::ipc::MessageType::RedactDocumentRequest, payload));
+            bad.flush();
+            QByteArray reply;
+            pdf::ipc::MessageType type{};
+            const bool got = waitFor([&]() {
+                if (static_cast<size_t>(badIn.size()) < sizeof(pdf::ipc::PacketHeader)) return false;
+                pdf::ipc::PacketHeader hdr;
+                std::memcpy(&hdr, badIn.constData(), sizeof(hdr));
+                const size_t full = sizeof(hdr) + hdr.payloadSize;
+                if (static_cast<size_t>(badIn.size()) < full) return false;
+                type = static_cast<pdf::ipc::MessageType>(hdr.type);
+                reply = badIn.mid(static_cast<qsizetype>(sizeof(hdr)), static_cast<qsizetype>(hdr.payloadSize));
+                return true;
+            }, 3000);
+            pdf::ipc::RedactDocumentFailedResponse fail;
+            if (!got || type != pdf::ipc::MessageType::RedactDocumentFailedResponse || !pdf::ipc::deserialize(reply, fail) ||
+                fail.errorMessage.isEmpty()) {
+                std::cerr << "[FAIL] Malformed redaction request (" << label << ") got no failure response." << std::endl;
+                return false;
+            }
+            return true;
+        };
+
+        // (a) garbage that cannot even yield a document id
+        bool ok = expectFailure(QByteArray("\x01\x02\x03", 3), "3-byte garbage");
+        // (b) a valid request cut short mid-rectangle: the document id IS parseable (7)
+        pdf::ipc::RedactDocumentRequest req;
+        req.documentId = 7;
+        pdf::ipc::PageRedactionItem item;
+        item.pageIndex = 0;
+        item.rects.push_back(pdf::ipc::RedactRect{1.0, 2.0, 30.0, 40.0});
+        req.redactions.push_back(item);
+        QByteArray truncated = pdf::ipc::serialize(req);
+        truncated.chop(9);
+        ok = ok && expectFailure(truncated, "truncated payload");
+        bad.disconnectFromServer();
+        badWorker.kill();
+        badWorker.waitForFinished(3000);
+        if (!ok) {
+            return 1;
+        }
+        std::cout << "  -> Passed: malformed redaction requests are answered with RedactDocumentFailedResponse." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

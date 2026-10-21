@@ -292,6 +292,10 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             ipc::RedactDocumentRequest req;
             if (ipc::deserialize(payload, req)) {
                 m_engineWorker.requestRedactDocument(req.documentId, req.redactions, req.dpi, req.edgeGrowPx);
+            } else {
+                // Never drop a malformed request silently: the client would wait out its whole timeout.
+                // documentId is 0 when it could not even be parsed; the client treats 0 as "any".
+                onRedactDocumentFailed(req.documentId, QStringLiteral("Malformed redaction request rejected by worker."));
             }
             break;
         }
