@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
+#include <filesystem>
 #include <iostream>
 
 #ifdef __linux__
@@ -41,16 +42,27 @@ int main(int argc, char** argv) {
     check(ui::safety::isSameFile(src, src), "same path");
     check(ui::safety::isSameFile(src, dir + "/./doc.pdf"), "same path with ./ component");
     check(ui::safety::isSameFile(src, dir + "/../" + QDir(dir).dirName() + "/doc.pdf"), "same path via ..");
+
 #ifdef Q_OS_UNIX
-    if (QFile::link(src, dir + "/symlink.pdf")) {
-        check(ui::safety::isSameFile(src, dir + "/symlink.pdf"), "symlink to the source");
+    const QString symlink = dir + "/symlink.pdf";
+    const bool symlinkCreated = QFile::link(src, symlink);
+    check(symlinkCreated, "creates symlink to the source");
+    if (symlinkCreated) {
+        check(ui::safety::isSameFile(src, symlink), "symlink to the source");
     }
 #endif
-#ifdef __linux__
-    check(::link(QFile::encodeName(src).constData(), QFile::encodeName(dir + "/hard.pdf").constData()) == 0 &&
-              ui::safety::isSameFile(src, dir + "/hard.pdf"),
-          "hard link to the source");
+
+    std::error_code hardEc;
+#ifdef Q_OS_WIN
+    std::filesystem::create_hard_link(src.toStdWString(), (dir + "/hard.pdf").toStdWString(), hardEc);
+#else
+    std::filesystem::create_hard_link(QFile::encodeName(src).constData(), QFile::encodeName(dir + "/hard.pdf").constData(), hardEc);
 #endif
+    check(!hardEc, "creates hard link to the source");
+    if (!hardEc) {
+        check(ui::safety::isSameFile(src, dir + "/hard.pdf"), "hard link to the source");
+    }
+
     writeRaw(dir + "/other.pdf", "OTHER");
     check(!ui::safety::isSameFile(src, dir + "/other.pdf"), "different existing file");
     check(!ui::safety::isSameFile(src, dir + "/new_redacted.pdf"), "destination that does not exist yet");
