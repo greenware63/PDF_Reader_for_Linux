@@ -78,7 +78,7 @@ jobs:
           QT_QPA_PLATFORM: "offscreen"
           # Fail instead of silently skipping if qpdf/pdftotext/pdftoppm/pdfsig are missing.
           REDACT_REQUIRE_WITNESSES: "1"
-          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1"
+          ASAN_OPTIONS: "detect_leaks=1:abort_on_error=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
           TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1:suppressions=${{ github.workspace }}/ci/tsan_suppressions.txt"
         run: |
