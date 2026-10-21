@@ -17,6 +17,7 @@
 // Cases (each at 0/90/180/270): drag a box, select text then mark the selection, and mark at one
 // rotation then rotate the view before applying (marks must stay glued to the page, not the view).
 
+#include "TestIsolation.h"
 #include "ui/PdfViewerWidget.h"
 #include "ipc/WorkerClient.h"
 
@@ -268,6 +269,7 @@ bool runCase(const QString& samplePdf, const IRect& srcInk, int rot, Mode mode, 
 } // namespace
 
 int main(int argc, char** argv) {
+    const testsupport::IsolatedUserSettings isolatedSettings; // never touch the real ~/.config/PDFReader
     QApplication app(argc, argv);
     const QString sample = (argc > 1) ? QString::fromLocal8Bit(argv[1]) : QStringLiteral("sample.pdf");
 

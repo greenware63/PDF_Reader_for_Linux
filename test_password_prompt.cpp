@@ -1,3 +1,4 @@
+#include "TestIsolation.h"
 #include "ui/MainWindow.h"
 #include <QApplication>
 #include <QAction>
@@ -15,6 +16,7 @@
 #include <iostream>
 
 int main(int argc, char* argv[]) {
+    const testsupport::IsolatedUserSettings isolatedSettings; // never touch the real ~/.config/PDFReader
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", "offscreen");
     }

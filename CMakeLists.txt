@@ -308,6 +308,7 @@ add_executable(test_widget
 target_include_directories(test_widget PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/support
 )
 
 target_link_libraries(test_widget PRIVATE
@@ -335,6 +336,7 @@ add_executable(test_redaction_rotation
 target_include_directories(test_redaction_rotation PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/support
 )
 target_link_libraries(test_redaction_rotation PRIVATE
     Qt6::Widgets
@@ -368,6 +370,7 @@ add_executable(test_password_prompt
 target_include_directories(test_password_prompt PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/support
 )
 
 target_link_libraries(test_password_prompt PRIVATE
