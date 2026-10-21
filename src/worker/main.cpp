@@ -114,6 +114,16 @@ static bool setWorkerResourceLimit(int resource, rlim_t soft, rlim_t hard, const
 #endif
 #endif
 
+#ifdef PDF_WORKER_ASAN_BUILD
+// LeakSanitizer's exit-time scan stops the world with ptrace() from a cloned tracer
+// process. The worker sandbox kills ptrace() on purpose, so with detect_leaks=1 the
+// tracer dies on SIGSYS and the exiting worker spins forever waiting for it (the
+// client then never sees the process end). The sandbox filter is not weakened for
+// this; instead the worker opts out of LSan's exit scan. Leaks in engine code are
+// still caught by the single-process suites and the UI process under LSan.
+extern "C" __attribute__((used, visibility("default"))) int __lsan_is_turned_off() { return 1; }
+#endif
+
 static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit = false) {
 #ifdef __linux__
     const pid_t parentPid = getppid();
