@@ -33,6 +33,9 @@
 #include <QProgressDialog>
 #include <QPainter>
 #include <cmath>
+#include <QPointer>
+#include <QFileInfo>
+#include "RedactionFileSafety.h"
 
 namespace ui {
 
@@ -156,6 +159,11 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    if (m_redactionBusy) {
+        // A burn-in redaction is waiting on the worker and still holds this window's viewer.
+        event->ignore();
+        return;
+    }
     if (m_docTabs) {
         for (int i = 0; i < m_docTabs->count(); ++i) {
             if (auto* v = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(i))) {
@@ -742,6 +750,9 @@ void MainWindow::closeCurrentTab() {
 }
 
 void MainWindow::closeTab(int index) {
+    if (m_redactionBusy) {
+        return;
+    }
     if (!m_docTabs || index < 0 || index >= m_docTabs->count()) {
         return;
     }
@@ -1315,7 +1326,11 @@ void MainWindow::toggleRedactionMode() {
 
 void MainWindow::markSelectionForRedaction() {
     if (auto* v = currentViewer()) {
-        v->markSelectionForRedaction();
+        if (!v->markSelectionForRedaction() && v->hasSelection()) {
+            QMessageBox::warning(this, tr("Redaction"),
+                                 tr("The text of every selected page could not be loaded, so nothing was marked. "
+                                    "Select a smaller range and try again."));
+        }
     }
 }
 
@@ -1378,18 +1393,25 @@ void MainWindow::applyAndSaveRedactions() {
         return;
     }
 
-    QString defaultName = QFileInfo(viewer->currentFilePath()).completeBaseName() + QStringLiteral("_redacted.pdf");
-    QString savePath = QFileDialog::getSaveFileName(
-        this,
-        tr("Save Redacted PDF Copy"),
-        defaultName,
-        tr("PDF Files (*.pdf)")
-    );
-    if (savePath.isEmpty()) {
-        return;
-    }
-    if (!savePath.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
-        savePath += QStringLiteral(".pdf");
+    const QString sourcePath = viewer->currentFilePath();
+    const QFileInfo sourceInfo(sourcePath);
+
+    const QString defaultName = sourceInfo.completeBaseName() + QStringLiteral("_redacted.pdf");
+    QString savePath;
+    for (;;) {
+        savePath = QFileDialog::getSaveFileName(this, tr("Save Redacted PDF Copy"), defaultName, tr("PDF Files (*.pdf)"));
+        if (savePath.isEmpty()) {
+            return;
+        }
+        if (!savePath.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
+            savePath += QStringLiteral(".pdf");
+        }
+        if (!safety::isSameFile(sourcePath, savePath)) {
+            break;
+        }
+        QMessageBox::warning(this, tr("Choose a Different File"),
+                             tr("The redacted copy cannot replace the original document. "
+                                "Please choose a different file name or folder."));
     }
 
     // Collect redactions
@@ -1401,11 +1423,23 @@ void MainWindow::applyAndSaveRedactions() {
         ipcRedactions.push_back(std::move(item));
     }
 
-    statusBar()->showMessage(tr("Applying burn-in redaction in sandboxed worker…"));
-    QApplication::setOverrideCursor(Qt::WaitCursor);
+    // Everything needed after the wait is captured first: the sync call spins a nested event loop, so
+    // the window is disabled and tab/window closing is refused until it returns (closeTab/closeEvent).
+    const QPointer<PdfViewerWidget> viewerGuard(viewer);
+    const int64_t documentId = viewer->currentDocumentId();
 
-    auto response = viewer->renderWorker().redactDocumentSync(viewer->currentDocumentId(), ipcRedactions, 150.0, 1);
-    QApplication::restoreOverrideCursor();
+    pdf::ipc::RedactDocumentResponse response;
+    {
+        struct BusyGuard {
+            MainWindow* w;
+            explicit BusyGuard(MainWindow* win) : w(win) { w->m_redactionBusy = true; w->setEnabled(false); }
+            ~BusyGuard() { w->setEnabled(true); w->m_redactionBusy = false; }
+        } busy(this);
+        statusBar()->showMessage(tr("Applying burn-in redaction in sandboxed worker…"));
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        response = viewer->renderWorker().redactDocumentSync(documentId, ipcRedactions, 150.0, 1);
+        QApplication::restoreOverrideCursor();
+    }
 
     if (!response.success) {
         QMessageBox::critical(this, tr("Redaction Failed"),
@@ -1414,15 +1448,16 @@ void MainWindow::applyAndSaveRedactions() {
         return;
     }
 
-    QFile outFile(savePath);
-    if (!outFile.open(QIODevice::WriteOnly)) {
+    // All-or-nothing write (see RedactionFileSafety.h): a full disk or I/O error can never leave a
+    // truncated or half-written "redacted" PDF at the destination.
+    QString writeError;
+    if (!safety::writeFileAtomically(savePath, response.pdfBytes, &writeError)) {
         QMessageBox::critical(this, tr("File Error"),
-                              tr("Cannot write redacted PDF to:\n%1\n\nError: %2").arg(savePath, outFile.errorString()));
+                              tr("Failed to write the complete redacted PDF to:\n%1\n\nError: %2\n\nNothing was saved.")
+                                  .arg(savePath, writeError));
         statusBar()->showMessage(tr("Save failed."), 5000);
         return;
     }
-    outFile.write(response.pdfBytes);
-    outFile.close();
 
     statusBar()->showMessage(tr("Successfully saved redacted copy: %1").arg(savePath), 6000);
 
@@ -1444,7 +1479,9 @@ void MainWindow::applyAndSaveRedactions() {
     }
     QMessageBox::information(this, tr("Redaction Complete"), summary);
 
-    viewer->clearStagedRedactions();
+    if (viewerGuard) {
+        viewerGuard->clearStagedRedactions();
+    }
 }
 
 } // namespace ui

@@ -1613,17 +1613,24 @@ void PdfViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
         m_isRedacting = false;
         const int page = m_redactStartPage;
         if (page >= 0 && isDocumentOpen()) {
+            // Marks are stored in canonical page space (unrotated, top-left origin, PDF points), the
+            // space pdf_redact expects. The layout owns the view-rotation transform, so the same
+            // code path is correct at every rotation. Both drag corners are mapped, then normalised.
             const auto& pl = m_layout.getPageLayout(page);
-            const double effScale = m_layout.currentScale() * m_layout.currentDpr();
-            if (effScale > 0.0) {
-                double x0 = (std::min(m_redactStartDocPos.x(), m_redactCurrentDocPos.x()) - static_cast<double>(pl.leftPixel)) / effScale;
-                double y0 = (std::min(m_redactStartDocPos.y(), m_redactCurrentDocPos.y()) - static_cast<double>(pl.topPixel)) / effScale;
-                double x1 = (std::max(m_redactStartDocPos.x(), m_redactCurrentDocPos.x()) - static_cast<double>(pl.leftPixel)) / effScale;
-                double y1 = (std::max(m_redactStartDocPos.y(), m_redactCurrentDocPos.y()) - static_cast<double>(pl.topPixel)) / effScale;
-                x0 = std::max(0.0, std::min(pl.widthPoints, x0));
-                y0 = std::max(0.0, std::min(pl.heightPoints, y0));
-                x1 = std::max(0.0, std::min(pl.widthPoints, x1));
-                y1 = std::max(0.0, std::min(pl.heightPoints, y1));
+            double ax = 0.0, ay = 0.0, bx = 0.0, by = 0.0;
+            const auto toDoc = [](const QPointF& p, int64_t& dx, int64_t& dy) {
+                dx = static_cast<int64_t>(std::llround(p.x()));
+                dy = static_cast<int64_t>(std::llround(p.y()));
+            };
+            int64_t sx = 0, sy = 0, ex = 0, ey = 0;
+            toDoc(m_redactStartDocPos, sx, sy);
+            toDoc(m_redactCurrentDocPos, ex, ey);
+            if (m_layout.documentToPagePoints(page, sx, sy, ax, ay) &&
+                m_layout.documentToPagePoints(page, ex, ey, bx, by)) {
+                const double x0 = std::max(0.0, std::min(pl.widthPoints, std::min(ax, bx)));
+                const double y0 = std::max(0.0, std::min(pl.heightPoints, std::min(ay, by)));
+                const double x1 = std::max(0.0, std::min(pl.widthPoints, std::max(ax, bx)));
+                const double y1 = std::max(0.0, std::min(pl.heightPoints, std::max(ay, by)));
                 if ((x1 - x0) >= 3.0 && (y1 - y0) >= 3.0) {
                     addStagedRedaction(page, pdf::ipc::RedactRect{x0, y0, x1, y1});
                 }
@@ -2061,9 +2068,9 @@ void PdfViewerWidget::addStagedRedaction(int pageIndex, const pdf::ipc::RedactRe
     Q_EMIT redactionMarksChanged();
 }
 
-void PdfViewerWidget::markSelectionForRedaction() {
-    if (!hasSelection()) {
-        return;
+bool PdfViewerWidget::markSelectionForRedaction() {
+    if (!hasSelection() || !isDocumentOpen()) {
+        return false;
     }
     bool forward = (m_selectionStart.pageIndex < m_selectionEnd.pageIndex) ||
                    (m_selectionStart.pageIndex == m_selectionEnd.pageIndex && m_selectionStart.charIndex <= m_selectionEnd.charIndex);
@@ -2072,28 +2079,41 @@ void PdfViewerWidget::markSelectionForRedaction() {
     int c0 = forward ? m_selectionStart.charIndex : m_selectionEnd.charIndex;
     int c1 = forward ? m_selectionEnd.charIndex : m_selectionStart.charIndex;
 
-    bool addedAny = false;
+    // Redaction must never be silently partial: every page in the range needs its text. Pages the
+    // LRU text cache evicted (or that are still in flight) are fetched synchronously; if any page
+    // still cannot be obtained, nothing is staged and the caller is told.
+    std::vector<std::pair<int, std::shared_ptr<const pdf::PageText>>> texts;
     for (int p = p0; p <= p1; ++p) {
         auto it = m_pageTextCache.find(p);
-        if (it == m_pageTextCache.end() || !it->second) {
-            continue;
+        std::shared_ptr<const pdf::PageText> pt;
+        if (it != m_pageTextCache.end() && it->second) {
+            pt = it->second;
+        } else {
+            pt = m_renderWorker.getPageTextSync(m_currentDocumentId, p);
+            if (!pt) {
+                return false;
+            }
         }
-        const auto& pt = *it->second;
-        int startChar = (p == p0) ? c0 : 0;
-        int endChar = (p == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
-        auto rects = pt.getSelectionRects(startChar, endChar);
-        const auto& pl = m_layout.getPageLayout(p);
-        for (const auto& r : rects) {
-            double px = 0.0, py = 0.0, pw = 0.0, ph = 0.0;
-            rotateRectPointsForDisplay(r, pl.widthPoints, pl.heightPoints, m_rotation, px, py, pw, ph);
-            pdf::ipc::RedactRect redactRect{
-                std::min(px, px + pw),
-                std::min(py, py + ph),
-                std::max(px, px + pw),
-                std::max(py, py + ph)
+        texts.emplace_back(p, std::move(pt));
+    }
+
+    bool addedAny = false;
+    for (const auto& [p, ptr] : texts) {
+        const auto& pt = *ptr;
+        const int startChar = (p == p0) ? c0 : 0;
+        const int endChar = (p == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
+        // Selection rectangles are already canonical page points (unrotated, top-left origin).
+        for (const auto& r : pt.getSelectionRects(startChar, endChar)) {
+            pdf::ipc::RedactRect rr{
+                std::min(r.left, r.right),
+                std::min(r.top, r.bottom),
+                std::max(r.left, r.right),
+                std::max(r.top, r.bottom)
             };
-            m_stagedRedactions[p].push_back(redactRect);
-            addedAny = true;
+            if (rr.width() > 0.0 && rr.height() > 0.0) {
+                m_stagedRedactions[p].push_back(rr);
+                addedAny = true;
+            }
         }
     }
     clearSelection();
@@ -2101,6 +2121,7 @@ void PdfViewerWidget::markSelectionForRedaction() {
         viewport()->update();
         Q_EMIT redactionMarksChanged();
     }
+    return true;
 }
 
 void PdfViewerWidget::drawRedactionOverlays(QPainter& painter, const layout::ViewportRange& visPages,
@@ -2115,12 +2136,17 @@ void PdfViewerWidget::drawRedactionOverlays(QPainter& painter, const layout::Vie
         if (it == m_stagedRedactions.end() || it->second.empty()) {
             continue;
         }
-        const auto& pl = m_layout.getPageLayout(p);
         for (const auto& r : it->second) {
-            const qreal rx = static_cast<qreal>(static_cast<double>(pl.leftPixel - scrollDocX) + r.left * effScale);
-            const qreal ry = static_cast<qreal>(static_cast<double>(pl.topPixel - scrollDocY) + r.top * effScale);
-            const qreal rw = static_cast<qreal>(r.width() * effScale);
-            const qreal rh = static_cast<qreal>(r.height() * effScale);
+            // Canonical page points -> document pixels under the current view rotation.
+            int64_t d0x = 0, d0y = 0, d1x = 0, d1y = 0;
+            if (!m_layout.pagePointsToDocument(p, r.left, r.top, d0x, d0y) ||
+                !m_layout.pagePointsToDocument(p, r.right, r.bottom, d1x, d1y)) {
+                continue;
+            }
+            const qreal rx = static_cast<qreal>(std::min(d0x, d1x) - scrollDocX);
+            const qreal ry = static_cast<qreal>(std::min(d0y, d1y) - scrollDocY);
+            const qreal rw = static_cast<qreal>(std::max(d0x, d1x) - std::min(d0x, d1x));
+            const qreal rh = static_cast<qreal>(std::max(d0y, d1y) - std::min(d0y, d1y));
             QRectF box(rx, ry, rw, rh);
 
             // Semi-opaque dark mask

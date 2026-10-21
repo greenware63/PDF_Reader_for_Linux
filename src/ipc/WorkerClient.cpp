@@ -553,7 +553,8 @@ RedactDocumentResponse WorkerClient::redactDocumentSync(int64_t documentId,
 
     const auto failConn = connect(this, &WorkerClient::redactDocumentFailed, &loop,
         [&](int64_t docId, const QString& error) {
-            if (docId == documentId) {
+            // docId 0: the worker could not parse the request far enough to know which document.
+            if (docId == documentId || docId == 0) {
                 result.documentId = docId;
                 result.success = false;
                 result.errorMessage = error;

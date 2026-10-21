@@ -320,6 +320,39 @@ if(ENABLE_TEST_HOOKS)
     target_compile_definitions(test_widget PRIVATE PDF_WORKER_TEST_HOOKS=1)
 endif()
 
+# Pixel-level end-to-end test: real widget + real sandboxed worker + pdftoppm witness.
+add_executable(test_redaction_rotation
+    tests/ui/test_redaction_rotation.cpp
+    src/ui/ColorMode.h
+    src/ui/FindBar.h
+    src/ui/FindBar.cpp
+    src/ui/ThumbnailListWidget.h
+    src/ui/ThumbnailListWidget.cpp
+    src/ui/MainWindow.h
+    src/ui/MainWindow.cpp
+    src/ui/PdfViewerWidget.cpp
+)
+target_include_directories(test_redaction_rotation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(test_redaction_rotation PRIVATE
+    Qt6::Widgets
+    Qt6::PrintSupport
+    pdf_engine
+    pdf_ipc
+)
+
+# Unit tests for the redaction save guards (never overwrite the source; atomic all-or-nothing write).
+add_executable(test_redaction_file_safety
+    tests/ui/test_redaction_file_safety.cpp
+    src/ui/RedactionFileSafety.h
+)
+target_include_directories(test_redaction_file_safety PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(test_redaction_file_safety PRIVATE Qt6::Core)
+
 # Headless tests for the encrypted-PDF password prompt workflow.
 add_executable(test_password_prompt
     test_password_prompt.cpp
@@ -416,6 +449,14 @@ add_test(
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/encrypted.pdf"
 )
 
+add_test(
+    NAME RedactionRotationTestSuite
+    COMMAND test_redaction_rotation "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
+)
+add_test(
+    NAME RedactionFileSafetyTestSuite
+    COMMAND test_redaction_file_safety
+)
 add_test(
     NAME WorkerIpcTestSuite
     COMMAND test_worker_ipc "$<TARGET_FILE:pdf_worker>" "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"

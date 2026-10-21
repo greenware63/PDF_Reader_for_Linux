@@ -163,6 +163,7 @@ private:
     QAction* m_clearRedactionsAction{nullptr};
     QAction* m_applyRedactionsAction{nullptr};
     QLabel* m_redactStatusLabel{nullptr};
+    bool m_redactionBusy{false};
 };
 
 } // namespace ui
