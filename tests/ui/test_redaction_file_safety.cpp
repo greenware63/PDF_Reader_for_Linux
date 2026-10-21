@@ -7,9 +7,11 @@
 #include <QTemporaryDir>
 #include <iostream>
 
+#ifdef __linux__
 #include <sys/resource.h>
 #include <signal.h>
 #include <unistd.h>
+#endif
 
 namespace {
 int g_failures = 0;
@@ -39,11 +41,16 @@ int main(int argc, char** argv) {
     check(ui::safety::isSameFile(src, src), "same path");
     check(ui::safety::isSameFile(src, dir + "/./doc.pdf"), "same path with ./ component");
     check(ui::safety::isSameFile(src, dir + "/../" + QDir(dir).dirName() + "/doc.pdf"), "same path via ..");
-    QFile::link(src, dir + "/symlink.pdf");
-    check(ui::safety::isSameFile(src, dir + "/symlink.pdf"), "symlink to the source");
+#ifdef Q_OS_UNIX
+    if (QFile::link(src, dir + "/symlink.pdf")) {
+        check(ui::safety::isSameFile(src, dir + "/symlink.pdf"), "symlink to the source");
+    }
+#endif
+#ifdef __linux__
     check(::link(QFile::encodeName(src).constData(), QFile::encodeName(dir + "/hard.pdf").constData()) == 0 &&
               ui::safety::isSameFile(src, dir + "/hard.pdf"),
           "hard link to the source");
+#endif
     writeRaw(dir + "/other.pdf", "OTHER");
     check(!ui::safety::isSameFile(src, dir + "/other.pdf"), "different existing file");
     check(!ui::safety::isSameFile(src, dir + "/new_redacted.pdf"), "destination that does not exist yet");
@@ -56,8 +63,9 @@ int main(int argc, char** argv) {
     check(!ui::safety::writeFileAtomically(dir + "/no_such_dir/x.pdf", "X", &err) && !err.isEmpty(), "fails with a message for an unwritable location");
     check(!QFileInfo::exists(dir + "/no_such_dir"), "  ...and creates nothing");
 
-    // A write that fails part-way (file-size limit) must leave the previous destination intact and no temp file.
+    // A write that fails part-way (file-size limit on Linux) must leave the previous destination intact and no temp file.
     writeRaw(out, "PREVIOUS-GOOD");
+#ifdef __linux__
     signal(SIGXFSZ, SIG_IGN);
     rlimit old{};
     getrlimit(RLIMIT_FSIZE, &old);
@@ -68,6 +76,7 @@ int main(int argc, char** argv) {
     setrlimit(RLIMIT_FSIZE, &old);
     check(failed, "reports failure when the write cannot complete");
     check(readRaw(out) == "PREVIOUS-GOOD", "  ...destination is untouched (no truncation)");
+#endif
     int leftovers = 0;
     for (const auto& n : QDir(dir).entryList(QDir::Files | QDir::Hidden)) {
         if (n != "doc.pdf" && n != "hard.pdf" && n != "other.pdf" && n != "out.pdf" && n != "symlink.pdf") ++leftovers;

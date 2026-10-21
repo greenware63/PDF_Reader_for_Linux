@@ -26,6 +26,7 @@
 #include <QImage>
 #include <QMouseEvent>
 #include <QProcess>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QThread>
 
@@ -59,10 +60,14 @@ void mouse(QWidget* w, QEvent::Type type, QPoint p) {
 }
 
 bool haveTool(const QString& name) {
+#ifdef Q_OS_UNIX
     QProcess p;
     p.start(QStringLiteral("sh"), {QStringLiteral("-c"), QStringLiteral("command -v ") + name});
     p.waitForFinished(5000);
     return p.exitCode() == 0;
+#else
+    return !QStandardPaths::findExecutable(name).isEmpty();
+#endif
 }
 
 bool render72(const QString& pdf, const QString& outBase, QImage& img) {
