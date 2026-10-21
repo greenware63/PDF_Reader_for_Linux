@@ -494,6 +494,12 @@ if(WIN32)
     set_tests_properties(PasswordPromptTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
     )
+    set_tests_properties(RedactionRotationTestSuite PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
+    )
+    set_tests_properties(RedactionFileSafetyTestSuite PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR}"
+    )
     set_tests_properties(WorkerIpcTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
     )
@@ -511,6 +517,7 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION
     target_link_options(pdf_worker PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_worker_ipc PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(fuzz_ipc_messages PRIVATE -Wl,--allow-multiple-definition)
+    target_link_options(test_redaction_rotation PRIVATE -Wl,--allow-multiple-definition)
 endif()
 
 # Deployment & RPATH handling
@@ -533,6 +540,12 @@ if(WIN32)
             "$<TARGET_FILE_DIR:test_password_prompt>"
         COMMENT "Deploying pdfium.dll next to test_password_prompt"
     )
+    add_custom_command(TARGET test_redaction_rotation POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${pdfium_binaries_SOURCE_DIR}/bin/pdfium.dll"
+            "$<TARGET_FILE_DIR:test_redaction_rotation>"
+        COMMENT "Deploying pdfium.dll next to test_redaction_rotation"
+    )
     add_custom_command(TARGET pdf_worker POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${pdfium_binaries_SOURCE_DIR}/bin/pdfium.dll"
@@ -549,6 +562,10 @@ elseif(UNIX AND NOT APPLE)
         INSTALL_RPATH "$ORIGIN/../lib"
     )
     set_target_properties(test_password_prompt PROPERTIES
+        BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../lib"
+    )
+    set_target_properties(test_redaction_rotation PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../lib"
     )
