@@ -3,10 +3,80 @@
 #include "redact/Redaction.h"
 #include "ipc/IpcMessages.h"
 #include <QFile>
+#include <QFileInfo>
 #include <QDateTime>
 #include <algorithm>
 
 namespace pdf {
+
+namespace {
+
+// Best-effort wipe of a secret held in a std::string (volatile writes so the stores are not elided).
+void secureWipe(std::string& s) {
+    if (!s.empty()) {
+        volatile char* p = s.data();
+        for (std::size_t i = 0; i < s.size(); ++i) {
+            p[i] = 0;
+        }
+    }
+    s.clear();
+}
+
+struct LoadedSource {
+    std::unique_ptr<IDocument> doc;
+    std::shared_ptr<const std::vector<uint8_t>> snapshot; // set when the bytes were pinned in memory
+    long long fileSize{-1};      // unpinned only: identity of the file at open time
+    long long fileMtimeMs{0};
+    DocumentError error{DocumentError::Unknown};
+};
+
+LoadedSource loadSource(const std::string& filePath, const std::string& password, unsigned long long maxPinned) {
+    LoadedSource out;
+    out.doc = createDocument();
+
+    const QFileInfo info(QString::fromStdString(filePath));
+    const qint64 size = info.isFile() ? info.size() : -1;
+    if (size > 0 && static_cast<unsigned long long>(size) <= maxPinned) {
+        QFile file(info.filePath());
+        if (file.open(QIODevice::ReadOnly)) {
+            auto buffer = std::make_shared<std::vector<uint8_t>>(static_cast<std::size_t>(size));
+            const qint64 got = file.read(reinterpret_cast<char*>(buffer->data()), size);
+            if (got == size && file.size() == size) {
+                out.snapshot = buffer;
+                out.error = out.doc->loadFromBuffer(out.snapshot, password);
+                return out;
+            }
+        }
+    }
+
+    // Not pinnable (too large, unreadable, or changing while read): open by path, and remember the file's
+    // identity BEFORE loading so a later redaction can detect that it changed.
+    out.fileSize = size;
+    out.fileMtimeMs = info.exists() ? info.lastModified().toMSecsSinceEpoch() : 0;
+    out.error = out.doc->loadFromFile(filePath, password);
+    return out;
+}
+
+} // namespace
+
+void RenderWorker::installActiveSourceLocked(const std::string& filePath, const std::string& password,
+                                             std::shared_ptr<const std::vector<uint8_t>> snapshot,
+                                             long long fileSize, long long fileMtimeMs) {
+    secureWipe(m_activePassword);
+    m_activeFilePath = filePath;
+    m_activePassword = password;
+    m_activeSnapshot = std::move(snapshot);
+    m_activeFileSize = fileSize;
+    m_activeFileMtimeMs = fileMtimeMs;
+}
+
+void RenderWorker::clearActiveSourceLocked() {
+    secureWipe(m_activePassword);
+    m_activeFilePath.clear();
+    m_activeSnapshot.reset();
+    m_activeFileSize = -1;
+    m_activeFileMtimeMs = 0;
+}
 
 RenderWorker::RenderWorker(QObject* parent)
     : QObject(parent)
@@ -38,6 +108,7 @@ void RenderWorker::stop() {
         m_running.store(false);
         m_queue.clear();
         m_controlQueue.clear();
+        clearActiveSourceLocked();
         m_activeSearch.searchId = 0;
         m_cv.notify_all();
         m_idleCv.notify_all();
@@ -70,8 +141,9 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
 
         m_controlQueue.push_back({[this, documentId, oldDocId, savedQueue = std::move(savedQueue), filePath, password, promise]() mutable {
             OpenResult result;
-            auto newDoc = createDocument();
-            auto err = newDoc->loadFromFile(filePath, password);
+            auto loaded = loadSource(filePath, password, m_maxPinnedBytes.load());
+            auto newDoc = std::move(loaded.doc);
+            auto err = loaded.error;
             if (err != DocumentError::None) {
                 // If opening failed, restore previous document ID and queued requests
                 m_activeDocumentId.store(oldDocId);
@@ -87,7 +159,11 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
             }
 
             // Success: safely replace active document and active ID, and purge worker page cache on worker thread
-            m_activeDocumentId.store(documentId);
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_activeDocumentId.store(documentId);
+                installActiveSourceLocked(filePath, password, loaded.snapshot, loaded.fileSize, loaded.fileMtimeMs);
+            }
             m_workerPageCache.clear();
             m_workerPageLru.clear();
             m_cachedPageCount.store(0, std::memory_order_relaxed);
@@ -134,8 +210,9 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
             }
 
             OpenResult result;
-            auto newDoc = createDocument();
-            auto err = newDoc->loadFromFile(filePath, password);
+            auto loaded = loadSource(filePath, password, m_maxPinnedBytes.load());
+            auto newDoc = std::move(loaded.doc);
+            auto err = loaded.error;
             if (err != DocumentError::None) {
                 // Load failed: leave existing document, its page cache, and queued tiles completely untouched
                 result.error = err;
@@ -147,8 +224,7 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_activeDocumentId.store(documentId);
-                m_activeFilePath = filePath;
-                m_activePassword = password;
+                installActiveSourceLocked(filePath, password, loaded.snapshot, loaded.fileSize, loaded.fileMtimeMs);
                 m_queue.clear();
             }
 
@@ -291,18 +367,61 @@ void RenderWorker::requestRedactDocument(int64_t documentId,
             ~RedactGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
         } guard{this};
 
-        if (documentId != m_activeDocumentId.load() || m_activeFilePath.empty()) {
-            Q_EMIT redactDocumentFailed(documentId, QStringLiteral("Document is not open or active."));
-            return;
+        // Take a consistent copy of the active source under the lock (closeDocumentSync clears it from
+        // another thread). Redaction must operate on exactly what was opened and is on screen.
+        std::string sourcePath;
+        std::string password;
+        std::shared_ptr<const std::vector<uint8_t>> snapshot;
+        long long openedSize = -1;
+        long long openedMtimeMs = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (documentId != m_activeDocumentId.load() || (!m_activeSnapshot && m_activeFilePath.empty())) {
+                Q_EMIT redactDocumentFailed(documentId, QStringLiteral("Document is not open or active."));
+                return;
+            }
+            sourcePath = m_activeFilePath;
+            password = m_activePassword;
+            snapshot = m_activeSnapshot;
+            openedSize = m_activeFileSize;
+            openedMtimeMs = m_activeFileMtimeMs;
         }
+        struct PasswordWipe {
+            std::string& s;
+            ~PasswordWipe() { secureWipe(s); }
+        } passwordWipe{password};
 
-        QFile file(QString::fromStdString(m_activeFilePath));
-        if (!file.open(QIODevice::ReadOnly)) {
-            Q_EMIT redactDocumentFailed(documentId, QStringLiteral("Cannot read source PDF file: %1").arg(file.errorString()));
-            return;
+        QByteArray unpinnedBytes;
+        const uint8_t* sourceData = nullptr;
+        std::size_t sourceSize = 0;
+        if (snapshot) {
+            sourceData = snapshot->data();
+            sourceSize = snapshot->size();
+        } else {
+            // Large document opened by path: the bytes on disk are only trustworthy if the file is the
+            // same one that was opened. Refuse rather than redact something other than what is displayed.
+            const QFileInfo info(QString::fromStdString(sourcePath));
+            if (!info.isFile() || info.size() != openedSize ||
+                info.lastModified().toMSecsSinceEpoch() != openedMtimeMs) {
+                Q_EMIT redactDocumentFailed(documentId, QStringLiteral(
+                    "The file changed on disk after it was opened. Reopen it before redacting."));
+                return;
+            }
+            QFile file(info.filePath());
+            if (!file.open(QIODevice::ReadOnly)) {
+                Q_EMIT redactDocumentFailed(documentId, QStringLiteral("Cannot read source PDF file: %1").arg(file.errorString()));
+                return;
+            }
+            unpinnedBytes = file.readAll();
+            file.close();
+            if (unpinnedBytes.size() != openedSize) {
+                Q_EMIT redactDocumentFailed(documentId, QStringLiteral(
+                    "The file changed on disk while it was being read. Reopen it before redacting."));
+                return;
+            }
+            sourceData = reinterpret_cast<const uint8_t*>(unpinnedBytes.constData());
+            sourceSize = static_cast<std::size_t>(unpinnedBytes.size());
         }
-        const QByteArray sourceBytes = file.readAll();
-        file.close();
 
         std::vector<pdf::redact::PageRedactions> engineRedactions;
         engineRedactions.reserve(redactions.size());
@@ -321,9 +440,9 @@ void RenderWorker::requestRedactDocument(int64_t documentId,
         opt.edgeGrowPx = std::clamp(edgeGrowPx, 0, 16);
 
         pdf::redact::Result result = pdf::redact::redactDocument(
-            reinterpret_cast<const uint8_t*>(sourceBytes.constData()),
-            static_cast<size_t>(sourceBytes.size()),
-            m_activePassword,
+            sourceData,
+            sourceSize,
+            password,
             engineRedactions,
             opt
         );
@@ -370,8 +489,7 @@ void RenderWorker::closeDocumentSync() {
         m_queue.clear();
         m_outlineQueue.clear();
         m_activeDocumentId.store(0);
-        m_activeFilePath.clear();
-        m_activePassword.clear();
+        clearActiveSourceLocked();
 
         m_controlQueue.push_back({[this, promise]() {
             m_workerPageCache.clear();

@@ -199,6 +199,9 @@ public:
     bool isEngineProgressing(int64_t maxSilentDurationMs = 5000) const noexcept;
 
 #ifdef PDF_WORKER_TEST_HOOKS
+    /// Test hook: documents larger than this are opened by path instead of being pinned in memory.
+    void setMaxPinnedBytesForTesting(unsigned long long bytes) noexcept { m_maxPinnedBytes.store(bytes); }
+
     /**
      * @brief Test hook: artificially blocks the engine thread to simulate an unresponsive engine.
      */
@@ -286,8 +289,21 @@ private:
 
     std::atomic<bool> m_running{true};
     std::atomic<int64_t> m_activeDocumentId{0};
+    // Source of the active document (all guarded by m_mutex). Opening reads the file ONCE into
+    // m_activeSnapshot and loads PDFium from that same buffer, so what is displayed and what redaction
+    // reads are byte-identical and later changes to the file on disk cannot affect either. Files above
+    // m_maxPinnedBytes are opened by path instead; for those, redaction refuses if the file's size or
+    // modification time changed since it was opened.
     std::string m_activeFilePath;
-    std::string m_activePassword;
+    std::string m_activePassword; // wiped on close/replace; the redactor needs it to decrypt its own copy
+    std::shared_ptr<const std::vector<uint8_t>> m_activeSnapshot;
+    long long m_activeFileSize{-1};
+    long long m_activeFileMtimeMs{0};
+    std::atomic<unsigned long long> m_maxPinnedBytes{512ull * 1024 * 1024};
+    void installActiveSourceLocked(const std::string& filePath, const std::string& password,
+                                   std::shared_ptr<const std::vector<uint8_t>> snapshot,
+                                   long long fileSize, long long fileMtimeMs);
+    void clearActiveSourceLocked();
     std::atomic<uint64_t> m_currentGeneration{0};
     std::atomic<size_t> m_cachedPageCount{0};
     std::atomic<int> m_testRenderDelayMs{0};

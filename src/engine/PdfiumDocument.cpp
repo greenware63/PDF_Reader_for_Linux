@@ -93,10 +93,17 @@ DocumentError PdfiumDocument::loadFromMemory(const void* data, size_t size, cons
         return m_lastError;
     }
 
-    auto bufferCopy = std::make_shared<std::vector<uint8_t>>(
-        static_cast<const uint8_t*>(data),
-        static_cast<const uint8_t*>(data) + size
-    );
+    return loadFromBuffer(std::make_shared<const std::vector<uint8_t>>(
+                              static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size),
+                          password);
+}
+
+DocumentError PdfiumDocument::loadFromBuffer(std::shared_ptr<const std::vector<uint8_t>> bufferCopy,
+                                             const std::string& password) {
+    if (!bufferCopy || bufferCopy->empty()) {
+        m_lastError = DocumentError::InvalidFormat;
+        return m_lastError;
+    }
 
     const char* pwd = password.empty() ? nullptr : password.c_str();
 
