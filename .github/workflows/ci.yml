@@ -88,7 +88,19 @@ jobs:
             # The multi-process suites are covered by the Release and ASan/UBSan jobs.
             ctest --test-dir build --output-on-failure -R "EngineRenderTestSuite|DocumentLayoutTestSuite|TileCacheTestSuite"
           else
-            ctest --test-dir build --output-on-failure
+            ctest --test-dir build --output-on-failure || {
+              rc=$?
+              # Job logs are not always retrievable; surface failing tests as annotations too.
+              if [ -f build/Testing/Temporary/LastTestsFailed.log ]; then
+                for t in $(cut -d: -f2 build/Testing/Temporary/LastTestsFailed.log); do
+                  tail -n 25 build/Testing/Temporary/LastTest.log | tr '\n' ' ' >/dev/null
+                  echo "::error title=ctest failed::$t"
+                done
+                awk '/Test Failed|\[FAIL\]|FAIL|ASSERT|Check failed/ {print "::error title=ctest detail::" $0}' \
+                  build/Testing/Temporary/LastTest.log | head -20
+              fi
+              exit $rc
+            }
           fi
 
   build-shipping:
