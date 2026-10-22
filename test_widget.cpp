@@ -17,6 +17,7 @@
 #include <QThread>
 #include <QElapsedTimer>
 #include <QCoreApplication>
+#include <future>
 #include <QClipboard>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -742,35 +743,69 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Queue generation 1 tile request
+        // Contract under test: setGeneration(g) discards requests that are still QUEUED with an older
+        // generation. A render that is already running is not cancelled, so the test must guarantee the
+        // generation-1 request is still queued when the generation advances. Doing that by racing the
+        // worker thread (enqueue, then setGeneration at once) made this test flaky: whenever the worker
+        // popped the request first, the in-flight tile was legitimately delivered. Instead the worker
+        // thread is parked inside a control task, so the request provably cannot start.
+        std::promise<void> releaseWorker;
+        const std::shared_future<void> released = releaseWorker.get_future().share();
+        std::atomic<bool> parked{false};
+        worker.postHealthCheck([&]() {
+            parked.store(true);
+            released.wait();
+        });
+        for (int i = 0; i < 500 && !parked.load(); ++i) {
+            QThread::msleep(10);
+        }
+        if (!parked.load()) {
+            std::cerr << "[FAIL] Could not park the worker thread for the cancellation test" << std::endl;
+            releaseWorker.set_value();
+            return 1;
+        }
+
+        // Queue generation 1 tile request (worker is parked, so it stays queued)
         auto keyGen1 = pdf::TileKey::create(100, 0, 0, 0, 1.0, 1.0);
         pdf::TileRenderRequest req1{100, 1, 0, {0, 0, 512, 512}, 1.0, 1.0, keyGen1, 10};
         worker.enqueueRequest(req1);
+        if (worker.pendingCount() != 1) {
+            std::cerr << "[FAIL] Generation 1 request was not queued (pendingCount=" << worker.pendingCount() << ")" << std::endl;
+            releaseWorker.set_value();
+            return 1;
+        }
 
         // Cancel generation 1 by advancing to generation 2
         worker.setGeneration(2);
+        if (worker.pendingCount() != 0) {
+            std::cerr << "[FAIL] Generation 1 request was not pruned from the queue (pendingCount=" << worker.pendingCount() << ")" << std::endl;
+            releaseWorker.set_value();
+            return 1;
+        }
 
         // Queue generation 2 tile request
         auto keyGen2 = pdf::TileKey::create(100, 0, 1, 0, 1.0, 1.0);
-        bool gen1Delivered = false;
-        bool gen2Delivered = false;
+        std::atomic<bool> gen1Delivered{false};
+        std::atomic<bool> gen2Delivered{false};
 
-        QObject::connect(&worker, &pdf::RenderWorker::tileReady, [&](int64_t, uint64_t gen, const pdf::TileKey&, const pdf::PixelBuffer&) {
-            if (gen == 1) gen1Delivered = true;
-            if (gen == 2) gen2Delivered = true;
-        });
+        QObject::connect(&worker, &pdf::RenderWorker::tileReady, &worker,
+                         [&](int64_t, uint64_t gen, const pdf::TileKey&, const pdf::PixelBuffer&) {
+            if (gen == 1) gen1Delivered.store(true);
+            if (gen == 2) gen2Delivered.store(true);
+        }, Qt::DirectConnection);
 
         pdf::TileRenderRequest req2{100, 2, 0, {512, 0, 512, 512}, 1.0, 1.0, keyGen2, 10};
         worker.enqueueRequest(req2);
 
+        releaseWorker.set_value();
         worker.waitForIdle();
         QCoreApplication::processEvents();
 
-        if (gen1Delivered) {
+        if (gen1Delivered.load()) {
             std::cerr << "[FAIL] Generation 1 request was not cancelled!" << std::endl;
             return 1;
         }
-        if (!gen2Delivered) {
+        if (!gen2Delivered.load()) {
             std::cerr << "[FAIL] Generation 2 request was not delivered!" << std::endl;
             return 1;
         }
