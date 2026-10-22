@@ -530,6 +530,53 @@ void runControls() {
         if (!d.literalRaw) check(d.allowlist, "literal grep passes the naive rewrite but allowlist catches it");
     }
 
+    // Progress heartbeat: a host (the sandboxed worker) uses Options::onProgress to prove a long redaction
+    // is alive. It must fire per page in every phase, stay monotonic, and keep firing during serialisation.
+    std::cout << "[progress heartbeat]\n";
+    {
+        const Bytes multi = readFile(g_dir + "/multipage.pdf");
+        std::vector<std::pair<int, int>> calls;
+        Options o;
+        o.onProgress = [&](int done, int total) { calls.emplace_back(done, total); };
+        Result r = redactDocument(multi.data(), multi.size(), "", {{0, {{90, 132, 210, 202}}}}, o);
+        check(r.ok(), "progress: redaction with a callback succeeds");
+        const int pages = r.ok() ? r.report.pageCount : 30;
+        check(pages == 30, "progress: fixture page count is 30");
+        bool monotonic = !calls.empty();
+        bool constantTotal = !calls.empty();
+        for (std::size_t i = 0; i < calls.size(); ++i) {
+            if (i > 0 && calls[i].first < calls[i - 1].first) monotonic = false;
+            if (calls[i].second != calls.front().second) constantTotal = false;
+        }
+        int distinctSteps = 0;
+        for (std::size_t i = 0; i < calls.size(); ++i)
+            if (i == 0 || calls[i].first != calls[i - 1].first) ++distinctSteps;
+        check(monotonic, "progress: `done` never decreases");
+        check(constantTotal && !calls.empty() && calls.front().second == 3 * pages, "progress: total is 3 x pageCount (plan, render, verify)");
+        check(distinctSteps == 3 * pages && !calls.empty() && calls.back().first == 3 * pages, "progress: exactly one step per page per phase, ending at total");
+        check(static_cast<int>(calls.size()) > 3 * pages, "progress: callback also fires during serialisation (more calls than steps)");
+
+        // A throwing callback must fail closed (no output), never escape or yield a half-built file.
+        Options t;
+        t.onProgress = [](int done, int) { if (done >= 5) throw std::runtime_error("boom"); };
+        Result tr = redactDocument(multi.data(), multi.size(), "", {{0, {{90, 132, 210, 202}}}}, t);
+        check(!tr.ok() && tr.pdf.empty(), "progress: a throwing callback fails the redaction closed with no output");
+        // Throw only once serialisation has begun: `done` rests at 2 x pageCount (render finished) while the
+        // output is written, so the first few callbacks at that value are the writer's heartbeat.
+        int writeBeats = 0;
+        Options t3;
+        t3.onProgress = [&](int done, int total) {
+            if (done == 2 * (total / 3) && ++writeBeats > 3) throw std::runtime_error("boom during write");
+        };
+        Result wr = redactDocument(multi.data(), multi.size(), "", {{0, {{90, 132, 210, 202}}}}, t3);
+        check(!wr.ok() && wr.pdf.empty(), "progress: a callback throwing mid-serialisation fails closed with no output");
+
+        // Output is unaffected by having a callback.
+        Result plain = redactDocument(multi.data(), multi.size(), "", {{0, {{90, 132, 210, 202}}}});
+        check(plain.ok() && r.ok() && plain.report.pageCount == r.report.pageCount && plain.report.pages[0].boxes.size() == r.report.pages[0].boxes.size(),
+              "progress: report is identical with and without a callback");
+    }
+
     // Teeth: the checkers must fail when the engine's guarantees are broken.
     std::cout << "[detector teeth]\n";
     {

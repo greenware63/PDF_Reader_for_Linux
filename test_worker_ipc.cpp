@@ -33,6 +33,39 @@ static bool waitFor(std::function<bool()> condition, int timeoutMs = 5000) {
     return condition();
 }
 
+constexpr int kHeartbeatTestPages = 60;
+
+// Builds an N-page PDF (shared content stream with text and many filled rectangles) so a redaction of it
+// takes long enough to outlive a short watchdog stall limit.
+static QByteArray makeManyPagePdf(int pages) {
+    QByteArray out("%PDF-1.4\n");
+    std::vector<qint64> offs(5 + static_cast<size_t>(pages), 0);
+    auto addObj = [&](int num, const QByteArray& body) {
+        offs[static_cast<size_t>(num)] = out.size();
+        out += QByteArray::number(num) + " 0 obj\n" + body + "\nendobj\n";
+    };
+    addObj(1, "<< /Type /Catalog /Pages 2 0 R >>");
+    QByteArray kids;
+    for (int i = 0; i < pages; ++i) kids += QByteArray::number(5 + i) + " 0 R ";
+    addObj(2, "<< /Type /Pages /Count " + QByteArray::number(pages) + " /Kids [" + kids + "] >>");
+    addObj(3, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+    QByteArray content = "BT /F1 28 Tf 72 720 Td (Heartbeat redaction test page) Tj ET\n";
+    for (int i = 0; i < 60; ++i)
+        content += QByteArray::number((i % 10) / 10.0 + 0.05) + " g " + QByteArray::number(40 + (i * 37) % 480) + " " +
+                   QByteArray::number(60 + (i * 53) % 600) + " 90 40 re f\n";
+    addObj(4, "<< /Length " + QByteArray::number(content.size()) + " >>\nstream\n" + content + "endstream");
+    for (int i = 0; i < pages; ++i)
+        addObj(5 + i, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 3 0 R >> >> >>");
+    const qint64 xref = out.size();
+    out += "xref\n0 " + QByteArray::number(5 + pages) + "\n0000000000 65535 f \n";
+    for (int n = 1; n < 5 + pages; ++n) {
+        QByteArray o = QByteArray::number(offs[static_cast<size_t>(n)]);
+        out += QByteArray(10 - o.size(), '0') + o + " 00000 n \n";
+    }
+    out += "trailer\n<< /Size " + QByteArray::number(5 + pages) + " /Root 1 0 R >>\nstartxref\n" + QByteArray::number(xref) + "\n%%EOF\n";
+    return out;
+}
+
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
 
@@ -1033,6 +1066,70 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cout << "  -> Passed: redaction used the opened bytes after the file was overwritten and after it was deleted." << std::endl;
+    }
+
+    // --- TEST 14: A long but healthy redaction is not killed by the watchdog or the client wait ---
+    std::cout << "[TEST 14] Testing that redaction progress heartbeats keep a long redaction alive..." << std::endl;
+    {
+        constexpr int kStallMs = 1000;   // watchdog kills a worker whose heartbeat is frozen this long
+        constexpr int kSilenceMs = 1500; // client wait limit when the worker is silent
+        QTemporaryDir tmp;
+        if (!tmp.isValid()) {
+            std::cerr << "[FAIL] No temp dir for heartbeat test." << std::endl;
+            return 1;
+        }
+        const QString bigPdf = tmp.path() + QStringLiteral("/many_pages.pdf");
+        {
+            QFile f(bigPdf);
+            const QByteArray data = makeManyPagePdf(kHeartbeatTestPages);
+            if (!f.open(QIODevice::WriteOnly) || f.write(data) != data.size()) {
+                std::cerr << "[FAIL] Cannot write heartbeat test PDF." << std::endl;
+                return 1;
+            }
+        }
+
+        pdf::ipc::WorkerClient client;
+        client.setWatchdogParams(150, 5, kStallMs);
+        bool workerDied = false;
+        QObject::connect(&client, &pdf::ipc::WorkerClient::workerFailed, [&](const QString& msg) {
+            workerDied = true;
+            std::cerr << "  (worker failed: " << msg.toStdString() << ")" << std::endl;
+        });
+        auto res = client.openDocumentSync(1, bigPdf.toStdString());
+        if (res.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open heartbeat test document." << std::endl;
+            return 1;
+        }
+        std::vector<pdf::ipc::PageRedactionItem> redactions;
+        pdf::ipc::PageRedactionItem item;
+        item.pageIndex = 0;
+        item.rects.push_back(pdf::ipc::RedactRect{50.0, 50.0, 300.0, 120.0});
+        redactions.push_back(item);
+
+        QElapsedTimer clock;
+        clock.start();
+        const auto r = client.redactDocumentSync(1, redactions, 150.0, 1, kSilenceMs);
+        const qint64 elapsedMs = clock.elapsed();
+
+        if (workerDied || !r.success) {
+            std::cerr << "[FAIL] Long redaction did not complete (success=" << r.success << ", workerDied=" << workerDied
+                      << ", after " << elapsedMs << " ms): " << r.errorMessage.toStdString() << std::endl;
+            return 1;
+        }
+        if (r.pageCount != kHeartbeatTestPages || !r.pdfBytes.startsWith("%PDF-")) {
+            std::cerr << "[FAIL] Long redaction returned an unexpected result (pages=" << r.pageCount << ")." << std::endl;
+            return 1;
+        }
+        // Guard against a vacuous pass: the run must have outlived BOTH limits, otherwise it proves nothing.
+        if (elapsedMs < 2 * kStallMs) {
+            std::cerr << "[FAIL] Heartbeat test finished in " << elapsedMs << " ms, faster than 2x the stall limit ("
+                      << 2 * kStallMs << " ms): raise kHeartbeatTestPages so the test is meaningful." << std::endl;
+            return 1;
+        }
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: " << kHeartbeatTestPages << "-page redaction took " << elapsedMs << " ms, outliving the "
+                  << kStallMs << " ms stall limit and the " << kSilenceMs << " ms silence limit." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

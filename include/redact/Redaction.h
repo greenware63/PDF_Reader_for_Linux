@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,14 @@ struct Options {
     double dpi = 150.0;      ///< allowed range [72, 300]
     int edgeGrowPx = 1;      ///< extra whole pixels added around every box, [0, 16]
     Limits limits;
+    /// Optional liveness/progress callback, invoked on the calling thread with (steps done, total steps).
+    /// One step is counted per page in each of three phases (plan, render, verify), so `done` rises
+    /// monotonically from 1 to 3 x pageCount. It is ALSO invoked, repeating the current `done`, while the
+    /// output is being serialised (a single long PDFium call that would otherwise be silent). A host uses
+    /// it as a heartbeat so a long but healthy redaction is not mistaken for a hung one. The callback must
+    /// be cheap, must not call back into this engine, and must not throw (an exception thrown during
+    /// serialisation is treated as a failed write and the redaction fails closed).
+    std::function<void(int done, int total)> onProgress;
     // Note: there is intentionally no option to disable verification (G9).
 };
 
@@ -112,9 +121,10 @@ Result redactDocument(const std::uint8_t* data, std::size_t size,
 /**
  * Self-check used by redactDocument() and exposed for tests: re-opens @p pdf with PDFium and
  * verifies the structural guarantees and that every pixel of every box in the STORED image is
- * zero.  Returns an empty string on success, otherwise a description of the first failure.
+ * zero. @p tick, if set, is called once per output page before that page is checked.  Returns an empty string on success, otherwise a description of the first failure.
  */
 std::string verifyRedactedOutput(const std::vector<std::uint8_t>& pdf,
-                                 const std::vector<PageReport>& pages);
+                                 const std::vector<PageReport>& pages,
+                                 const std::function<void()>& tick = {});
 
 } // namespace pdf::redact

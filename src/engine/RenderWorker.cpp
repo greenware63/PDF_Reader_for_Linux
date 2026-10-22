@@ -438,6 +438,10 @@ void RenderWorker::requestRedactDocument(int64_t documentId,
         pdf::redact::Options opt;
         opt.dpi = std::clamp(dpi, 72.0, 300.0);
         opt.edgeGrowPx = std::clamp(edgeGrowPx, 0, 16);
+        // Liveness heartbeat: the engine runs for as long as the document is big, and the watchdog
+        // judges a worker by whether this stamp advances. Without it a long redaction would be killed
+        // after the stall limit although it is making steady progress.
+        opt.onProgress = [this](int, int) { noteProgress(ipc::WorkerOp::Redact); };
 
         pdf::redact::Result result = pdf::redact::redactDocument(
             sourceData,

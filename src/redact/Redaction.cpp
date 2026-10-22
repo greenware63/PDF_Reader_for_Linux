@@ -80,6 +80,7 @@ struct MemoryWriter : FPDF_FILEWRITE {
     std::vector<std::uint8_t> bytes;
     std::size_t cap = 0;
     bool overflow = false;
+    const std::function<void()>* onWrite = nullptr; // heartbeat while FPDF_SaveAsCopy runs
 };
 
 int writeBlock(FPDF_FILEWRITE* self, const void* data, unsigned long size) {
@@ -88,7 +89,8 @@ int writeBlock(FPDF_FILEWRITE* self, const void* data, unsigned long size) {
     try {
         const auto* p = static_cast<const std::uint8_t*>(data);
         w->bytes.insert(w->bytes.end(), p, p + size);
-    } catch (...) { return 0; }
+        if (w->onWrite && *w->onWrite) (*w->onWrite)();
+    } catch (...) { return 0; } // never unwind through PDFium's C frames; a failed write fails the redaction
     return 1;
 }
 
@@ -200,7 +202,8 @@ std::string pdfiumMeta(FPDF_DOCUMENT doc, const char* tag) {
 } // namespace
 
 // ---------------------------------------------------------------- self-verification
-std::string verifyRedactedOutput(const std::vector<std::uint8_t>& pdf, const std::vector<PageReport>& pages) {
+std::string verifyRedactedOutput(const std::vector<std::uint8_t>& pdf, const std::vector<PageReport>& pages,
+                                 const std::function<void()>& tick) {
     if (std::string s = scanStructure(pdf); !s.empty()) return "structure: " + s;
 
     std::lock_guard<std::recursive_mutex> lock(pdf::getPdfiumMutex());
@@ -218,6 +221,7 @@ std::string verifyRedactedOutput(const std::vector<std::uint8_t>& pdf, const std
     }
 
     for (std::size_t i = 0; i < pages.size(); ++i) {
+        if (tick) tick();
         const PageReport& pr = pages[i];
         PagePtr page(FPDF_LoadPage(d, static_cast<int>(i)));
         if (!page) return "cannot load output page " + std::to_string(i);
@@ -333,9 +337,20 @@ Result redactDocument(const std::uint8_t* data, std::size_t size, const std::str
 
         // ---- 3. plan: geometry and limits for ALL pages before any large allocation
         const double scale = opt.dpi / 72.0;
+        // Progress: one step per page in each of three phases (plan, render, verify).
+        const int totalSteps = pageCount * 3;
+        int doneSteps = 0;
+        const std::function<void()> tick = [&]() {
+            if (opt.onProgress) opt.onProgress(++doneSteps, totalSteps);
+        };
+        // Same callback without advancing: used inside long single calls (serialisation).
+        const std::function<void()> beat = [&]() {
+            if (opt.onProgress) opt.onProgress(doneSteps, totalSteps);
+        };
         rep.pages.resize(static_cast<std::size_t>(pageCount));
         std::uint64_t totalPixels = 0;
         for (int i = 0; i < pageCount; ++i) {
+            tick();
             PagePtr page(FPDF_LoadPage(sd, i));
             if (!page) return fail(Status::RenderFailed, "cannot load source page " + std::to_string(i));
             FPDF_PAGE p = static_cast<FPDF_PAGE>(page.get());
@@ -385,6 +400,7 @@ Result redactDocument(const std::uint8_t* data, std::size_t size, const std::str
         FPDF_DOCUMENT od = static_cast<FPDF_DOCUMENT>(out.get());
 
         for (int i = 0; i < pageCount; ++i) {
+            tick();
             PageReport& pr = rep.pages[static_cast<std::size_t>(i)];
             PagePtr page(FPDF_LoadPage(sd, i));
             if (!page) return fail(Status::RenderFailed, "cannot load source page " + std::to_string(i));
@@ -432,6 +448,7 @@ Result redactDocument(const std::uint8_t* data, std::size_t size, const std::str
         w.version = 1;
         w.WriteBlock = &writeBlock;
         w.cap = lim.maxOutputBytes;
+        w.onWrite = &beat;
         const bool saved = FPDF_SaveAsCopy(od, &w, FPDF_NO_INCREMENTAL);
         // PDFium can report success after a short write, so the overflow flag is authoritative.
         if (w.overflow) return fail(Status::LimitExceeded, "output larger than limit");
@@ -440,7 +457,7 @@ Result redactDocument(const std::uint8_t* data, std::size_t size, const std::str
         src.reset();
 
         // ---- 6. fail-closed self-verification (G9)
-        std::string v = verifyRedactedOutput(w.bytes, rep.pages);
+        std::string v = verifyRedactedOutput(w.bytes, rep.pages, tick);
         if (!v.empty()) return fail(Status::VerificationFailed, v);
         rep.verification = {
             "exactly one revision (one startxref/%%EOF, no /Prev)",
