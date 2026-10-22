@@ -58,6 +58,10 @@ public:
                                const std::vector<PageRedactionItem>& redactions,
                                double dpi = 150.0,
                                int edgeGrowPx = 1);
+    /// Blocks (nested event loop) until the redaction finishes. @p timeoutMs is a SILENCE limit, not a
+    /// total budget: it restarts every time the worker's engine heartbeat advances, so a long document
+    /// that keeps making progress completes, while a stalled worker still fails after @p timeoutMs (and
+    /// the watchdog, when enabled, terminates it).
     RedactDocumentResponse redactDocumentSync(int64_t documentId,
                                              const std::vector<PageRedactionItem>& redactions,
                                              double dpi = 150.0,
@@ -85,6 +89,8 @@ Q_SIGNALS:
     void extractPagesFailed(int64_t documentId, int firstPage, int lastPage);
     void redactDocumentReady(int64_t documentId, const pdf::ipc::RedactDocumentResponse& response);
     void redactDocumentFailed(int64_t documentId, const QString& errorMessage);
+    /// The worker's engine heartbeat advanced while busy (observed through the watchdog ping).
+    void engineProgressed();
 
 private Q_SLOTS:
     void onSocketConnected();

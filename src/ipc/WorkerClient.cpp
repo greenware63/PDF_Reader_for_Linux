@@ -572,6 +572,10 @@ RedactDocumentResponse WorkerClient::redactDocumentSync(int64_t documentId,
 
     connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
 
+    // The limit is a silence limit: every observed engine heartbeat restarts it.
+    const auto progressConn = connect(this, &WorkerClient::engineProgressed, &loop,
+        [&]() { timeout.start(timeoutMs); });
+
     requestRedactDocument(documentId, redactions, dpi, edgeGrowPx);
     timeout.start(timeoutMs);
     loop.exec();
@@ -579,9 +583,10 @@ RedactDocumentResponse WorkerClient::redactDocumentSync(int64_t documentId,
     disconnect(readyConn);
     disconnect(failConn);
     disconnect(workerFailConn);
+    disconnect(progressConn);
 
     if (!result.success && result.errorMessage.isEmpty()) {
-        result.errorMessage = tr("Timed out waiting for redaction to complete.");
+        result.errorMessage = tr("The worker made no progress on the redaction within the time limit.");
     }
     return result;
 }
@@ -654,6 +659,7 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
                         m_lastWorkerProgressEpochMs = response.lastProgressEpochMs;
                         m_lastWorkerOp = response.currentOp;
                         m_lastProgressAdvanceTime = now;
+                        Q_EMIT engineProgressed();
                     } else {
                         const auto elapsedStallMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastProgressAdvanceTime).count();
                         if (elapsedStallMs >= m_engineStallMs) {
