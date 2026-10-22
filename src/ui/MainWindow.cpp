@@ -1383,8 +1383,8 @@ void MainWindow::applyAndSaveRedactions() {
     warningBox.setIcon(QMessageBox::Warning);
     warningBox.setWindowTitle(tr("Confirm Burn-in Redaction"));
     warningBox.setText(tr("<h3>Apply Burn-in Redactions?</h3>"
-                          "<p>Redacted pages will be permanently <b>rasterized into image-only pages</b>. "
-                          "Underlying text, vectors, metadata, and form fields on redacted pages will be destroyed.</p>"
+                          "<p>The <b>entire document (all pages)</b> will be permanently <b>rasterized into image-only pages</b>.</p>"
+                          "<p>Underlying selectable text, vector graphics, form fields, and metadata will be permanently removed across <b>all pages</b>.</p>"
                           "<p><b>Warning:</b> All digital signatures will be stripped or invalidated. Attachments will be removed.</p>"
                           "<p>A new sanitized PDF will be written to the chosen destination; your original file is never modified.</p>"));
     warningBox.setStandardButtons(QMessageBox::Ok | QMessageBox::Cancel);
