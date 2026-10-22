@@ -1507,6 +1507,24 @@ int main(int argc, char* argv[]) {
         worker.cancelSearch();
         worker.waitForIdle();
 
+        // 5. waitForIdle() must also cover a search page that the engine thread has already picked
+        //    up but not finished. The page is accounted for (nextPageToSearch) when it is picked, so
+        //    without a "search running" flag the worker looked idle while the page's text extraction
+        //    and match delivery were still in flight, and callers read zero matches (seen as an
+        //    intermittent failure of this suite under CPU contention).
+        for (int i = 0; i < 400; ++i) {
+            matchCount = 0;
+            deliveredMatches.clear();
+            worker.startSearch(102, 1000 + i, QStringLiteral("hello"), false, 1);
+            worker.waitForIdle();
+            QCoreApplication::processEvents();
+            if (matchCount.load() <= 0) {
+                std::cerr << "[FAIL] waitForIdle() returned while a search page was still in flight (iteration " << i
+                          << ", 0 matches)." << std::endl;
+                return 1;
+            }
+        }
+
         std::cout << "[TEST 18] Testing Persian/Arabic normalization, whitespace folding, and bounded results..." << std::endl;
         pdf::PageText normalizedPage;
         normalizedPage.pageIndex = 4;

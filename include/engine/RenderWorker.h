@@ -308,6 +308,7 @@ private:
     // so waitForIdle() also waits for asynchronous document opens. Guarded by m_mutex.
     bool m_isControlRunning{false};
     bool m_isOutlineRunning{false};
+    bool m_isSearchRunning{false}; // a picked search page is being extracted/delivered (guarded by m_mutex)
     // Key of the tile currently being rendered (valid while m_isRendering); guarded by m_mutex.
     // enqueueRequest(s) deduplicates against it so a scroll that re-requests the in-flight tile is a no-op.
     TileKey m_inFlightKey;
