@@ -3993,6 +3993,85 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        // 5b. markSelectionForRedaction() with safety padding (descenders, diacritics, italics)
+        {
+            viewer.setRedactionMode(false);
+            viewer.closeDocument();
+            std::string textPath = "widget_text_fixture.pdf";
+            if (viewer.openDocument(QString::fromStdString(textPath)) == pdf::DocumentError::None) {
+                viewer.resize(1000, 700);
+                viewer.goToPage(0);
+                viewer.setZoom(1.0);
+                QImage fr(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+                QPainter pFr(&fr);
+                viewer.viewport()->render(&pFr);
+                pFr.end();
+                viewer.waitForRendering();
+
+                auto pt = viewer.getPageText(0);
+                if (pt && pt->charCount() >= 5) {
+                    const auto rawRects = pt->getSelectionRects(0, 4);
+                    if (!rawRects.empty()) {
+                        const auto& r0 = rawRects.front();
+                        const double rawLeft = std::min(r0.left, r0.right);
+                        const double rawTop = std::min(r0.top, r0.bottom);
+                        const double rawRight = std::max(r0.left, r0.right);
+                        const double rawBottom = std::max(r0.top, r0.bottom);
+
+                        const auto& pl = viewer.layout().getPageLayout(0);
+                        const double dpr = viewer.effectiveDpr();
+                        const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+                        const auto& b0 = pt->chars[0];
+                        double c0X = (b0.left + b0.right) * 0.5;
+                        double c0Y = (b0.top + b0.bottom) * 0.5;
+                        int64_t doc0X = pl.leftPixel + static_cast<int64_t>(std::round(c0X * effScale));
+                        int64_t doc0Y = pl.topPixel + static_cast<int64_t>(std::round(c0Y * effScale));
+                        double vp0X = static_cast<double>(doc0X - viewer.currentDocScrollX()) / dpr;
+                        double vp0Y = static_cast<double>(doc0Y - viewer.currentDocScrollY()) / dpr;
+
+                        const auto& b4 = pt->chars[4];
+                        double c4X = (b4.left + b4.right) * 0.5;
+                        double c4Y = (b4.top + b4.bottom) * 0.5;
+                        int64_t doc4X = pl.leftPixel + static_cast<int64_t>(std::round(c4X * effScale));
+                        int64_t doc4Y = pl.topPixel + static_cast<int64_t>(std::round(c4Y * effScale));
+                        double vp4X = static_cast<double>(doc4X - viewer.currentDocScrollX()) / dpr;
+                        double vp4Y = static_cast<double>(doc4Y - viewer.currentDocScrollY()) / dpr;
+
+                        QMouseEvent press(QEvent::MouseButtonPress, QPointF(vp0X, vp0Y), QPointF(vp0X, vp0Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                        QApplication::sendEvent(viewer.viewport(), &press);
+                        QMouseEvent move(QEvent::MouseMove, QPointF(vp4X, vp4Y), QPointF(vp4X, vp4Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                        QApplication::sendEvent(viewer.viewport(), &move);
+                        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(vp4X, vp4Y), QPointF(vp4X, vp4Y), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                        QApplication::sendEvent(viewer.viewport(), &release);
+
+                        if (viewer.hasSelection() && viewer.markSelectionForRedaction()) {
+                            const auto& marks = viewer.stagedRedactions();
+                            auto itM = marks.find(0);
+                            if (itM != marks.end() && !itM->second.empty()) {
+                                const auto& stagedR = itM->second.front();
+                                constexpr double kExpectedPad = 1.5;
+                                if (stagedR.left > rawLeft - kExpectedPad + 1e-4 ||
+                                    stagedR.top > rawTop - kExpectedPad + 1e-4 ||
+                                    stagedR.right < rawRight + kExpectedPad - 1e-4 ||
+                                    stagedR.bottom < rawBottom + kExpectedPad - 1e-4) {
+                                    std::cerr << "[FAIL] Selection redaction padding margin (1.5pt) not applied." << std::endl;
+                                    return 1;
+                                }
+                            } else {
+                                std::cerr << "[FAIL] Staged marks empty after markSelectionForRedaction." << std::endl;
+                                return 1;
+                            }
+                        } else {
+                            std::cerr << "[FAIL] Selection or markSelectionForRedaction failed." << std::endl;
+                            return 1;
+                        }
+                    }
+                }
+            }
+            viewer.closeDocument();
+        }
+
         // 6. MainWindow UI Integration: toggle, toolbar & actions
         {
             ui::MainWindow window;

@@ -2102,14 +2102,23 @@ bool PdfViewerWidget::markSelectionForRedaction() {
         const auto& pt = *ptr;
         const int startChar = (p == p0) ? c0 : 0;
         const int endChar = (p == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
+        const auto& pl = m_layout.getPageLayout(p);
+        // Safety margin (1.5 pt, ~3.1 px at 150 DPI) ensuring font descenders (g, y, p, q),
+        // diacritics/accents, and italic overhang are fully enveloped by the redaction box.
+        constexpr double kSelectionPadPt = 1.5;
         // Selection rectangles are already canonical page points (unrotated, top-left origin).
         for (const auto& r : pt.getSelectionRects(startChar, endChar)) {
-            pdf::ipc::RedactRect rr{
-                std::min(r.left, r.right),
-                std::min(r.top, r.bottom),
-                std::max(r.left, r.right),
-                std::max(r.top, r.bottom)
-            };
+            const double rLeft = std::min(r.left, r.right);
+            const double rTop = std::min(r.top, r.bottom);
+            const double rRight = std::max(r.left, r.right);
+            const double rBottom = std::max(r.top, r.bottom);
+
+            const double padLeft = std::max(0.0, rLeft - kSelectionPadPt);
+            const double padTop = std::max(0.0, rTop - kSelectionPadPt);
+            const double padRight = (pl.widthPoints > 0.0) ? std::min(pl.widthPoints, rRight + kSelectionPadPt) : (rRight + kSelectionPadPt);
+            const double padBottom = (pl.heightPoints > 0.0) ? std::min(pl.heightPoints, rBottom + kSelectionPadPt) : (rBottom + kSelectionPadPt);
+
+            pdf::ipc::RedactRect rr{padLeft, padTop, padRight, padBottom};
             if (rr.width() > 0.0 && rr.height() > 0.0) {
                 m_stagedRedactions[p].push_back(rr);
                 addedAny = true;
