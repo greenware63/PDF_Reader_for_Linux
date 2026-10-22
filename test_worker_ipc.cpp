@@ -15,6 +15,7 @@
 #include <QTcpServer>
 #include <QLocalServer>
 #include <QFile>
+#include <QTemporaryDir>
 #include <QFileInfo>
 #include <QDir>
 #include <QRegularExpression>
@@ -660,11 +661,25 @@ int main(int argc, char* argv[]) {
 #endif
     }
 
-    // --- TEST 9C: Progressing Tile Operations Do Not Trigger Watchdog ---
-    std::cout << "[TEST 9C] Testing that progressing tile render operations do not trigger false watchdog timeouts..." << std::endl;
+    // --- TEST 9C: A long operation that keeps making progress is not killed as "stalled" ---
+    std::cout << "[TEST 9C] Testing that a long-running but progressing operation does not trigger a false watchdog timeout..." << std::endl;
     {
+        // The claim under test is that stall detection is progress-aware: total work LONGER than the
+        // stall limit must survive as long as progress keeps advancing. (The previous version did
+        // ~160 ms of work against a 5 s limit, so it could never exercise that, and its aggressive
+        // 250 ms x 3 heartbeat only made it sensitive to host load.) Heartbeat is deliberately
+        // tolerant here; heartbeat/stall *detection* is covered by tests 9A and 9B.
+#ifdef PDF_WORKER_TEST_HOOKS
+        constexpr int kStallLimitMs = 1500;
+        constexpr int kTileDelayMs = 100;   // progress interval: 15x below the stall limit
+        constexpr int kTiles = 24;          // 24 x 100 ms = 2.4 s of work > kStallLimitMs
+#else
+        constexpr int kStallLimitMs = 5000;
+        constexpr int kTileDelayMs = 0;
+        constexpr int kTiles = 4;
+#endif
         pdf::ipc::WorkerClient client;
-        client.setWatchdogParams(250, 3, 5000);
+        client.setWatchdogParams(500, 8, kStallLimitMs);
         auto res = client.openDocumentSync(1, samplePdf.toStdString());
         if (res.error != pdf::DocumentError::None) {
             std::cerr << "[FAIL] Failed to open document." << std::endl;
@@ -672,13 +687,14 @@ int main(int argc, char* argv[]) {
         }
 
         bool failureFired = false;
-        QObject::connect(&client, &pdf::ipc::WorkerClient::workerFailed, [&](const QString&) {
+        QString failureReason;
+        QObject::connect(&client, &pdf::ipc::WorkerClient::workerFailed, [&](const QString& reason) {
             failureFired = true;
+            failureReason = reason;
         });
 
 #ifdef PDF_WORKER_TEST_HOOKS
-        // Artificially delay rendering slightly (40 ms per tile)
-        client.setRenderDelayForTesting(std::chrono::milliseconds(40));
+        client.setRenderDelayForTesting(std::chrono::milliseconds(kTileDelayMs));
 #endif
 
         int tilesRendered = 0;
@@ -686,31 +702,43 @@ int main(int argc, char* argv[]) {
             tilesRendered++;
         });
 
-        // Enqueue multiple actual tile rendering requests across pages
-        for (int i = 0; i < 4; ++i) {
+        QElapsedTimer total;
+        total.start();
+        for (int i = 0; i < kTiles; ++i) {
             pdf::TileRenderRequest req;
             req.documentId = 1;
             req.generation = 1;
             req.pageIndex = 0;
-            req.rect = pdf::PixelRect{0, i * 64, 256, 64};
+            req.rect = pdf::PixelRect{0, i * 32, 256, 32};
             req.scale = 1.0;
             req.dpr = 1.0;
             req.key = pdf::TileKey::create(1, 0, 0, i, 1.0, 1.0);
-            req.priority = 10 - i;
+            req.priority = kTiles - i;
             client.enqueueRequest(req);
         }
         client.waitForIdle();
+        const qint64 elapsedMs = total.elapsed();
 
         if (failureFired) {
-            std::cerr << "[FAIL] Normal progressing operations triggered false watchdog failure." << std::endl;
+            std::cerr << "[FAIL] Progressing operation was killed by the watchdog after " << elapsedMs
+                      << " ms: " << failureReason.toStdString() << std::endl;
             return 1;
         }
-        if (tilesRendered < 4) {
-            std::cerr << "[FAIL] Not all tiles rendered (got " << tilesRendered << " of 4)." << std::endl;
+        if (tilesRendered < kTiles) {
+            std::cerr << "[FAIL] Not all tiles rendered (got " << tilesRendered << " of " << kTiles << ")." << std::endl;
             return 1;
         }
+#ifdef PDF_WORKER_TEST_HOOKS
+        if (elapsedMs <= kStallLimitMs) {
+            // Without this the test would be vacuous: it must outlast the stall limit to prove anything.
+            std::cerr << "[FAIL] Test 9C finished in " << elapsedMs << " ms, not longer than the " << kStallLimitMs
+                      << " ms stall limit; it proves nothing." << std::endl;
+            return 1;
+        }
+#endif
         client.stop();
-        std::cout << "  -> Passed: Progressing tile render operations complete smoothly without spurious watchdog timeouts." << std::endl;
+        std::cout << "  -> Passed: " << kTiles << " tiles over " << elapsedMs << " ms survived a " << kStallLimitMs
+                  << " ms stall limit because progress kept advancing." << std::endl;
     }
 
     // --- TEST 9D: Workload Validation for 4 GiB RLIMIT_AS ---
@@ -954,6 +982,57 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         std::cout << "  -> Passed: malformed redaction requests are answered with RedactDocumentFailedResponse." << std::endl;
+    }
+
+    // --- TEST 13: Redaction uses the bytes that were opened, not whatever is on disk now ---
+    std::cout << "[TEST 13] Testing that redaction is immune to the source file changing after it was opened..." << std::endl;
+    {
+        QTemporaryDir pinDir;
+        if (!pinDir.isValid()) {
+            std::cerr << "[FAIL] Could not create temp dir for pinned-source test." << std::endl;
+            return 1;
+        }
+        auto runCase = [&](const char* label, const std::function<void(const QString&)>& mutate) -> bool {
+            const QString copy = pinDir.path() + QStringLiteral("/pinned.pdf");
+            QFile::remove(copy);
+            if (!QFile::copy(samplePdf, copy)) {
+                std::cerr << "[FAIL] Could not copy sample for pinned-source test." << std::endl;
+                return false;
+            }
+            pdf::ipc::WorkerClient client;
+            auto opened = client.openDocumentSync(7, copy.toStdString());
+            if (opened.error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Could not open copy for pinned-source test (" << label << ")." << std::endl;
+                return false;
+            }
+            mutate(copy); // the file on disk now differs from what the worker has open
+            std::vector<pdf::ipc::PageRedactionItem> redactions;
+            pdf::ipc::PageRedactionItem item;
+            item.pageIndex = 0;
+            item.rects.push_back(pdf::ipc::RedactRect{50.0, 50.0, 200.0, 100.0});
+            redactions.push_back(item);
+            const auto res = client.redactDocumentSync(7, redactions, 150.0, 1);
+            const bool ok = res.success && res.pdfBytes.startsWith("%PDF-") && res.pageCount == opened.pageCount;
+            if (!ok) {
+                std::cerr << "[FAIL] Redaction after the source was " << label << ": success=" << res.success
+                          << " pages=" << res.pageCount << " (opened " << opened.pageCount << ") "
+                          << res.errorMessage.toStdString() << std::endl;
+            }
+            client.closeDocumentSync();
+            client.stop();
+            return ok;
+        };
+        const bool overwritten = runCase("overwritten with garbage", [](const QString& path) {
+            QFile f(path);
+            if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                f.write(QByteArray(4096, 'X'));
+            }
+        });
+        const bool deleted = runCase("deleted", [](const QString& path) { QFile::remove(path); });
+        if (!overwritten || !deleted) {
+            return 1;
+        }
+        std::cout << "  -> Passed: redaction used the opened bytes after the file was overwritten and after it was deleted." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

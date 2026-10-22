@@ -49,6 +49,20 @@ public:
     virtual DocumentError loadFromMemory(const void* data, size_t size, const std::string& password = "") = 0;
 
     /**
+     * @brief Opens a document from a buffer the caller keeps sharing ownership of, without copying it.
+     * The buffer stays alive for as long as the document (or any page of it) does, so the caller can hand
+     * the very same immutable bytes to other consumers (e.g. redaction) and be sure they see what is displayed.
+     * The default implementation copies via loadFromMemory().
+     */
+    virtual DocumentError loadFromBuffer(std::shared_ptr<const std::vector<uint8_t>> buffer,
+                                         const std::string& password = "") {
+        if (!buffer) {
+            return loadFromMemory(nullptr, 0, password);
+        }
+        return loadFromMemory(buffer->data(), buffer->size(), password);
+    }
+
+    /**
      * @return Total number of pages in the document.
      */
     virtual int pageCount() const = 0;

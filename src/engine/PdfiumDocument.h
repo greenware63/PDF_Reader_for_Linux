@@ -16,6 +16,8 @@ public:
 
     DocumentError loadFromFile(const std::string& filePath, const std::string& password = "") override;
     DocumentError loadFromMemory(const void* data, size_t size, const std::string& password = "") override;
+    DocumentError loadFromBuffer(std::shared_ptr<const std::vector<uint8_t>> buffer,
+                                 const std::string& password = "") override;
     int pageCount() const override;
     std::pair<double, double> pageSizePoints(int pageIndex) const override;
     std::unique_ptr<IPage> getPage(int pageIndex) override;

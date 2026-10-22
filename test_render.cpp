@@ -16,6 +16,10 @@
 #include "engine/RenderWorker.h"
 #include "engine/SearchTypes.h"
 #include "engine/SearchText.h"
+#include <QTemporaryDir>
+#include <QFile>
+#include <mutex>
+#include "ipc/IpcMessages.h"
 #include <QCoreApplication>
 #include <QString>
 
@@ -1882,6 +1886,117 @@ int main(int argc, char* argv[]) {
         }
 
         std::cout << "  -> Passed: Asymmetric corner-colors verified across 0, 90, 180, 270 deg; 90 deg stitched tiles byte-equal to whole page; rotated thumbnail aspect and orientation verified." << std::endl;
+    }
+
+    // --- TEST 21: redaction source handling in the engine worker (sync open path + unpinned large files) ---
+    std::cout << "[TEST 21] Testing redaction source pinning, sync-open registration and the large-file change guard..." << std::endl;
+    {
+        QTemporaryDir srcDir;
+        if (!srcDir.isValid()) {
+            std::cerr << "[FAIL] temp dir" << std::endl;
+            return 1;
+        }
+        const QString copyPath = srcDir.path() + QStringLiteral("/doc.pdf");
+
+        struct Outcome {
+            std::mutex m;
+            bool ready{false};
+            bool failed{false};
+            int pages{0};
+            QString message;
+        };
+        auto redactOnce = [&](pdf::RenderWorker& w, int64_t docId, Outcome& out) {
+            QObject::connect(&w, &pdf::RenderWorker::redactDocumentReady,
+                [&out](int64_t, const pdf::ipc::RedactDocumentResponse& r) {
+                    std::lock_guard<std::mutex> l(out.m);
+                    out.ready = true;
+                    out.pages = r.pageCount;
+                });
+            QObject::connect(&w, &pdf::RenderWorker::redactDocumentFailed,
+                [&out](int64_t, const QString& msg) {
+                    std::lock_guard<std::mutex> l(out.m);
+                    out.failed = true;
+                    out.message = msg;
+                });
+            std::vector<pdf::ipc::PageRedactionItem> items;
+            pdf::ipc::PageRedactionItem it;
+            it.pageIndex = 0;
+            it.rects.push_back(pdf::ipc::RedactRect{50.0, 50.0, 200.0, 100.0});
+            items.push_back(it);
+            w.requestRedactDocument(docId, items, 150.0, 1);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+            while (std::chrono::steady_clock::now() < deadline) {
+                {
+                    std::lock_guard<std::mutex> l(out.m);
+                    if (out.ready || out.failed) break;
+                }
+                QCoreApplication::processEvents();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        };
+
+        // (a) A document opened through openDocumentSync (the in-process path) must be redactable and must
+        //     redact THAT document. This path used to leave the previous document's source registered.
+        {
+            QFile::remove(copyPath);
+            QFile::copy(QString::fromStdString(samplePath), copyPath);
+            pdf::RenderWorker w;
+            auto opened = w.openDocumentSync(21, copyPath.toStdString());
+            if (opened.error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] sync open for redaction source test" << std::endl;
+                return 1;
+            }
+            QFile::remove(copyPath); // pinned: the redaction must not need the file any more
+            Outcome out;
+            redactOnce(w, 21, out);
+            if (!out.ready || out.pages != opened.pageCount) {
+                std::cerr << "[FAIL] redaction after openDocumentSync did not use the opened bytes: " << out.message.toStdString() << std::endl;
+                return 1;
+            }
+            w.closeDocumentSync();
+        }
+
+#ifdef PDF_WORKER_TEST_HOOKS
+        // (b) Above the pin limit the file is opened by path; redaction must then refuse if it changed.
+        {
+            QFile::remove(copyPath);
+            QFile::copy(QString::fromStdString(samplePath), copyPath);
+            pdf::RenderWorker w;
+            w.setMaxPinnedBytesForTesting(0); // force the unpinned (large-file) path
+            auto opened = w.openDocumentSync(22, copyPath.toStdString());
+            if (opened.error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] unpinned open for large-file guard test" << std::endl;
+                return 1;
+            }
+            {
+                // Unchanged file: still redactable.
+                pdf::RenderWorker w2;
+                w2.setMaxPinnedBytesForTesting(0);
+                auto o2 = w2.openDocumentSync(23, copyPath.toStdString());
+                Outcome okOut;
+                if (o2.error != pdf::DocumentError::None) { std::cerr << "[FAIL] open w2" << std::endl; return 1; }
+                redactOnce(w2, 23, okOut);
+                if (!okOut.ready) {
+                    std::cerr << "[FAIL] unpinned but unchanged file should be redactable: " << okOut.message.toStdString() << std::endl;
+                    return 1;
+                }
+                w2.closeDocumentSync();
+            }
+            {
+                QFile f(copyPath);
+                if (f.open(QIODevice::Append)) f.write("\n% appended after open\n");
+            }
+            Outcome out;
+            redactOnce(w, 22, out);
+            if (!out.failed || !out.message.contains(QStringLiteral("changed on disk"))) {
+                std::cerr << "[FAIL] redaction of a changed, unpinned file must be refused (ready=" << out.ready << ", msg='"
+                          << out.message.toStdString() << "')" << std::endl;
+                return 1;
+            }
+            w.closeDocumentSync();
+        }
+#endif
+        std::cout << "  -> Passed: redaction reads the pinned/opened bytes; changed large files are refused." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;
