@@ -33,7 +33,7 @@ static bool waitFor(std::function<bool()> condition, int timeoutMs = 5000) {
     return condition();
 }
 
-constexpr int kHeartbeatTestPages = 60;
+constexpr int kHeartbeatTestPages = 90;
 
 // Builds an N-page PDF (shared content stream with text and many filled rectangles) so a redaction of it
 // takes long enough to outlive a short watchdog stall limit.
