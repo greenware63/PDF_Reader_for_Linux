@@ -6,15 +6,13 @@
 #include <QSaveFile>
 #include <QString>
 
-#ifdef __linux__
-#include <sys/stat.h>
-#endif
+#include <filesystem>
 
 namespace ui::safety {
 
-/// True when `dest` already exists and is the same file as `source`: same canonical path (symlinks and
-/// relative paths resolved) or, on Linux, the same device+inode (hard links, bind mounts). A redacted
-/// copy must never replace the original document.
+/// True when `dest` already exists and refers to the same file as `source`,
+/// including through symlinks, relative paths, or hard links. A redacted copy
+/// must never replace the original document.
 inline bool isSameFile(const QString& source, const QString& dest) {
     const QFileInfo s(source);
     const QFileInfo d(dest);
@@ -24,15 +22,16 @@ inline bool isSameFile(const QString& source, const QString& dest) {
     if (!s.canonicalFilePath().isEmpty() && s.canonicalFilePath() == d.canonicalFilePath()) {
         return true;
     }
-#ifdef __linux__
-    struct stat sa{};
-    struct stat sb{};
-    if (::stat(QFile::encodeName(source).constData(), &sa) == 0 &&
-        ::stat(QFile::encodeName(dest).constData(), &sb) == 0) {
-        return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
-    }
+
+#ifdef Q_OS_WIN
+    const std::filesystem::path sourcePath(source.toStdWString());
+    const std::filesystem::path destPath(dest.toStdWString());
+#else
+    const std::filesystem::path sourcePath(QFile::encodeName(source).constData());
+    const std::filesystem::path destPath(QFile::encodeName(dest).constData());
 #endif
-    return false;
+    std::error_code ec;
+    return std::filesystem::equivalent(sourcePath, destPath, ec) && !ec;
 }
 
 /// Writes `data` to `path` all-or-nothing: the bytes go to a temporary file in the same directory that
