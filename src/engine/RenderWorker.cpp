@@ -953,7 +953,11 @@ void RenderWorker::workerLoop() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
 
-            // Deliver completed render whenever documentId matches active document.
+            // Deliver completed render whenever documentId matches active document. Deliberately NOT
+            // filtered by generation: this tile may be the one a newer-generation request for the same key
+            // was deduplicated onto (enqueueRequest), so dropping it would leave that request unserved
+            // and the viewer waiting on a tile that is never re-rendered. A stale-generation delivery is
+            // harmless: the key identifies the content.
             if (m_running.load() && req.documentId == m_activeDocumentId.load()) {
                 if (renderedSuccessfully) {
                     Q_EMIT tileReady(req.documentId, req.generation, req.key, buffer);

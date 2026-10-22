@@ -121,6 +121,11 @@ public:
 
     /**
      * @brief Sets current request generation. Discards queued requests with older generations.
+     *
+     * Only QUEUED requests are discarded. A render that is already running is not cancelled and is still
+     * delivered when it finishes, even though its generation is now stale: a newer-generation request for
+     * the same tile may have been deduplicated onto it (see enqueueRequest), and tile keys, not
+     * generations, identify content, so a finished tile is valid for any consumer that still wants it.
      */
     void setGeneration(uint64_t generation);
 
