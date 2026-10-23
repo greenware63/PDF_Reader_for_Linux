@@ -15,6 +15,7 @@
 #include <QPainter>
 #include <QScrollBar>
 #include <QThread>
+#include <set>
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <QClipboard>
@@ -742,39 +743,48 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Queue generation 1 tile request
-        auto keyGen1 = pdf::TileKey::create(100, 0, 0, 0, 1.0, 1.0);
-        pdf::TileRenderRequest req1{100, 1, 0, {0, 0, 512, 512}, 1.0, 1.0, keyGen1, 10};
-        worker.enqueueRequest(req1);
+        // Contract under test (RenderWorker::setGeneration):
+        //   * requests still QUEUED for an older generation are pruned and never rendered;
+        //   * a tile already IN FLIGHT when the generation advances is still delivered, because tile keys
+        //     carry scale/DPR so it is valid content (discarding it starves the screen while scrolling,
+        //     see Test 13);
+        //   * requests of the new generation are delivered.
+        // The engine thread is made deterministic with the render delay hook: req A is popped and held
+        // in flight, req B is queued behind it, and only then does the generation advance.
+        std::set<int> deliveredCols; // col*10+row identifies the request
+        QObject::connect(&worker, &pdf::RenderWorker::tileReady,
+                         [&](int64_t, uint64_t, const pdf::TileKey& k, const pdf::PixelBuffer&) {
+                             deliveredCols.insert(k.col * 10 + k.row);
+                         });
+        worker.setRenderDelayForTesting(std::chrono::milliseconds(300));
 
-        // Cancel generation 1 by advancing to generation 2
+        const auto keyA = pdf::TileKey::create(100, 0, 0, 0, 1.0, 1.0); // in flight when gen advances
+        const auto keyB = pdf::TileKey::create(100, 0, 0, 1, 1.0, 1.0); // queued, must be pruned
+        const auto keyC = pdf::TileKey::create(100, 0, 1, 0, 1.0, 1.0); // generation 2, must be delivered
+        worker.enqueueRequest({100, 1, 0, {0, 0, 512, 512}, 1.0, 1.0, keyA, 10});
+        QThread::msleep(100); // engine has popped A and is sleeping in the hook
+        worker.enqueueRequest({100, 1, 0, {0, 512, 512, 512}, 1.0, 1.0, keyB, 10});
+
         worker.setGeneration(2);
-
-        // Queue generation 2 tile request
-        auto keyGen2 = pdf::TileKey::create(100, 0, 1, 0, 1.0, 1.0);
-        bool gen1Delivered = false;
-        bool gen2Delivered = false;
-
-        QObject::connect(&worker, &pdf::RenderWorker::tileReady, [&](int64_t, uint64_t gen, const pdf::TileKey&, const pdf::PixelBuffer&) {
-            if (gen == 1) gen1Delivered = true;
-            if (gen == 2) gen2Delivered = true;
-        });
-
-        pdf::TileRenderRequest req2{100, 2, 0, {512, 0, 512, 512}, 1.0, 1.0, keyGen2, 10};
-        worker.enqueueRequest(req2);
+        worker.enqueueRequest({100, 2, 0, {512, 0, 512, 512}, 1.0, 1.0, keyC, 10});
 
         worker.waitForIdle();
         QCoreApplication::processEvents();
+        worker.setRenderDelayForTesting(std::chrono::milliseconds(0));
 
-        if (gen1Delivered) {
+        if (deliveredCols.count(keyB.col * 10 + keyB.row)) {
             std::cerr << "[FAIL] Generation 1 request was not cancelled!" << std::endl;
             return 1;
         }
-        if (!gen2Delivered) {
+        if (!deliveredCols.count(keyA.col * 10 + keyA.row)) {
+            std::cerr << "[FAIL] In-flight tile was discarded when the generation advanced (scroll starvation)!" << std::endl;
+            return 1;
+        }
+        if (!deliveredCols.count(keyC.col * 10 + keyC.row)) {
             std::cerr << "[FAIL] Generation 2 request was not delivered!" << std::endl;
             return 1;
         }
-        std::cout << "  -> Passed: RenderWorker cancelled stale generation requests cleanly." << std::endl;
+        std::cout << "  -> Passed: queued stale requests pruned, in-flight tile delivered, new generation delivered." << std::endl;
     }
 
     // Test 10: Document replacement under pending render requests
