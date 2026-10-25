@@ -1,4 +1,4 @@
-#include "engine/RenderWorker.h"
+﻿#include "engine/RenderWorker.h"
 #include "engine/SearchText.h"
 #include "redact/Redaction.h"
 #include "ipc/IpcMessages.h"

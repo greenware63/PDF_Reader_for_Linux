@@ -1,4 +1,4 @@
-#include "WorkerServer.h"
+﻿#include "WorkerServer.h"
 #include <QCoreApplication>
 #include <QRandomGenerator>
 #include <algorithm>
