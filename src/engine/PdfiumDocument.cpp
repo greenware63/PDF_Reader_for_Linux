@@ -17,6 +17,19 @@ namespace pdf {
 
 static std::once_flag s_initFlag;
 
+namespace {
+// Creates the render-only form-fill environment for a freshly opened document (caller holds the mutex).
+std::shared_ptr<FormEnv> makeFormEnv(FPDF_DOCUMENT doc) {
+    auto env = std::make_shared<FormEnv>();
+    env->info.version = 1; // no callbacks installed, in particular no JS platform / submit / URI handlers
+    env->handle = FPDFDOC_InitFormFillEnvironment(doc, &env->info);
+    if (env->handle) {
+        FPDF_SetFormFieldHighlightAlpha(env->handle, 0); // no blue field tint
+    }
+    return env;
+}
+} // namespace
+
 void PdfiumDocument::ensureLibraryInitialized() {
     std::call_once(s_initFlag, []() {
         std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
@@ -77,12 +90,16 @@ DocumentError PdfiumDocument::loadFromFile(const std::string& filePath, const st
     }
 
     // Success: atomically swap active document handle
-    m_doc = DocumentHandle(newDoc, [](FPDF_DOCUMENT d) {
+    auto env = makeFormEnv(newDoc);
+    m_doc = DocumentHandle(newDoc, [env](FPDF_DOCUMENT d) {
         if (d) {
             std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+            // The form-fill environment must be torn down BEFORE its document is closed.
+            if (env && env->handle) { FPDFDOC_ExitFormFillEnvironment(env->handle); env->handle = nullptr; }
             FPDF_CloseDocument(d);
         }
     });
+    m_form = env;
     m_lastError = DocumentError::None;
     return DocumentError::None;
 }
@@ -129,13 +146,16 @@ DocumentError PdfiumDocument::loadFromBuffer(std::shared_ptr<const std::vector<u
 
     // Tie memory buffer lifetime directly to DocumentHandle deleter.
     // Keeps memory valid as long as either PdfiumDocument or any PdfiumPage exists!
-    m_doc = DocumentHandle(newDoc, [buf = std::move(bufferCopy)](FPDF_DOCUMENT d) {
+    auto env = makeFormEnv(newDoc);
+    m_doc = DocumentHandle(newDoc, [buf = std::move(bufferCopy), env](FPDF_DOCUMENT d) {
         if (d) {
             std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+            if (env && env->handle) { FPDFDOC_ExitFormFillEnvironment(env->handle); env->handle = nullptr; }
             FPDF_CloseDocument(d);
         }
         // buf is destroyed safely AFTER FPDF_CloseDocument completes
     });
+    m_form = env;
     m_lastError = DocumentError::None;
     return DocumentError::None;
 }
@@ -163,7 +183,7 @@ std::unique_ptr<IPage> PdfiumDocument::getPage(int pageIndex) {
         return nullptr;
     }
 
-    auto page = std::make_unique<PdfiumPage>(m_doc, pageIndex);
+    auto page = std::make_unique<PdfiumPage>(m_doc, pageIndex, m_form);
     if (!page->isValid()) {
         return nullptr;
     }
@@ -366,6 +386,7 @@ PixelBuffer PdfiumDocument::renderThumbnail(int pageIndex, int targetWidth) {
 }
 
 void PdfiumDocument::close() {
+    m_form.reset();
     m_doc.reset();
     m_lastError = DocumentError::None;
 }

@@ -25,11 +25,14 @@ static constexpr int64_t MAX_WHOLE_PAGE_PIXELS = 16 * 1024 * 1024; // 16 MP max 
 static constexpr int MAX_TILE_DIM = 4096;
 static constexpr int64_t MAX_TILE_PIXELS = 16 * 1024 * 1024;
 
-PdfiumPage::PdfiumPage(DocumentHandle doc, int pageIndex)
-    : m_doc(std::move(doc)), m_pageIndex(pageIndex) {
+PdfiumPage::PdfiumPage(DocumentHandle doc, int pageIndex, std::shared_ptr<FormEnv> form)
+    : m_doc(std::move(doc)), m_form(std::move(form)), m_pageIndex(pageIndex) {
     if (m_doc) {
         std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
         m_page = FPDF_LoadPage(m_doc.get(), pageIndex);
+        if (m_page && m_form && m_form->handle) {
+            FORM_OnAfterLoadPage(m_page, m_form->handle);
+        }
         if (m_page) {
             m_width = FPDF_GetPageWidthF(m_page);
             m_height = FPDF_GetPageHeightF(m_page);
@@ -40,8 +43,19 @@ PdfiumPage::PdfiumPage(DocumentHandle doc, int pageIndex)
 PdfiumPage::~PdfiumPage() {
     if (m_page) {
         std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+        if (m_form && m_form->handle) {
+            FORM_OnBeforeClosePage(m_page, m_form->handle);
+        }
         FPDF_ClosePage(m_page);
         m_page = nullptr;
+    }
+}
+
+// Caller holds the PDFium mutex. Draws widget (form field) appearances on top of the page render, using exactly
+// the same placement/rotation/flags as the FPDF_RenderPageBitmap call it follows.
+void PdfiumPage::drawFormFields(FPDF_BITMAP bitmap, int startX, int startY, int sizeX, int sizeY, int rotate, int flags) {
+    if (m_form && m_form->handle) {
+        FPDF_FFLDraw(m_form->handle, bitmap, m_page, startX, startY, sizeX, sizeY, rotate, flags);
     }
 }
 
@@ -126,6 +140,7 @@ PixelBuffer PdfiumPage::renderTile(const PixelRect& rect, double scale, double d
         pdfiumRotate,
         flags
     );
+    drawFormFields(bitmap, -x0, -y0, fullPageW, fullPageH, pdfiumRotate, flags);
 
     FPDFBitmap_Destroy(bitmap);
     return buffer;
@@ -190,6 +205,7 @@ PixelBuffer PdfiumPage::renderWholePage(double scale, double devicePixelRatio, i
 
     const int flags = FPDF_ANNOT;
     FPDF_RenderPageBitmap(bitmap, m_page, 0, 0, pixelW, pixelH, pdfiumRotate, flags);
+    drawFormFields(bitmap, 0, 0, pixelW, pixelH, pdfiumRotate, flags);
 
     FPDFBitmap_Destroy(bitmap);
     return buffer;
@@ -246,6 +262,7 @@ PixelBuffer PdfiumPage::renderThumbnail(int targetWidth, int rotation) {
     }
 
     FPDF_RenderPageBitmap(bitmap, m_page, 0, 0, targetW, targetH, pdfiumRotate, FPDF_ANNOT);
+    drawFormFields(bitmap, 0, 0, targetW, targetH, pdfiumRotate, FPDF_ANNOT);
     FPDFBitmap_Destroy(bitmap);
     return buffer;
 }

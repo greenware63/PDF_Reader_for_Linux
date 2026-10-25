@@ -2,6 +2,7 @@
 
 #include "engine/IPage.h"
 #include <fpdfview.h>
+#include <fpdf_formfill.h>
 #include <memory>
 #include <type_traits>
 #include <atomic>
@@ -10,9 +11,19 @@ namespace pdf {
 
 using DocumentHandle = std::shared_ptr<std::remove_pointer_t<FPDF_DOCUMENT>>;
 
+// Form-fill environment, used ONLY so PDFium draws AcroForm widget appearances (field values, check marks).
+// PDFium skips widgets in FPDF_RenderPageBitmap and draws them in FPDF_FFLDraw. Nothing executes: no JavaScript
+// platform (m_pJsPlatform stays null; the shipped PDFium has no V8 anyway), no XFA, no submit/URI/launch
+// callbacks, no mouse/keyboard input is ever forwarded, and the field highlight tint is disabled.
+// `info` must outlive `handle` (PDFium keeps a pointer to it), hence one shared struct.
+struct FormEnv {
+    FPDF_FORMFILLINFO info{};
+    FPDF_FORMHANDLE handle{nullptr};
+};
+
 class PdfiumPage : public IPage {
 public:
-    PdfiumPage(DocumentHandle doc, int pageIndex);
+    PdfiumPage(DocumentHandle doc, int pageIndex, std::shared_ptr<FormEnv> form = nullptr);
     ~PdfiumPage() override;
 
     bool isValid() const { return m_page != nullptr; }
@@ -29,7 +40,10 @@ public:
     static void setSimulateGetTextFailureForTesting(bool simulate) noexcept;
 
 private:
+    void drawFormFields(FPDF_BITMAP bitmap, int startX, int startY, int sizeX, int sizeY, int rotate, int flags);
+
     DocumentHandle m_doc;
+    std::shared_ptr<FormEnv> m_form;
     FPDF_PAGE m_page{nullptr};
     int m_pageIndex{0};
     double m_width{0.0};

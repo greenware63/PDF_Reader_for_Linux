@@ -1999,8 +1999,88 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: redaction reads the pinned/opened bytes; changed large files are refused." << std::endl;
     }
 
+    // Test 21: AcroForm field values are drawn by the viewer's render path (whole page, tile, rotation)
+    std::cout << "[TEST 22] Testing form field (widget) appearances are rendered..." << std::endl;
+    {
+        // Fixture lives next to sample.pdf's repository root: <root>/tests/fixtures/redaction/annots_forms.pdf
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        const std::string formPath = root + "/tests/fixtures/redaction/annots_forms.pdf";
+
+        auto fdoc = pdf::createDocument();
+        if (!fdoc || fdoc->loadFromFile(formPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Cannot open form fixture " << formPath << std::endl;
+            return 1;
+        }
+        auto fpage = fdoc->getPage(0);
+        if (!fpage) { std::cerr << "[FAIL] Form fixture has no page 0" << std::endl; return 1; }
+
+        // Count dark pixels inside a rectangle of a BGRX buffer
+        auto darkIn = [](const pdf::PixelBuffer& b, int x0, int y0, int x1, int y1) {
+            int n = 0;
+            for (int y = std::max(0, y0); y < std::min(b.height(), y1); ++y) {
+                const uint8_t* row = b.data() + static_cast<size_t>(y) * b.stride();
+                for (int x = std::max(0, x0); x < std::min(b.width(), x1); ++x) {
+                    const uint8_t* px = row + x * 4;
+                    if ((px[0] + px[1] + px[2]) / 3 < 128) ++n;
+                }
+            }
+            return n;
+        };
+
+        // Text boxes in top-left origin points (from pdftotext -bbox): the form field value
+        // "CANARY-FORM-VALUE" and, as a control that annotation drawing itself works, the free-text
+        // annotation "CANARY-ANNOT-VISIBLE".
+        const int fx0 = 72, fy0 = 275, fx1 = 210, fy1 = 291;
+        const int ax0 = 72, ay0 = 171, ax1 = 246, ay1 = 189;
+
+        auto whole = fpage->renderWholePage(1.0, 1.0, 0);
+        if (!whole.isValid() || whole.width() != 612 || whole.height() != 792) {
+            std::cerr << "[FAIL] Unexpected form fixture render size " << whole.width() << "x" << whole.height() << std::endl;
+            return 1;
+        }
+        const int annotInk = darkIn(whole, ax0, ay0, ax1, ay1);
+        const int formInk = darkIn(whole, fx0, fy0, fx1, fy1);
+        if (annotInk < 100) {
+            std::cerr << "[FAIL] Control failed: annotation ink=" << annotInk << std::endl;
+            return 1;
+        }
+        if (formInk < 100) {
+            std::cerr << "[FAIL] Form field value not rendered (whole page): ink=" << formInk
+                      << " (annotation control ink=" << annotInk << ")" << std::endl;
+            return 1;
+        }
+
+        // Tile path with a non-zero origin offset must place the field at the same spot
+        auto tile = fpage->renderTile({0, 256, 300, 64}, 1.0, 1.0, 0);
+        if (!tile.isValid() || darkIn(tile, fx0, fy0 - 256, fx1, fy1 - 256) < 100) {
+            std::cerr << "[FAIL] Form field value not rendered / misplaced in offset tile" << std::endl;
+            return 1;
+        }
+
+        // Rotated 90 degrees clockwise: (x, y) -> (H - y, x)
+        auto rot = fpage->renderWholePage(1.0, 1.0, 90);
+        if (!rot.isValid() || darkIn(rot, 792 - fy1, fx0, 792 - fy0, fx1) < 100) {
+            std::cerr << "[FAIL] Form field value not rendered / misplaced when rotated 90" << std::endl;
+            return 1;
+        }
+
+        // The environment must be torn down cleanly while a page outlives its document object
+        fdoc->close();
+        auto afterClose = fpage->renderWholePage(0.5, 1.0, 0);
+        if (!afterClose.isValid()) {
+            std::cerr << "[FAIL] Page render failed after document object closed" << std::endl;
+            return 1;
+        }
+        fpage.reset();
+
+        std::cout << "  -> Passed: form field ink=" << formInk << " (annotation control=" << annotInk
+                  << "); tile and rotated placement correct; clean teardown." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 20 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 22 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
