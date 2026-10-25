@@ -34,7 +34,8 @@ private:
     static void ensureLibraryInitialized();
     static DocumentError mapPdfiumError(unsigned long fpdfError);
 
-    DocumentHandle m_doc{nullptr};\
+    DocumentHandle m_doc{nullptr};
+    std::shared_ptr<FormEnv> m_form;
     DocumentError m_lastError{DocumentError::None};
 };
 

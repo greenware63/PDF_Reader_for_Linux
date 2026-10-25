@@ -77,6 +77,11 @@ The build system configures strict diagnostics and defense-in-depth compile-time
 └── test_widget.cpp             # Automated 12-part headless viewport widget CTest test suite
 ```
 
+## Known Limitations
+
+Form filling, PDF JavaScript and XFA forms are not supported: stored field values are displayed, but nothing is
+computed, validated or editable. See [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md).
+
 ## Building
 
 ### Requirements
