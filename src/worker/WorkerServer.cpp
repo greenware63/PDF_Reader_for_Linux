@@ -1,4 +1,4 @@
-﻿#include "WorkerServer.h"
+#include "WorkerServer.h"
 #include <QCoreApplication>
 #include <QRandomGenerator>
 #include <algorithm>
@@ -74,6 +74,8 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
             this, &WorkerServer::onRedactDocumentReady, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::redactDocumentFailed,
             this, &WorkerServer::onRedactDocumentFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::idle,
+            this, &WorkerServer::onIdle, Qt::QueuedConnection);
 }
 
 WorkerServer::~WorkerServer() {
@@ -124,6 +126,7 @@ void WorkerServer::onNewConnection() {
 
 void WorkerServer::onSocketDisconnected() {
     m_incomingBuffer.clear();
+    m_pendingControlRequests.clear();
     if (m_clientSocket) {
         m_clientSocket->deleteLater();
         m_clientSocket = nullptr;
@@ -330,9 +333,12 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
                 m_engineWorker.setHangEngineForTesting(true);
             }
 #endif
-            if (request.waitForIdle) {
-                m_engineWorker.waitForIdle();
-                QCoreApplication::processEvents();
+            if (request.waitForIdle && !m_engineWorker.isIdle()) {
+                m_pendingControlRequests.push_back(request);
+                if (m_engineWorker.isIdle()) {
+                    onIdle();
+                }
+                break;
             }
             ipc::WorkerControlResponse response;
             response.requestId = request.requestId;
@@ -348,6 +354,26 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             std::cerr << "[WorkerServer] Warning: Unrecognized message type: "
                       << static_cast<uint32_t>(type) << std::endl;
             break;
+    }
+}
+
+void WorkerServer::onIdle() {
+    if (m_pendingControlRequests.empty()) {
+        return;
+    }
+    if (!m_engineWorker.isIdle()) {
+        return;
+    }
+    auto pending = std::move(m_pendingControlRequests);
+    m_pendingControlRequests.clear();
+    for (const auto& request : pending) {
+        ipc::WorkerControlResponse response;
+        response.requestId = request.requestId;
+        if (request.queryStatus) {
+            response.pendingCount = m_engineWorker.pendingCount();
+            response.cachedPageCount = m_engineWorker.cachedPageCount();
+        }
+        sendPacket(ipc::MessageType::WorkerControlResponse, ipc::serialize(response));
     }
 }
 

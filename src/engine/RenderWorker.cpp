@@ -1,4 +1,4 @@
-﻿#include "engine/RenderWorker.h"
+#include "engine/RenderWorker.h"
 #include "engine/SearchText.h"
 #include "redact/Redaction.h"
 #include "ipc/IpcMessages.h"
@@ -100,6 +100,7 @@ RenderWorker::~RenderWorker() {
 
 void RenderWorker::stop() {
     cancelSearch();
+    bool shouldEmitIdle = false;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_running.load()) {
@@ -111,7 +112,10 @@ void RenderWorker::stop() {
         clearActiveSourceLocked();
         m_activeSearch.searchId = 0;
         m_cv.notify_all();
-        m_idleCv.notify_all();
+        shouldEmitIdle = checkAndNotifyIdleLocked();
+    }
+    if (shouldEmitIdle) {
+        Q_EMIT idle();
     }
 
     if (m_thread.joinable()) {
@@ -527,21 +531,23 @@ void RenderWorker::closeDocumentSync() {
 }
 
 void RenderWorker::setGeneration(uint64_t generation) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_currentGeneration.store(generation);
+    bool shouldEmit = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_currentGeneration.store(generation);
 
-    // Prune requests from previous generations
-    m_queue.erase(
-        std::remove_if(m_queue.begin(), m_queue.end(), [generation](const TileRenderRequest& req) {
-            return req.generation < generation;
-        }),
-        m_queue.end()
-    );
+        // Prune requests from previous generations
+        m_queue.erase(
+            std::remove_if(m_queue.begin(), m_queue.end(), [generation](const TileRenderRequest& req) {
+                return req.generation < generation;
+            }),
+            m_queue.end()
+        );
 
-    if (m_queue.empty() && m_controlQueue.empty() && m_outlineQueue.empty() &&
-        !m_isRendering && !m_isControlRunning && !m_isOutlineRunning &&
-        (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages)) {
-        m_idleCv.notify_all();
+        shouldEmit = checkAndNotifyIdleLocked();
+    }
+    if (shouldEmit) {
+        Q_EMIT idle();
     }
 }
 
@@ -677,22 +683,44 @@ void RenderWorker::startSearch(int64_t documentId, int64_t searchId, const QStri
 void RenderWorker::cancelSearch() {
     m_currentSearchId.fetch_add(1);
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_activeSearch.searchId = 0;
-    if (m_queue.empty() && m_controlQueue.empty() && m_outlineQueue.empty() &&
-        !m_isRendering && !m_isControlRunning && !m_isOutlineRunning) {
-        m_idleCv.notify_all();
+    bool shouldEmit = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_activeSearch.searchId = 0;
+        shouldEmit = checkAndNotifyIdleLocked();
+    }
+    if (shouldEmit) {
+        Q_EMIT idle();
     }
 }
 
 void RenderWorker::cancelAll() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_queue.clear();
-    if (m_controlQueue.empty() && m_outlineQueue.empty() && !m_isRendering &&
-        !m_isControlRunning && !m_isOutlineRunning &&
-        (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages)) {
+    bool shouldEmit = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_queue.clear();
+        shouldEmit = checkAndNotifyIdleLocked();
+    }
+    if (shouldEmit) {
+        Q_EMIT idle();
+    }
+}
+
+bool RenderWorker::checkAndNotifyIdleLocked() {
+    const bool idleState = m_queue.empty() && m_controlQueue.empty() && m_outlineQueue.empty() &&
+                           !m_isRendering && !m_isControlRunning && !m_isOutlineRunning && !m_isSearchRunning &&
+                           (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages);
+    if (idleState) {
         m_idleCv.notify_all();
     }
+    return idleState;
+}
+
+bool RenderWorker::isIdle() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_queue.empty() && m_controlQueue.empty() && m_outlineQueue.empty() &&
+           !m_isRendering && !m_isControlRunning && !m_isOutlineRunning && !m_isSearchRunning &&
+           (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages);
 }
 
 void RenderWorker::waitForIdle() {
@@ -836,8 +864,10 @@ void RenderWorker::workerLoop() {
                 m_queue.erase(m_queue.begin());
 
                 if (req.documentId != m_activeDocumentId.load() || req.generation < m_currentGeneration.load()) {
-                    if (m_queue.empty() && m_controlQueue.empty() && m_outlineQueue.empty() && !hasSearch) {
-                        m_idleCv.notify_all();
+                    const bool shouldEmit = checkAndNotifyIdleLocked();
+                    lock.unlock();
+                    if (shouldEmit) {
+                        Q_EMIT idle();
                     }
                     continue;
                 }
@@ -870,12 +900,14 @@ void RenderWorker::workerLoop() {
 
         if (hasControlTask) {
             ctrlTask.execute();
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_isControlRunning = false;
-            if (m_queue.empty() && m_controlQueue.empty() && m_outlineQueue.empty() &&
-                !m_isRendering && !m_isOutlineRunning &&
-                (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages)) {
-                m_idleCv.notify_all();
+            bool shouldEmit = false;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_isControlRunning = false;
+                shouldEmit = checkAndNotifyIdleLocked();
+            }
+            if (shouldEmit) {
+                Q_EMIT idle();
             }
             continue;
         }
@@ -887,11 +919,14 @@ void RenderWorker::workerLoop() {
                     Q_EMIT documentOutlineReady(outlineDocId, outline);
                 }
             }
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_isOutlineRunning = false;
-            if (m_queue.empty() && m_controlQueue.empty() && m_outlineQueue.empty() && !m_isRendering &&
-                (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages)) {
-                m_idleCv.notify_all();
+            bool shouldEmit = false;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_isOutlineRunning = false;
+                shouldEmit = checkAndNotifyIdleLocked();
+            }
+            if (shouldEmit) {
+                Q_EMIT idle();
             }
             continue;
         }
@@ -927,14 +962,14 @@ void RenderWorker::workerLoop() {
                 }
             }
 
+            bool shouldEmit = false;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_isRendering = false;
-                if (m_queue.empty() && m_controlQueue.empty() && m_outlineQueue.empty() &&
-                    !m_isOutlineRunning &&
-                    (m_activeSearch.searchId == 0 || m_activeSearch.nextPageToSearch >= m_activeSearch.totalPages)) {
-                    m_idleCv.notify_all();
-                }
+                shouldEmit = checkAndNotifyIdleLocked();
+            }
+            if (shouldEmit) {
+                Q_EMIT idle();
             }
             continue;
         }
@@ -947,13 +982,14 @@ void RenderWorker::workerLoop() {
             struct SearchRunGuard {
                 RenderWorker* w;
                 ~SearchRunGuard() {
-                    std::lock_guard<std::mutex> lock(w->m_mutex);
-                    w->m_isSearchRunning = false;
-                    if (w->m_queue.empty() && w->m_controlQueue.empty() && w->m_outlineQueue.empty() &&
-                        !w->m_isRendering && !w->m_isControlRunning && !w->m_isOutlineRunning &&
-                        (w->m_activeSearch.searchId == 0 ||
-                         w->m_activeSearch.nextPageToSearch >= w->m_activeSearch.totalPages)) {
-                        w->m_idleCv.notify_all();
+                    bool shouldEmit = false;
+                    {
+                        std::lock_guard<std::mutex> lock(w->m_mutex);
+                        w->m_isSearchRunning = false;
+                        shouldEmit = w->checkAndNotifyIdleLocked();
+                    }
+                    if (shouldEmit) {
+                        Q_EMIT w->idle();
                     }
                 }
             } searchRunGuard{this};
@@ -994,13 +1030,16 @@ void RenderWorker::workerLoop() {
                 if (isLastSearchPage || limitReached) {
                     Q_EMIT searchCompleted(searchDocId, searchId, totalSoFar, searchTruncated);
                     noteProgress(ipc::WorkerOp::Idle);
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    if (m_activeSearch.searchId == searchId) {
-                        m_activeSearch.searchId = 0;
+                    bool shouldEmit = false;
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        if (m_activeSearch.searchId == searchId) {
+                            m_activeSearch.searchId = 0;
+                        }
+                        shouldEmit = checkAndNotifyIdleLocked();
                     }
-                    if (m_queue.empty() && m_controlQueue.empty() && m_outlineQueue.empty() &&
-                        !m_isRendering && !m_isOutlineRunning) {
-                        m_idleCv.notify_all();
+                    if (shouldEmit) {
+                        Q_EMIT idle();
                     }
                 }
             }

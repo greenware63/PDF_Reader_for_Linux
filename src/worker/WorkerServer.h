@@ -7,6 +7,7 @@
 #include "ipc/SharedTile.h"
 #include <memory>
 #include <unordered_map>
+#include <vector>
 #include "ipc/IpcProtocol.h"
 #include "ipc/IpcMessages.h"
 #include "engine/RenderWorker.h"
@@ -32,6 +33,7 @@ private Q_SLOTS:
     void onNewConnection();
     void onReadyRead();
     void onSocketDisconnected();
+    void onIdle();
 
     // RenderWorker forwarders
     void onDocumentOpened(int64_t documentId, pdf::OpenResult result);
@@ -60,6 +62,7 @@ private:
     QLocalSocket* m_clientSocket{nullptr};
     QByteArray m_incomingBuffer;
     std::unordered_map<QString, std::unique_ptr<ipc::SharedTileSegment>> m_sharedTiles;
+    std::vector<ipc::WorkerControlRequest> m_pendingControlRequests;
 
     pdf::RenderWorker m_engineWorker;
 };

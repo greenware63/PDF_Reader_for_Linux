@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QObject>
 #include <QMetaType>
@@ -167,6 +167,11 @@ public:
     void waitForIdle();
 
     /**
+     * @brief Checks if the worker queue is empty and the worker thread is idle.
+     */
+    bool isIdle() const;
+
+    /**
      * @brief Shuts down the background worker thread cleanly.
      */
     void stop();
@@ -267,10 +272,13 @@ Q_SIGNALS:
     void searchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);
     /// Emitted when a search across all pages completes.
     void searchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated);
+    /// Emitted when all queued requests, in-flight render, control tasks, and active searches have completed.
+    void idle();
 
 private:
     void workerLoop();
     IPage* getOrLoadWorkerPage(int pageIndex);
+    bool checkAndNotifyIdleLocked();
 
     struct ControlTask {
         std::function<void()> execute;
@@ -316,7 +324,7 @@ private:
     std::atomic<int> m_testOpenDelayMs{0};
     std::atomic<int64_t> m_currentSearchId{0};
 
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
     std::condition_variable m_cv;
     std::condition_variable m_idleCv;
     bool m_isRendering{false};
