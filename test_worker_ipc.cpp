@@ -778,6 +778,64 @@ int main(int argc, char* argv[]) {
                   << " ms stall limit because progress kept advancing." << std::endl;
     }
 
+    // --- TEST 9E: the worker keeps answering heartbeats while a waitForIdle request is pending ---
+    // WorkerClient::waitForIdle() sends a control request that the worker answers only once its engine is
+    // idle. If the worker handles that request by BLOCKING its IPC thread until idle, it cannot read pings
+    // for the whole workload: no pongs, no progress reports, and the client's missed-ping count climbs
+    // toward the watchdog limit (the source of the rare Test 9C flake under host load). The observable
+    // contract: during a long workload the client keeps receiving pongs that carry advancing progress.
+#ifdef PDF_WORKER_TEST_HOOKS
+    std::cout << "[TEST 9E] Testing the worker keeps answering heartbeats while waitForIdle is pending..." << std::endl;
+    {
+        constexpr int kPingMs = 200;
+        constexpr int kTileDelayMs = 100;
+        constexpr int kTiles = 24; // 2.4 s of work = ~12 ping intervals
+        pdf::ipc::WorkerClient client;
+        client.setWatchdogParams(kPingMs, 50, 10000); // tolerant: only the pong/progress cadence is observed
+        auto res = client.openDocumentSync(1, samplePdf.toStdString());
+        if (res.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to open document." << std::endl;
+            return 1;
+        }
+        client.setRenderDelayForTesting(std::chrono::milliseconds(kTileDelayMs));
+
+        int progressReports = 0;
+        QObject::connect(&client, &pdf::ipc::WorkerClient::engineProgressed, [&]() { ++progressReports; });
+        bool failed = false;
+        QObject::connect(&client, &pdf::ipc::WorkerClient::workerFailed, [&](const QString&) { failed = true; });
+
+        for (int i = 0; i < kTiles; ++i) {
+            pdf::TileRenderRequest req;
+            req.documentId = 1;
+            req.generation = 1;
+            req.pageIndex = 0;
+            req.rect = pdf::PixelRect{0, i * 32, 256, 32};
+            req.scale = 1.0;
+            req.dpr = 1.0;
+            req.key = pdf::TileKey::create(1, 0, 0, i, 1.0, 1.0);
+            req.priority = kTiles - i;
+            client.enqueueRequest(req);
+        }
+        client.waitForIdle();
+        const int reportsDuringWait = progressReports;
+        client.stop();
+
+        if (failed) {
+            std::cerr << "[FAIL] Worker failed during the heartbeat-cadence test." << std::endl;
+            return 1;
+        }
+        // A worker that stays responsive reports progress about every ping interval (expect ~10+).
+        // One that blocks in waitForIdle reports at most once or twice, right at the end.
+        if (reportsDuringWait < 5) {
+            std::cerr << "[FAIL] Only " << reportsDuringWait << " progress report(s) reached the client during a "
+                      << (kTiles * kTileDelayMs) << " ms workload: the worker stopped answering heartbeats while "
+                      << "waitForIdle was pending." << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: " << reportsDuringWait << " progress reports arrived during the workload." << std::endl;
+    }
+#endif
+
     // --- TEST 9D: Workload Validation for 4 GiB RLIMIT_AS ---
     std::cout << "[TEST 9D] Workload validation for 4 GiB RLIMIT_AS under high-DPI tile rendering..." << std::endl;
     {
