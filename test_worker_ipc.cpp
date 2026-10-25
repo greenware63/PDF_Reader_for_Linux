@@ -33,7 +33,11 @@ static bool waitFor(std::function<bool()> condition, int timeoutMs = 5000) {
     return condition();
 }
 
-constexpr int kHeartbeatTestPages = 60;
+#ifdef PDF_WORKER_TEST_HOOKS
+constexpr int kHeartbeatTestPages = 60;   // duration is guaranteed by the per-step delay hook below
+#else
+constexpr int kHeartbeatTestPages = 150;  // no hook: rely on volume; the duration guard is advisory here
+#endif
 
 // Builds an N-page PDF (shared content stream with text and many filled rectangles) so a redaction of it
 // takes long enough to outlive a short watchdog stall limit.
@@ -1100,6 +1104,10 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Failed to open heartbeat test document." << std::endl;
             return 1;
         }
+#ifdef PDF_WORKER_TEST_HOOKS
+        // 3 phases x 60 pages = 180 steps x 15 ms = 2.7 s minimum, i.e. > 2x the stall limit on ANY host.
+        client.setRenderDelayForTesting(std::chrono::milliseconds(15));
+#endif
         std::vector<pdf::ipc::PageRedactionItem> redactions;
         pdf::ipc::PageRedactionItem item;
         item.pageIndex = 0;
@@ -1122,9 +1130,17 @@ int main(int argc, char* argv[]) {
         }
         // Guard against a vacuous pass: the run must have outlived BOTH limits, otherwise it proves nothing.
         if (elapsedMs < 2 * kStallMs) {
+#ifdef PDF_WORKER_TEST_HOOKS
+            // The step-delay hook makes this impossible unless the hook stopped working.
             std::cerr << "[FAIL] Heartbeat test finished in " << elapsedMs << " ms, faster than 2x the stall limit ("
-                      << 2 * kStallMs << " ms): raise kHeartbeatTestPages so the test is meaningful." << std::endl;
+                      << 2 * kStallMs << " ms) despite the step-delay hook." << std::endl;
             return 1;
+#else
+            // Hooks-OFF (shipping) build: duration depends on host speed, so a fast machine must not turn
+            // into a red test. Meaningfulness is enforced by the hooks-ON legs.
+            std::cout << "  NOTE: finished in " << elapsedMs << " ms (< 2x stall limit); not a meaningful heartbeat run"
+                      << " on this host; the hooks-ON CI legs enforce it." << std::endl;
+#endif
         }
         client.closeDocumentSync();
         client.stop();

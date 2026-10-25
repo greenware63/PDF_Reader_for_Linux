@@ -441,7 +441,21 @@ void RenderWorker::requestRedactDocument(int64_t documentId,
         // Liveness heartbeat: the engine runs for as long as the document is big, and the watchdog
         // judges a worker by whether this stamp advances. Without it a long redaction would be killed
         // after the stall limit although it is making steady progress.
+#ifdef PDF_WORKER_TEST_HOOKS
+        // Test hook: stretch each completed redaction step by the configured render delay, so a test can
+        // guarantee a redaction outlives the watchdog limits however fast the host is (0 disables).
+        opt.onProgress = [this, lastDone = -1](int done, int) mutable {
+            noteProgress(ipc::WorkerOp::Redact);
+            if (done != lastDone) {
+                lastDone = done;
+                if (const int delayMs = m_testRenderDelayMs.load(std::memory_order_relaxed); delayMs > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                }
+            }
+        };
+#else
         opt.onProgress = [this](int, int) { noteProgress(ipc::WorkerOp::Redact); };
+#endif
 
         pdf::redact::Result result = pdf::redact::redactDocument(
             sourceData,
