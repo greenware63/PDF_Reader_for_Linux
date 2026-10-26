@@ -160,6 +160,8 @@ public:
     void findText(const QString& query, bool matchCase = false);
     void findNext();
     void findPrevious();
+    /// Makes hit `index` (into searchMatches()) the current hit and scrolls to it. Out-of-range is ignored.
+    void goToSearchMatch(int index);
     void clearSearch();
     int searchMatchCount() const noexcept { return static_cast<int>(m_searchMatches.size()); }
     int currentSearchMatchIndex() const noexcept { return m_currentMatchIndex; }

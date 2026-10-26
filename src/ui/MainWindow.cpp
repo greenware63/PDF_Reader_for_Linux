@@ -186,6 +186,11 @@ void MainWindow::setupUi() {
 
     connect(m_findBar, &FindBar::searchRequested, this, [this](const QString& q, bool mc) {
         if (auto* v = currentViewer()) v->findText(q, mc);
+        // If the sidebar is already open, show the hit list; never pop the sidebar open on its own.
+        if (m_sidebarDock && m_sidebarDock->isVisible() && m_sidebarTabs && m_searchResultsWidget &&
+            !q.trimmed().isEmpty()) {
+            m_sidebarTabs->setCurrentWidget(m_searchResultsWidget);
+        }
     });
     connect(m_findBar, &FindBar::findNextRequested, this, [this]() {
         if (auto* v = currentViewer()) v->findNext();
@@ -271,6 +276,16 @@ void MainWindow::setupUi() {
 
     m_sidebarTabs->addTab(m_thumbnailWidget, tr("Pages"));
     m_sidebarTabs->addTab(m_sidebarStack, tr("Bookmarks"));
+
+    m_searchResultsWidget = new SearchResultsWidget(m_sidebarTabs);
+    m_searchResultsWidget->setViewer(m_viewer);
+    m_sidebarTabs->addTab(m_searchResultsWidget, tr("Search"));
+    connect(m_searchResultsWidget, &SearchResultsWidget::resultCountChanged, this, [this](int count) {
+        const int idx = m_sidebarTabs->indexOf(m_searchResultsWidget);
+        if (idx >= 0) {
+            m_sidebarTabs->setTabText(idx, count > 0 ? tr("Search (%1)").arg(count) : tr("Search"));
+        }
+    });
 
     connect(m_sidebarTabs, &QTabWidget::currentChanged, this, [this](int index) {
         if (m_sidebarTabs->widget(index) == m_thumbnailWidget) {
@@ -805,6 +820,9 @@ void MainWindow::onCurrentTabChanged(int index) {
 
     if (m_thumbnailWidget) {
         m_thumbnailWidget->setViewer(m_viewer);
+    }
+    if (m_searchResultsWidget) {
+        m_searchResultsWidget->setViewer(m_viewer);
     }
 
     if (m_viewer->isDocumentOpen()) {

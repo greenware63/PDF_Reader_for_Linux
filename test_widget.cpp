@@ -4127,8 +4127,103 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Redaction UI mode toggle, mark staging, viewport overlay rendering, and MainWindow action binding verified." << std::endl;
     }
 
+    // Test 45: Search results panel (sidebar list of hits with snippets, click-to-jump)
+    std::cout << "[TEST 45] Testing the Search results panel in MainWindow..." << std::endl;
+    {
+        const std::string panelDoc = "widget_two_page_text.pdf";
+        ui::MainWindow window;
+        if (!window.openFile(QString::fromStdString(panelDoc))) {
+            std::cerr << "[FAIL] Cannot open " << panelDoc << " for the search panel test." << std::endl;
+            return 1;
+        }
+        ui::PdfViewerWidget* v = window.currentViewer();
+        QElapsedTimer loadTimer;
+        loadTimer.start();
+        while (loadTimer.elapsed() < 3000 && (v == nullptr || !v->isDocumentOpen())) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+            v = window.currentViewer();
+        }
+        if (!v || !v->isDocumentOpen()) {
+            std::cerr << "[FAIL] Document did not open for the search panel test." << std::endl;
+            return 1;
+        }
+        ui::SearchResultsWidget* panel = window.searchResultsWidget();
+        if (!panel || panel->viewer() != v || panel->resultCount() != 0) {
+            std::cerr << "[FAIL] Search panel missing, not bound to the current viewer, or not empty initially." << std::endl;
+            return 1;
+        }
+        const int panelTab = window.sidebarTabs()->indexOf(panel);
+        if (panelTab < 0) {
+            std::cerr << "[FAIL] Search panel is not a sidebar tab." << std::endl;
+            return 1;
+        }
+
+        v->findText("page", false);
+        v->renderWorker().waitForIdle();
+        QCoreApplication::processEvents();
+
+        if (v->searchMatchCount() != 2 || panel->resultCount() != 2) {
+            std::cerr << "[FAIL] Panel lists " << panel->resultCount() << " hits, viewer has " << v->searchMatchCount()
+                      << " (expected 2 each)." << std::endl;
+            return 1;
+        }
+        for (int row = 0; row < 2; ++row) {
+            const QModelIndex idx = panel->model()->index(row, 0);
+            const QString snippet = idx.data(Qt::DisplayRole).toString();
+            const int st = idx.data(ui::SearchResultsModel::SnippetStartRole).toInt();
+            const int len = idx.data(ui::SearchResultsModel::SnippetLengthRole).toInt();
+            if (snippet.isEmpty() || st < 0 || len != 4 || st + len > snippet.size() ||
+                snippet.mid(st, len).compare(QStringLiteral("page"), Qt::CaseInsensitive) != 0) {
+                std::cerr << "[FAIL] Row " << row << " has no usable snippet/highlight: '" << snippet.toStdString()
+                          << "' @" << st << "+" << len << std::endl;
+                return 1;
+            }
+            if (idx.data(ui::SearchResultsModel::PageLabelRole).toString() != QString::number(row + 1)) {
+                std::cerr << "[FAIL] Row " << row << " has the wrong page label." << std::endl;
+                return 1;
+            }
+        }
+        if (window.sidebarTabs()->tabText(panelTab) != QStringLiteral("Search (2)")) {
+            std::cerr << "[FAIL] Search tab title is '" << window.sidebarTabs()->tabText(panelTab).toStdString() << "'." << std::endl;
+            return 1;
+        }
+
+        // Clicking a row makes that hit current and navigates to its page
+        const int startIndex = v->currentSearchMatchIndex();
+        const int target = (startIndex == 0) ? 1 : 0;
+        Q_EMIT panel->clicked(panel->model()->index(target, 0));
+        if (v->currentSearchMatchIndex() != target ||
+            v->currentPage() != v->searchMatches()[static_cast<size_t>(target)].pageIndex) {
+            std::cerr << "[FAIL] Clicking row " << target << " did not make it the current hit / go to its page." << std::endl;
+            return 1;
+        }
+        // And the selection follows Next/Previous
+        v->findNext();
+        if (panel->currentIndex().row() != v->currentSearchMatchIndex()) {
+            std::cerr << "[FAIL] Panel selection did not follow findNext()." << std::endl;
+            return 1;
+        }
+        // An out-of-range activation is ignored
+        const int before = v->currentSearchMatchIndex();
+        v->goToSearchMatch(99);
+        v->goToSearchMatch(-3);
+        if (v->currentSearchMatchIndex() != before) {
+            std::cerr << "[FAIL] Out-of-range goToSearchMatch changed the current hit." << std::endl;
+            return 1;
+        }
+
+        v->clearSearch();
+        QCoreApplication::processEvents();
+        if (panel->resultCount() != 0 || window.sidebarTabs()->tabText(panelTab) != QStringLiteral("Search")) {
+            std::cerr << "[FAIL] Panel was not emptied when the search was cleared." << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: panel lists every hit with snippet/highlight and page label, click navigates, selection follows, clear empties it." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 44 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    std::cout << " ALL 45 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

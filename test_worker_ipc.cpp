@@ -85,6 +85,51 @@ int main(int argc, char* argv[]) {
     std::cout << " RUNNING SANDBOXED WORKER IPC UNIT TESTS" << std::endl;
     std::cout << "========================================" << std::endl;
 
+    // --- TEST 0S: search-result snippets survive IPC and hostile snippet fields are rejected ---
+    std::cout << "[TEST 0S] Testing SearchMatch snippet serialization and bounds..." << std::endl;
+    {
+        using namespace pdf::ipc;
+        SearchMatchesFoundResponse res;
+        res.documentId = 7;
+        res.searchId = 9;
+        res.pageIndex = 3;
+        pdf::SearchMatch m;
+        m.pageIndex = 3;
+        m.charStartIndex = 10;
+        m.charCount = 3;
+        m.snippet = QString::fromUtf8("\u2026the fox jumps");
+        m.snippetMatchStart = 5;
+        m.snippetMatchLength = 3;
+        res.matches.push_back(m);
+
+        SearchMatchesFoundResponse back;
+        if (!deserialize(serialize(res), back) || back.matches.size() != 1 || back.matches[0].snippet != m.snippet ||
+            back.matches[0].snippetMatchStart != 5 || back.matches[0].snippetMatchLength != 3) {
+            std::cerr << "[FAIL] Snippet did not round-trip over IPC." << std::endl;
+            return 1;
+        }
+
+        auto expectRejected = [&](const char* what, auto mutate) {
+            SearchMatchesFoundResponse bad = res;
+            mutate(bad.matches[0]);
+            SearchMatchesFoundResponse out;
+            if (deserialize(serialize(bad), out)) {
+                std::cerr << "[FAIL] Hostile snippet accepted: " << what << std::endl;
+                return false;
+            }
+            return true;
+        };
+        if (!expectRejected("oversized text", [](pdf::SearchMatch& x) {
+                x.snippet = QString(pdf::MAX_SEARCH_SNIPPET_CHARS + 100, QChar(u'a'));
+                x.snippetMatchStart = 0; x.snippetMatchLength = 1; }) ||
+            !expectRejected("range past end", [](pdf::SearchMatch& x) { x.snippetMatchStart = 10; x.snippetMatchLength = 50; }) ||
+            !expectRejected("negative start", [](pdf::SearchMatch& x) { x.snippetMatchStart = -1; }) ||
+            !expectRejected("negative length", [](pdf::SearchMatch& x) { x.snippetMatchLength = -4; })) {
+            return 1;
+        }
+        std::cout << "  -> Passed: snippet round-trips; oversized text and out-of-range highlight are rejected." << std::endl;
+    }
+
     // --- TEST 0: Shared-tile transport security ---
     std::cout << "[TEST 0] Shared-tile transport rejects hostile names and survives a shrunken segment..." << std::endl;
     {
