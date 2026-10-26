@@ -2079,8 +2079,85 @@ int main(int argc, char* argv[]) {
                   << "); tile and rotated placement correct; clean teardown." << std::endl;
     }
 
+    // Test 23: search result snippets (context text shown in the Search results panel)
+    std::cout << "[TEST 23] Testing search result snippets..." << std::endl;
+    {
+        auto makePage = [](const std::u32string& s) {
+            pdf::PageText p;
+            p.pageIndex = 2;
+            for (size_t i = 0; i < s.size(); ++i) {
+                const double left = static_cast<double>(i * 6);
+                p.chars.push_back({left, 0.0, left + 5.0, 12.0, s[i]});
+            }
+            return p;
+        };
+        const std::u32string body = U"Lorem ipsum dolor sit amet,   consecteturadipiscing\nelit sed do FOXY eiusmod tempor incididunt "
+                                    U"ut labore et dolore magna aliqua enim ad minim veniam quis nostrud";
+        auto page = makePage(body);
+
+        auto hit = pdf::findTextInPage(page, QStringLiteral("foxy"), false);
+        if (hit.size() != 1 || hit[0].snippet.isEmpty()) {
+            std::cerr << "[FAIL] Search hit has no snippet." << std::endl;
+            return 1;
+        }
+        const auto& h = hit[0];
+        if (h.snippetMatchStart < 0 || h.snippetMatchLength != 4 ||
+            h.snippet.mid(h.snippetMatchStart, h.snippetMatchLength) != QStringLiteral("FOXY")) {
+            std::cerr << "[FAIL] Snippet highlight does not cover the hit: '" << h.snippet.toStdString() << "' @"
+                      << h.snippetMatchStart << "+" << h.snippetMatchLength << std::endl;
+            return 1;
+        }
+        if (h.snippet.contains(QChar(u'\n')) || h.snippet.contains(QStringLiteral("  "))) {
+            std::cerr << "[FAIL] Snippet whitespace was not collapsed: '" << h.snippet.toStdString() << "'" << std::endl;
+            return 1;
+        }
+        if (!h.snippet.startsWith(QChar(0x2026)) || !h.snippet.endsWith(QChar(0x2026))) {
+            std::cerr << "[FAIL] Snippet cut mid-page must carry ellipses: '" << h.snippet.toStdString() << "'" << std::endl;
+            return 1;
+        }
+        if (h.snippet.size() > pdf::MAX_SEARCH_SNIPPET_CHARS + 2) {
+            std::cerr << "[FAIL] Snippet exceeds the bound." << std::endl;
+            return 1;
+        }
+
+        // Hit at the very start / end of the page: no ellipsis on that side
+        auto startHit = pdf::findTextInPage(page, QStringLiteral("lorem"), false);
+        if (startHit.size() != 1 || startHit[0].snippet.startsWith(QChar(0x2026)) || startHit[0].snippetMatchStart != 0) {
+            std::cerr << "[FAIL] Snippet for a hit at page start is wrong: '" << startHit[0].snippet.toStdString() << "'" << std::endl;
+            return 1;
+        }
+        auto endHit = pdf::findTextInPage(page, QStringLiteral("nostrud"), false);
+        if (endHit.size() != 1 || endHit[0].snippet.endsWith(QChar(0x2026)) ||
+            endHit[0].snippet.mid(endHit[0].snippetMatchStart, endHit[0].snippetMatchLength) != QStringLiteral("nostrud")) {
+            std::cerr << "[FAIL] Snippet for a hit at page end is wrong." << std::endl;
+            return 1;
+        }
+
+        // A hit longer than the snippet cap still yields a bounded snippet with a valid range
+        const std::u32string longText(600, U'x');
+        auto longPage = makePage(longText);
+        auto longHit = pdf::findTextInPage(longPage, QString(500, QChar(u'x')), false);
+        if (longHit.size() != 1 || longHit[0].snippet.size() > pdf::MAX_SEARCH_SNIPPET_CHARS + 2 ||
+            longHit[0].snippetMatchStart < 0 ||
+            longHit[0].snippetMatchStart + longHit[0].snippetMatchLength > longHit[0].snippet.size()) {
+            std::cerr << "[FAIL] Over-long hit produced an unbounded or inconsistent snippet." << std::endl;
+            return 1;
+        }
+
+        // Supplementary-plane characters are not split
+        const std::u32string emoji = U"abc \U0001F600\U0001F600 target \U0001F600 end";
+        auto emojiPage = makePage(emoji);
+        auto emojiHit = pdf::findTextInPage(emojiPage, QStringLiteral("target"), false);
+        if (emojiHit.size() != 1 ||
+            emojiHit[0].snippet.mid(emojiHit[0].snippetMatchStart, emojiHit[0].snippetMatchLength) != QStringLiteral("target")) {
+            std::cerr << "[FAIL] Snippet with supplementary characters is inconsistent." << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: snippets carry the hit, collapse whitespace, use ellipses only where text was cut, stay bounded." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 22 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 23 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

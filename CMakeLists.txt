@@ -243,6 +243,8 @@ add_executable(pdf-reader
     src/ui/FindBar.cpp
     src/ui/ThumbnailListWidget.h
     src/ui/ThumbnailListWidget.cpp
+    src/ui/SearchResultsWidget.h
+    src/ui/SearchResultsWidget.cpp
     src/ui/PdfViewerWidget.h
     src/ui/PdfViewerWidget.cpp
     src/ui/MainWindow.h
@@ -300,6 +302,8 @@ add_executable(test_widget
     src/ui/FindBar.cpp
     src/ui/ThumbnailListWidget.h
     src/ui/ThumbnailListWidget.cpp
+    src/ui/SearchResultsWidget.h
+    src/ui/SearchResultsWidget.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/ui/PdfViewerWidget.cpp
@@ -329,6 +333,8 @@ add_executable(test_redaction_rotation
     src/ui/FindBar.cpp
     src/ui/ThumbnailListWidget.h
     src/ui/ThumbnailListWidget.cpp
+    src/ui/SearchResultsWidget.h
+    src/ui/SearchResultsWidget.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/ui/PdfViewerWidget.cpp
@@ -362,6 +368,8 @@ add_executable(test_password_prompt
     src/ui/FindBar.cpp
     src/ui/ThumbnailListWidget.h
     src/ui/ThumbnailListWidget.cpp
+    src/ui/SearchResultsWidget.h
+    src/ui/SearchResultsWidget.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/ui/PdfViewerWidget.cpp

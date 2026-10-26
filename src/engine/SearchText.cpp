@@ -101,6 +101,73 @@ NormalizedText normalizeText(qsizetype length, CodePointAt codePointAt, bool map
     return result;
 }
 
+// Builds the display snippet for a hit spanning page characters [startBox, endBox]. It uses the page's
+// ORIGINAL characters (not the normalized search text) so the user sees what is actually on the page.
+void fillSnippet(const PageText& pageText, int startBox, int endBox, SearchMatch& match) {
+    constexpr int kContextChars = 32;
+    const int last = static_cast<int>(pageText.chars.size()) - 1;
+    if (startBox < 0 || endBox < startBox || endBox > last) {
+        return;
+    }
+    const int lo = std::max(0, startBox - kContextChars);
+    const int hi = std::min(last, endBox + kContextChars);
+
+    QString text;
+    int matchStart = -1;
+    int matchEnd = 0; // exclusive
+    bool previousWasSpace = true; // swallows leading whitespace
+    for (int i = lo; i <= hi; ++i) {
+        if (text.size() >= MAX_SEARCH_SNIPPET_CHARS) {
+            break;
+        }
+        if (i == startBox) {
+            matchStart = static_cast<int>(text.size());
+        }
+        const char32_t cp = pageText.chars[static_cast<size_t>(i)].unicode;
+        if (cp != 0) {
+            const QString piece = QString::fromUcs4(&cp, 1);
+            if (piece.at(0).isSpace()) {
+                if (!previousWasSpace) {
+                    text.append(QChar(u' '));
+                }
+                previousWasSpace = true;
+            } else {
+                text.append(piece);
+                previousWasSpace = false;
+            }
+        }
+        if (i == endBox) {
+            matchEnd = static_cast<int>(text.size());
+        }
+    }
+    if (matchStart < 0) {
+        return; // snippet was capped before reaching the hit
+    }
+    if (matchEnd <= matchStart || matchEnd > text.size()) {
+        matchEnd = static_cast<int>(text.size()); // hit itself was longer than the cap
+    }
+    // Do not leave a dangling space or a split surrogate pair at the cut.
+    while (text.endsWith(QChar(u' ')) && matchEnd < text.size()) {
+        text.chop(1);
+    }
+    if (!text.isEmpty() && text.back().isHighSurrogate()) {
+        text.chop(1);
+        matchEnd = std::min(matchEnd, static_cast<int>(text.size()));
+    }
+    const QString ellipsis = QString(QChar(0x2026));
+    if (lo > 0) {
+        text.prepend(ellipsis);
+        matchStart += 1;
+        matchEnd += 1;
+    }
+    if (hi < last) {
+        text.append(ellipsis);
+    }
+    match.snippet = text;
+    match.snippetMatchStart = matchStart;
+    match.snippetMatchLength = matchEnd - matchStart;
+}
+
 } // namespace
 
 std::vector<SearchMatch> findTextInPage(
@@ -185,6 +252,7 @@ std::vector<SearchMatch> findTextInPage(
         match.charStartIndex = startBox;
         match.charCount = endBox - startBox + 1;
         match.rects = pageText.getSelectionRects(startBox, endBox);
+        fillSnippet(pageText, startBox, endBox, match);
         matches.push_back(std::move(match));
         pos = found + std::max<qsizetype>(1, normalizedQuery.text.size());
     }

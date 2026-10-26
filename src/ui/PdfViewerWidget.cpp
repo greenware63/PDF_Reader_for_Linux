@@ -1379,6 +1379,16 @@ void PdfViewerWidget::findPrevious() {
     viewport()->update();
 }
 
+void PdfViewerWidget::goToSearchMatch(int index) {
+    if (index < 0 || index >= static_cast<int>(m_searchMatches.size())) {
+        return;
+    }
+    m_currentMatchIndex = index;
+    scrollToMatch(m_searchMatches[static_cast<size_t>(index)]);
+    Q_EMIT searchResultsChanged(m_currentMatchIndex + 1, static_cast<int>(m_searchMatches.size()));
+    viewport()->update();
+}
+
 void PdfViewerWidget::clearSearch() {
     ++m_currentSearchId;
     m_searchQuery.clear();

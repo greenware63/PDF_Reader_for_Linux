@@ -8,6 +8,7 @@
 #include "PdfViewerWidget.h"
 #include "FindBar.h"
 #include "ThumbnailListWidget.h"
+#include "SearchResultsWidget.h"
 
 class QDialog;
 class QLineEdit;
@@ -86,6 +87,7 @@ public:
     QDockWidget* sidebarDock() const noexcept { return m_sidebarDock; }
     QTabWidget* sidebarTabs() const noexcept { return m_sidebarTabs; }
     ThumbnailListWidget* thumbnailWidget() const noexcept { return m_thumbnailWidget; }
+    SearchResultsWidget* searchResultsWidget() const noexcept { return m_searchResultsWidget; }
     QTreeView* outlineView() const noexcept { return m_outlineView; }
     QStandardItemModel* outlineModel() const noexcept { return m_outlineModel; }
     QMenu* recentFilesMenu() const noexcept { return m_recentFilesMenu; }
@@ -142,6 +144,7 @@ private:
     QDockWidget* m_sidebarDock{nullptr};
     QTabWidget* m_sidebarTabs{nullptr};
     ThumbnailListWidget* m_thumbnailWidget{nullptr};
+    SearchResultsWidget* m_searchResultsWidget{nullptr};
     QStackedWidget* m_sidebarStack{nullptr};
     QTreeView* m_outlineView{nullptr};
     QStandardItemModel* m_outlineModel{nullptr};

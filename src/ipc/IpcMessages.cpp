@@ -286,6 +286,9 @@ QDataStream& operator<<(QDataStream& out, const SearchMatch& match) {
     for (const auto& r : match.rects) {
         out << r;
     }
+    out << match.snippet;
+    out << static_cast<qint32>(match.snippetMatchStart);
+    out << static_cast<qint32>(match.snippetMatchLength);
     return out;
 }
 
@@ -307,6 +310,21 @@ QDataStream& operator>>(QDataStream& in, SearchMatch& match) {
         in >> box;
         match.rects.push_back(box);
     }
+    qint32 snipStart = 0, snipLen = 0;
+    in >> match.snippet >> snipStart >> snipLen;
+    // The snippet is shown in the UI: reject out-of-bounds lengths and ranges outside the string.
+    if (in.status() == QDataStream::Ok &&
+        (match.snippet.size() > MAX_SEARCH_SNIPPET_CHARS + 2 /* ellipses */ ||
+         snipStart < 0 || snipLen < 0 ||
+         static_cast<qint64>(snipStart) + snipLen > match.snippet.size())) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    if (in.status() != QDataStream::Ok) {
+        match.snippet.clear();
+        snipStart = snipLen = 0;
+    }
+    match.snippetMatchStart = snipStart;
+    match.snippetMatchLength = snipLen;
     return in;
 }
 
@@ -575,7 +593,7 @@ QDataStream& operator>>(QDataStream& in, SearchMatchesFoundResponse& res) {
     quint32 count = 0;
     in >> count;
     res.matches.clear();
-    if (!validateCollection(in, count, IPC_MAX_SEARCH_MATCHES, 16)) {
+    if (!validateCollection(in, count, IPC_MAX_SEARCH_MATCHES, 28)) {
         return in;
     }
     res.matches.reserve(count);
