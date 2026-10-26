@@ -109,10 +109,12 @@ WorkerServer::~WorkerServer() {
         ::close(m_listenFd);
         m_listenFd = -1;
     }
-    if (m_pendingReceivedFd >= 0) {
-        ::close(m_pendingReceivedFd);
-        m_pendingReceivedFd = -1;
+    for (int fd : m_receivedFds) {
+        if (fd >= 0) {
+            ::close(fd);
+        }
     }
+    m_receivedFds.clear();
 #else
     if (m_clientSocket) {
         m_clientSocket->close();
@@ -215,10 +217,12 @@ void WorkerServer::onSocketDisconnected() {
         ::close(m_clientFd);
         m_clientFd = -1;
     }
-    if (m_pendingReceivedFd >= 0) {
-        ::close(m_pendingReceivedFd);
-        m_pendingReceivedFd = -1;
+    for (int fd : m_receivedFds) {
+        if (fd >= 0) {
+            ::close(fd);
+        }
     }
+    m_receivedFds.clear();
 #else
     if (m_clientSocket) {
         m_clientSocket->deleteLater();
@@ -271,11 +275,7 @@ void WorkerServer::onReadyRead() {
                         if (flags >= 0) {
                             ::fcntl(rFd, F_SETFD, flags | FD_CLOEXEC);
                         }
-
-                        if (m_pendingReceivedFd >= 0) {
-                            ::close(m_pendingReceivedFd);
-                        }
-                        m_pendingReceivedFd = rFd;
+                        m_receivedFds.push_back(rFd);
                     }
                 }
             }
@@ -328,15 +328,6 @@ void WorkerServer::onReadyRead() {
 }
 
 void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payload) {
-#ifdef Q_OS_LINUX
-    if (type != ipc::MessageType::OpenDocumentRequest && m_pendingReceivedFd >= 0) {
-        // Unsolicited descriptor received with a non-OpenDocumentRequest message.
-        // Descriptor hygiene closes unexpected descriptors immediately.
-        ::close(m_pendingReceivedFd);
-        m_pendingReceivedFd = -1;
-    }
-#endif
-
     switch (type) {
         case ipc::MessageType::Ping: {
             ipc::PingRequest req;
@@ -355,8 +346,10 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             ipc::OpenDocumentRequest req;
             int docFd = -1;
 #ifdef Q_OS_LINUX
-            docFd = m_pendingReceivedFd;
-            m_pendingReceivedFd = -1;
+            if (!m_receivedFds.empty()) {
+                docFd = m_receivedFds.front();
+                m_receivedFds.erase(m_receivedFds.begin());
+            }
 #endif
             if (ipc::deserialize(payload, req)) {
                 m_engineWorker.openDocumentAsync(req.documentId, req.filePath.toStdString(), req.password.toStdString(), docFd);

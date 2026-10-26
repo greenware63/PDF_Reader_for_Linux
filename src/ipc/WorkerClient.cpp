@@ -44,7 +44,7 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::RenderPageResponse:
         case MessageType::RenderPageFailedResponse:
         case MessageType::ExtractPagesResponse:
-                case MessageType::ExtractPagesFailedResponse:
+        case MessageType::ExtractPagesFailedResponse:
         case MessageType::RedactDocumentResponse:
         case MessageType::RedactDocumentFailedResponse:
         case MessageType::WorkerError:
@@ -230,7 +230,16 @@ bool WorkerClient::sendOpenDocumentPacket(const OpenDocumentRequest& request, in
         return false;
     }
 
-    m_socket.flush();
+    flushOutgoing();
+    while (m_socket.bytesToWrite() > 0) {
+        if (!m_socket.waitForBytesWritten(200)) {
+            if (docFd >= 0) {
+                ::close(docFd);
+            }
+            failWorker(tr("Timed out waiting to flush socket before sending document descriptor."));
+            return false;
+        }
+    }
 
     const QByteArray payload = serialize(request);
     const QByteArray packet = buildPacket(MessageType::OpenDocumentRequest, payload);
@@ -321,9 +330,25 @@ void WorkerClient::flushOutgoing() {
 
 OpenResult WorkerClient::openDocumentSync(int64_t documentId, const std::string& filePath,
                                           const std::string& password) {
+#ifdef Q_OS_LINUX
+    const QString qPath = QString::fromStdString(filePath);
+    const QFileInfo fileInfo(qPath);
+    const std::string absPath = fileInfo.exists() ? fileInfo.absoluteFilePath().toStdString() : filePath;
+    int docFd = ::open(absPath.c_str(), O_RDONLY | O_CLOEXEC | O_NOCTTY);
+    if (docFd < 0) {
+        OpenResult res;
+        res.error = DocumentError::FileNotFound;
+        return res;
+    }
+    if (!ensureConnected()) {
+        ::close(docFd);
+        return failedOpenResult();
+    }
+#else
     if (!ensureConnected()) {
         return failedOpenResult();
     }
+#endif
     if (m_watchdogEnabled && m_socket.state() == QLocalSocket::ConnectedState && m_watchdogIntervalMs > 0) {
         m_missedPings = 0;
         if (!m_watchdogTimer.isActive()) {
@@ -345,12 +370,13 @@ OpenResult WorkerClient::openDocumentSync(int64_t documentId, const std::string&
         });
     const auto failedConnection = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
     connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-    OpenDocumentRequest request{documentId, QString::fromStdString(filePath),
-                                QString::fromStdString(password)};
 #ifdef Q_OS_LINUX
-    int docFd = ::open(filePath.c_str(), O_RDONLY | O_CLOEXEC | O_NOCTTY);
+    OpenDocumentRequest request{documentId, QString::fromStdString(absPath),
+                                QString::fromStdString(password)};
     sendOpenDocumentPacket(request, docFd);
 #else
+    OpenDocumentRequest request{documentId, QString::fromStdString(filePath),
+                                QString::fromStdString(password)};
     sendMessage(MessageType::OpenDocumentRequest, serialize(request));
 #endif
     timeout.start(RESPONSE_TIMEOUT_MS);
@@ -371,12 +397,25 @@ void WorkerClient::openDocumentAsync(int64_t documentId, const std::string& file
             m_watchdogTimer.start(m_watchdogIntervalMs);
         }
     }
-    OpenDocumentRequest request{documentId, QString::fromStdString(filePath),
-                                QString::fromStdString(password)};
 #ifdef Q_OS_LINUX
-    int docFd = ::open(filePath.c_str(), O_RDONLY | O_CLOEXEC | O_NOCTTY);
+    const QString qPath = QString::fromStdString(filePath);
+    const QFileInfo fileInfo(qPath);
+    const std::string absPath = fileInfo.exists() ? fileInfo.absoluteFilePath().toStdString() : filePath;
+    int docFd = ::open(absPath.c_str(), O_RDONLY | O_CLOEXEC | O_NOCTTY);
+    if (docFd < 0) {
+        QTimer::singleShot(0, this, [this, documentId]() {
+            OpenResult res;
+            res.error = DocumentError::FileNotFound;
+            Q_EMIT documentOpened(documentId, res);
+        });
+        return;
+    }
+    OpenDocumentRequest request{documentId, QString::fromStdString(absPath),
+                                QString::fromStdString(password)};
     sendOpenDocumentPacket(request, docFd);
 #else
+    OpenDocumentRequest request{documentId, QString::fromStdString(filePath),
+                                QString::fromStdString(password)};
     sendMessage(MessageType::OpenDocumentRequest, serialize(request));
 #endif
 }

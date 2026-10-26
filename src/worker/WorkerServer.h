@@ -67,7 +67,7 @@ private:
 #ifdef Q_OS_LINUX
     int m_listenFd{-1};
     int m_clientFd{-1};
-    int m_pendingReceivedFd{-1};
+    std::vector<int> m_receivedFds;
     QSocketNotifier* m_listenNotifier{nullptr};
     QSocketNotifier* m_clientNotifier{nullptr};
 #endif

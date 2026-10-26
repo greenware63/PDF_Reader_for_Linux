@@ -244,6 +244,9 @@ int main(int argc, char* argv[]) {
 #ifdef Q_OS_LINUX
         if (fd >= 0) {
             sock.flush();
+            while (sock.bytesToWrite() > 0) {
+                if (!sock.waitForBytesWritten(100)) break;
+            }
             int sockfd = static_cast<int>(sock.socketDescriptor());
             const QByteArray pkt = pdf::ipc::buildPacket(type, payload);
             struct msghdr msg{};
@@ -309,7 +312,8 @@ int main(int argc, char* argv[]) {
     std::cout << "[TEST 2] Testing document loading over IPC..." << std::endl;
     pdf::ipc::OpenDocumentRequest openReq{1, samplePdf, QString()};
 #ifdef Q_OS_LINUX
-    int sampleFd = ::open(samplePdf.toLocal8Bit().constData(), O_RDONLY | O_CLOEXEC);
+    const QString absSample = QFileInfo(samplePdf).absoluteFilePath();
+    int sampleFd = ::open(absSample.toLocal8Bit().constData(), O_RDONLY | O_CLOEXEC);
     sendPacketWithFd(client, pdf::ipc::MessageType::OpenDocumentRequest, pdf::ipc::serialize(openReq), sampleFd);
 #else
     sendPacket(pdf::ipc::MessageType::OpenDocumentRequest, pdf::ipc::serialize(openReq));
