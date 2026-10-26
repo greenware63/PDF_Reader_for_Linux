@@ -89,6 +89,10 @@ set(PDFIUM_DOWNLOAD_URL "https://github.com/bblanchon/pdfium-binaries/releases/d
 
 message(STATUS "Configuring PDFium from ${PDFIUM_DOWNLOAD_URL}")
 
+if(NOT FETCHCONTENT_SOURCE_DIR_PDFIUM_BINARIES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/pdfium_extracted/lib")
+    set(FETCHCONTENT_SOURCE_DIR_PDFIUM_BINARIES "${CMAKE_CURRENT_SOURCE_DIR}/pdfium_extracted" CACHE PATH "" FORCE)
+endif()
+
 FetchContent_Declare(
     pdfium_binaries
     URL ${PDFIUM_DOWNLOAD_URL}
@@ -591,8 +595,25 @@ install(TARGETS pdf-reader pdf_worker
     RUNTIME DESTINATION bin
 )
 if(UNIX AND NOT APPLE)
+    install(FILES resources/org.greenware.PDFReader.desktop
+        DESTINATION share/applications
+        OPTIONAL
+    )
     install(FILES resources/pdf-reader.desktop
         DESTINATION share/applications
         OPTIONAL
     )
+    install(FILES resources/org.greenware.PDFReader.metainfo.xml
+        DESTINATION share/metainfo
+        OPTIONAL
+    )
+    install(FILES resources/org.greenware.PDFReader.svg
+        DESTINATION share/icons/hicolor/scalable/apps
+        OPTIONAL
+    )
+    if(EXISTS "${pdfium_binaries_SOURCE_DIR}/lib/libpdfium.so")
+        install(FILES "${pdfium_binaries_SOURCE_DIR}/lib/libpdfium.so"
+            DESTINATION lib
+        )
+    endif()
 endif()
