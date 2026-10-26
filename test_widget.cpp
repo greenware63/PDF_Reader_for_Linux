@@ -3998,7 +3998,11 @@ int main(int argc, char* argv[]) {
             viewer.setRedactionMode(false);
             viewer.closeDocument();
             std::string textPath = "widget_text_fixture.pdf";
-            if (viewer.openDocument(QString::fromStdString(textPath)) == pdf::DocumentError::None) {
+            if (viewer.openDocument(QString::fromStdString(textPath)) != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Cannot open " << textPath << " for the selection padding test." << std::endl;
+                return 1;
+            }
+            {
                 viewer.resize(1000, 700);
                 viewer.goToPage(0);
                 viewer.setZoom(1.0);
@@ -4009,9 +4013,17 @@ int main(int argc, char* argv[]) {
                 viewer.waitForRendering();
 
                 auto pt = viewer.getPageText(0);
-                if (pt && pt->charCount() >= 5) {
+                if (!pt || pt->charCount() < 5) {
+                    std::cerr << "[FAIL] Text fixture has no extractable text for the selection padding test." << std::endl;
+                    return 1;
+                }
+                {
                     const auto rawRects = pt->getSelectionRects(0, 4);
-                    if (!rawRects.empty()) {
+                    if (rawRects.empty()) {
+                        std::cerr << "[FAIL] No selection rectangles for the first 5 characters." << std::endl;
+                        return 1;
+                    }
+                    {
                         const auto& r0 = rawRects.front();
                         const double rawLeft = std::min(r0.left, r0.right);
                         const double rawTop = std::min(r0.top, r0.bottom);
