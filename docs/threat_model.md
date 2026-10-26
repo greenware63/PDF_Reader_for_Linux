@@ -10,13 +10,14 @@
 A PDF that exploits a vulnerability in the parsing engine must **not** be able to read the user's private files, modify them, execute arbitrary binaries, or access the network.
 
 ### Priority Goals
-1. **Containment**: Code execution inside the PDF worker process remains strictly confined: no arbitrary filesystem writes, no process spawning, no network access, and bounded memory consumption.
+1. **Containment**: Code execution inside the PDF worker process remains strictly confined: no arbitrary filesystem reads or writes, no process spawning, no network access, and bounded memory consumption.
 2. **UI Process Integrity**: The UI process (`pdf-reader`) controls the display, system clipboard, and file dialogs. A hostile or compromised worker must not be able to crash, hang, or corrupt the UI process.
 3. **Availability**: A malicious PDF may terminate its own tab's worker, but must not freeze the application or exhaust machine resources.
 4. **Privacy**: Document content, encryption passwords, and user file paths must not leak over the network or persist in crash dumps.
 
 ### Platform Support Disclosure
-- **Linux**: Primary supported platform for secure handling of untrusted PDFs. Employs Linux Landlock, `PR_SET_NO_NEW_PRIVS`, `PR_SET_PDEATHSIG`, `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`, `RLIMIT_AS=4GiB`, `RLIMIT_CPU=7200s`, `RLIMIT_NOFILE=256`, seccomp `execve` denial, descriptor hygiene, and abstract socket IPC.
+- **Linux**: Primary supported platform for secure handling of untrusted PDFs. Employs Linux Landlock (strict read and write confinement), `PR_SET_NO_NEW_PRIVS`, `PR_SET_PDEATHSIG`, `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`, `RLIMIT_AS=4GiB`, `RLIMIT_CPU=7200s`, `RLIMIT_NOFILE=256`, seccomp `execve` denial, descriptor passing via `SCM_RIGHTS`, strict descriptor hygiene, and abstract socket IPC.
+- **Landlock Compatibility & Fail-Closed Enforcement**: Linux kernels without Landlock support (pre-5.13 or configs without `CONFIG_SECURITY_LANDLOCK=y`) strictly **fail closed** on startup with an explicit diagnostic error. Reduced-isolation fallback modes are intentionally omitted to prevent silent degradation of security boundaries.
 - **Windows**: Separate process execution over `QLocalSocket` is supported for functionality and crash isolation, but OS-level sandboxing (Landlock, seccomp, rlimits) is Linux-specific. **Windows builds should currently be considered unsupported for secure processing of untrusted or hostile PDFs.**
 
 ---
@@ -29,17 +30,25 @@ A PDF that exploits a vulnerability in the parsing engine must **not** be able t
 |                             (pdf-reader)                                |
 |  - Holds display, user file dialogs, clipboard, window management       |
 |  - Links only to pdf_layout and pdf_ipc (ZERO PDFium linkage)            |
+|  - Opens user PDFs read-only (O_CLOEXEC) and passes fd via SCM_RIGHTS    |
+|  - Closes local fd immediately after transfer for descriptor hygiene    |
 |  - Non-blocking heartbeat watchdog monitoring engine operations          |
 +-------------------------------------------------------------------------+
                                     |
-          Framed IPC Socket (QLocalSocket) + Shared Memory Transport
+          Framed IPC Socket (AF_UNIX) + SCM_RIGHTS + Shared Memory
                      64 MiB Payload Cap, Typed Serialization
                                     |
 +-------------------------------------------------------------------------+
 |                          pdf_worker Process                             |
 |  - Headless worker running RenderWorker engine thread                   |
 |  - Links to libpdfium (chromium/8100 pinned)                            |
-|  - Sandboxed via Landlock ABI 1-3 (deny writes, scoped /dev/shm)        |
+|  - Sandboxed via Landlock ABI 1-5 (deny reads & writes)                 |
+|  - Whitelisted read-only paths: system fonts, fontconfig, locales, tz   |
+|  - Scoped read/write path: /dev/shm (shared memory tile transport)      |
+|  - Cannot open arbitrary files by path; loads exclusively from passed fd|
+|  - <= 512 MiB: heap buffer copy provides disk-immutability (no SIGBUS)  |
+|  - > 512 MiB: pread-backed FPDF_FILEACCESS stream with EINTR retry      |
+|  - Received fds marked FD_CLOEXEC; unexpected descriptors closed        |
 |  - PR_SET_NO_NEW_PRIVS = 1                                             |
 |  - PR_SET_DUMPABLE = 0, RLIMIT_CORE = 0 (prevents core dumps/ptrace)   |
 |  - RLIMIT_AS = 4 GiB, RLIMIT_CPU = 7200s (SIGXCPU -> _exit(70))         |
@@ -55,14 +64,14 @@ A PDF that exploits a vulnerability in the parsing engine must **not** be able t
 
 | Threat ID | Threat & Impact | Severity | Code Evidence & Mechanism | Mitigation Status & Test Verification |
 |---|---|---|---|---|
-| **T1** | Compromised worker reads arbitrary user files (SSH keys, browser profiles) | **High** | Reads remain unconfined so worker can open arbitrary user-chosen PDF paths directly. | **Partially Mitigated / Phase 4 Roadmap**: Core-dump exposure disabled via `PR_SET_DUMPABLE=0` and `RLIMIT_CORE=0`. Descriptor hygiene closes all fds $> 2$ on startup. Verified in `test_worker_ipc.cpp` (Test 8 escape probe). Phase 4 migrates document opening to the UI process, passing an open file descriptor via `SCM_RIGHTS`. |
+| **T1** | Compromised worker reads arbitrary user files (SSH keys, browser profiles) | **High** | Landlock read confinement (`LANDLOCK_ACCESS_FS_READ_FILE \| LANDLOCK_ACCESS_FS_READ_DIR`) blocks all unallowlisted filesystem reads. Worker cannot open arbitrary files by path. Documents are opened exclusively by UI process and passed via `SCM_RIGHTS` (`MSG_CMSG_CLOEXEC` + explicit `FD_CLOEXEC`). Only verified runtime dependencies (fonts, fontconfig, locales, timezone, `/dev/shm`) are whitelisted. Files $\le 512\text{ MiB}$ are copied into immutable heap memory; files $> 512\text{ MiB}$ use pread streaming with `FPDF_FILEACCESS`. | **CLOSED**: Arbitrary file opens in worker return `EACCES`. Verified in `test_worker_ipc.cpp` (Test 8 probe asserts `read_outside: BLOCKED`; Test 15 verifies valid document descriptor passing and rendering; Test 16 verifies opening without descriptor is blocked; Test 17 verifies unexpected descriptor hygiene) and `test_render.cpp` (Test 22 verifies `loadFromDescriptor` buffered and pread streaming). |
 | **T2** | Compromised worker exfiltrates data over network | **High** | Seccomp BPF filter validating architecture, killing on mismatch or x32 ABI, denying `connect`, `socketcall`, `io_uring_*`, and restricting `socket` domain to `AF_UNIX`. | **Partially Mitigated / Hardened**: Outbound TCP/UDP socket creation and connection are blocked via seccomp BPF (denying `connect`, `socketcall`, non-`AF_UNIX` `socket`, and killing on architecture mismatch or `io_uring_*`). Verified in `test_worker_ipc.cpp` (Test 8 TCP probe and socketcall probe BLOCKED). Dedicated network namespace isolation (`CLONE_NEWNET`) is on the post-MVP roadmap to eliminate remaining local datagram avenues. |
 | **T3** | Rogue local process connects to worker socket before UI does | **Medium** | Worker listens on abstract socket `pdf_worker_<pid>_<uuid>`. | **Mitigated**: Socket names use random UUIDs generated per worker. `WorkerServer` enforces single-client semantics (`m_clientConnected`), immediately rejecting and closing any second connection attempt. Phase 4 migrates to inherited `socketpair()`. Verified in `test_worker_ipc.cpp` (Test 1, Test 6). |
-| **T4** | Compromised worker tampers with or overwrites files in `/dev/shm` | **Medium** | Landlock allows create/write/remove in `/dev/shm` for tile transfer. | **Mitigated**: Worker creates tiles with `0600` permissions (restricted to the same UID). Tile names follow a strict UUID scheme (`pdf-tile-<pid>-<rand>`), verified by `isValidSharedTileKey()`. Reader verifies segment sizes with `fstat` before mapping and immediately unlinks segments. Verified in `test_worker_ipc.cpp` (Test 0 hostile key rejection). |
+| **T4** | Compromised worker tampers with or overwrites files in `/dev/shm` | **Medium** | Landlock allows create/read/write/remove in `/dev/shm` for tile transfer. | **Mitigated**: Worker creates tiles with `0600` permissions (restricted to the same UID). Tile names follow a strict UUID scheme (`pdf-tile-<pid>-<rand>`), verified by `isValidSharedTileKey()`. Reader verifies segment sizes with `fstat` before mapping and immediately unlinks segments. Verified in `test_worker_ipc.cpp` (Test 0 hostile key rejection). |
 | **T5** | Malicious PDF causes runaway memory consumption or hangs forever | **Medium** | PDFium rendering complex vector artwork or decompression bombs. | **CLOSED**: Enforces `RLIMIT_AS = 4 GiB`, `RLIMIT_CPU = 7200s` with clean `_exit(70)` on `SIGXCPU`. Non-blocking UI watchdog queries worker health every 2s. If an operation stalls without progress for $> 60\text{ s}$ (or 3 missed pings), worker is killed and recovery banner displayed. Verified in `test_worker_ipc.cpp` (Test 9A, 9B, 9C, 9D, 10). |
 | **T6** | Hostile worker output exploits UI process deserializers | **Medium** | Serialized messages delivered from worker to UI process. | **Partially Mitigated / Hardened**: Bounded framing (`MAX_IPC_PAYLOAD_SIZE = 64 MiB`), strict magic (`0x50444657`), version matching, integer overflow checks (`validateCollection`), and clamping on dimensions (16,384 px max). Verified in `test_worker_ipc.cpp` (Test 0, Test 3) and `IpcFuzzTestSuite` (1000+ mutated deserialization fuzz runs). Continuous coverage-guided fuzzing (libFuzzer/AFL++) in CI remains on the roadmap. |
 | **T7** | Unpatched PDFium vulnerabilities remain exploitable | **Medium** | Prebuilt binary pinned to Chromium release. | **Mitigated**: Pinned build is explicitly tracked at `chromium/8100` and downloaded with SHA256 integrity verification. |
-| **T8** | Worker fails to start on kernels lacking Landlock | **Low** (Availability) | Worker enforces fail-closed isolation. | **Mitigated by Design**: Fail-closed policy in `applyProcessIsolation()`. Worker aborts with clear diagnostic error if Landlock or required sandboxing is unsupported, preventing unconfined execution. Verified in `test_worker_ipc.cpp` (Test 10). |
+| **T8** | Worker fails to start on kernels lacking Landlock | **Low** (Availability) | Worker enforces fail-closed isolation. | **Mitigated by Design**: Fail-closed policy in `applyProcessIsolation()`. Worker aborts with clear diagnostic error if Landlock or required sandboxing is unsupported, preventing unconfined execution. Verified in `test_worker_ipc.cpp` (Test 10, Test 18). |
 | **T9** | Shell argument injection during page printing | **Low** | PDF metadata or printer naming passed to external printing subsystems. | **Mitigated**: Printing uses Qt's structured `QPrinterInfo` and `QPrinter` APIs without shell invocations. |
 | **T10** | Worker reaches D-Bus session bus or desktop socket | **Medium** | Desktop environment session bus accessible via abstract or `/tmp` sockets. | **Partially Mitigated / Hardened**: Stream connection to D-Bus session bus and desktop sockets is blocked via seccomp (`connect` returns `EPERM`). Verified in `test_worker_ipc.cpp` (Test 8 D-Bus probe BLOCKED). Unconnected datagrams are restricted by lack of reachable service endpoints. |
 | **T11** | Password and document path leakage in settings or logs | **Low** | Document encryption passwords and recent file lists. | **Mitigated**: Worker does not log password strings or request bodies. "Clear History" function in UI removes persisted document paths. Passwords travel in-memory only over local IPC. |
@@ -76,14 +85,23 @@ Every security control is mapped directly to regression unit tests executed unde
 
 - **Test 0**: Shared-tile name sanitization (rejects traversal, illegal prefix, shrunken segment SIGBUS defense).
 - **Test 1**: Worker process lifecycle, versioned handshake, and Ping/Pong negotiation.
-- **Test 2**: IPC document loading and password handling.
+- **Test 2**: IPC document loading and password handling with passed descriptor.
 - **Test 3**: Shared-memory rasterization with memory bounds validation.
 - **Test 6**: Clean teardown on socket disconnect without zombie processes.
 - **Test 7**: Crash resilience (worker termination caught cleanly without crashing the UI).
-- **Test 8**: Deterministic isolation escape probe (verifies write confinement to `/tmp`, baseline read access, D-Bus socket reachability, foreign `/dev/shm` marker).
+- **Test 8**: Deterministic isolation escape probe (verifies write confinement to `/tmp`, read confinement asserting `read_outside: BLOCKED`, D-Bus socket reachability, foreign `/dev/shm` marker).
 - **Test 9A**: Watchdog progress snapshot verification during simulated engine hang.
 - **Test 9B**: Watchdog re-arming across document close/reopen and live stall timeout detection.
 - **Test 9C**: Progressing multi-tile operations complete smoothly without false watchdog triggers.
 - **Test 9D**: Workload validation under high-DPI rendering asserting `VmPeak` $< 4\text{ GiB}$ `RLIMIT_AS`.
-- **Test 10**: Explicit abort and diagnostic error handling when sandbox limits fail to apply.
+- **Test 10**: Explicit abort and diagnostic error handling when resource limits fail to apply (`--test-fail-rlimit`).
+- **Test 11**: End-to-end sandboxed worker rasterization and redaction payload verification.
+- **Test 12**: Malformed redaction request error reporting.
+- **Test 13**: Redaction immunity to on-disk source file mutation/deletion after opening.
+- **Test 14**: Long redaction progress heartbeats keep watchdog and client silence limit alive.
+- **Test 15**: Valid document reads and rendering work via descriptor passing over IPC.
+- **Test 16**: Denied reads of unrelated files (Landlock read confinement blocks arbitrary file opens without descriptor).
+- **Test 17**: Unexpected descriptor hygiene (unsolicited descriptors closed immediately without leak).
+- **Test 18**: Worker startup strictly fails closed when Landlock is unavailable (`--test-fail-landlock`).
+- **`test_render` Test 22**: `loadFromDescriptor` handles invalid fds, buffered loading ($\le 512\text{ MiB}$), and pread streaming ($> 512\text{ MiB}$).
 - **Redaction Verification**: Structural sanitization, canary elimination, and independent parser inspection in `RedactionTestSuite`; UI rotation and file overwrite protection in `test_redaction_rotation` and `test_redaction_file_safety`; the 1.5 pt selection margin in `test_widget.cpp` (`ViewportWidgetTestSuite`).

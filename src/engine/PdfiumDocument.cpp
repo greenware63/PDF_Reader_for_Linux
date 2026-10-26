@@ -12,10 +12,108 @@
 #include <unordered_map>
 #include <vector>
 #include <cmath>
+#include <cerrno>
+
+#ifdef _WIN32
+#include <io.h>
+#include <sys/stat.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#endif
 
 namespace pdf {
 
 static std::once_flag s_initFlag;
+static constexpr size_t DEFAULT_DESCRIPTOR_STREAM_THRESHOLD = 512ULL * 1024ULL * 1024ULL; // 512 MiB
+static std::atomic<size_t> s_streamThreshold{DEFAULT_DESCRIPTOR_STREAM_THRESHOLD};
+
+void PdfiumDocument::setDescriptorStreamThresholdForTesting(size_t bytes) {
+    s_streamThreshold.store(bytes);
+}
+
+void PdfiumDocument::resetDescriptorStreamThresholdForTesting() {
+    s_streamThreshold.store(DEFAULT_DESCRIPTOR_STREAM_THRESHOLD);
+}
+
+namespace {
+
+struct PreadDocumentSource {
+    FPDF_FILEACCESS fileAccess{};
+    int fd{-1};
+    uint64_t fileSize{0};
+    bool ownsFd{true};
+
+    PreadDocumentSource(int inFd, uint64_t inSize, bool inOwnsFd)
+        : fd(inFd), fileSize(inSize), ownsFd(inOwnsFd) {
+        fileAccess.m_FileLen = static_cast<unsigned long>(fileSize);
+        fileAccess.m_GetBlock = &PreadDocumentSource::getBlock;
+        fileAccess.m_Param = this;
+    }
+
+    ~PreadDocumentSource() {
+        if (ownsFd && fd >= 0) {
+#ifdef _WIN32
+            ::_close(fd);
+#else
+            ::close(fd);
+#endif
+            fd = -1;
+        }
+    }
+
+    PreadDocumentSource(const PreadDocumentSource&) = delete;
+    PreadDocumentSource& operator=(const PreadDocumentSource&) = delete;
+
+    static int getBlock(void* param, unsigned long pos, unsigned char* pBuf, unsigned long size) {
+        if (!param || !pBuf || size == 0) {
+            return 0;
+        }
+        auto* self = static_cast<PreadDocumentSource*>(param);
+        const uint64_t uPos = static_cast<uint64_t>(pos);
+        const uint64_t uSize = static_cast<uint64_t>(size);
+
+        // Offset overflow checks:
+        if (uPos > self->fileSize || uSize > self->fileSize || uPos + uSize > self->fileSize) {
+            return 0;
+        }
+
+        size_t totalRead = 0;
+        while (totalRead < size) {
+#ifdef _WIN32
+            static std::mutex s_winSeekMutex;
+            std::lock_guard<std::mutex> lk(s_winSeekMutex);
+            if (::_lseeki64(self->fd, static_cast<__int64>(uPos + totalRead), SEEK_SET) == -1) {
+                return 0;
+            }
+            int bytes = ::_read(self->fd, pBuf + totalRead, static_cast<unsigned int>(size - totalRead));
+            if (bytes <= 0) {
+                return 0;
+            }
+            totalRead += static_cast<size_t>(bytes);
+#else
+            const off_t targetOffset = static_cast<off_t>(uPos + totalRead);
+            ssize_t bytes = ::pread(self->fd, pBuf + totalRead, size - totalRead, targetOffset);
+            if (bytes < 0) {
+                if (errno == EINTR) {
+                    continue; // Interrupted by signal -> retry
+                }
+                return 0; // I/O or pread error
+            }
+            if (bytes == 0) {
+                // Unexpected EOF (file truncated concurrently on disk)
+                return 0;
+            }
+            totalRead += static_cast<size_t>(bytes);
+#endif
+        }
+        return (totalRead == size) ? 1 : 0;
+    }
+};
+
+} // namespace
 
 namespace {
 // Creates the render-only form-fill environment for a freshly opened document (caller holds the mutex).
@@ -160,6 +258,116 @@ DocumentError PdfiumDocument::loadFromBuffer(std::shared_ptr<const std::vector<u
     return DocumentError::None;
 }
 
+DocumentError PdfiumDocument::loadFromDescriptor(int fd, const std::string& password, bool takeOwnership) {
+    if (fd < 0) {
+        m_lastError = DocumentError::FileNotFound;
+        return m_lastError;
+    }
+
+    uint64_t fileSize = 0;
+#ifdef _WIN32
+    struct _stat64 st{};
+    if (::_fstat64(fd, &st) != 0) {
+        if (takeOwnership) ::_close(fd);
+        m_lastError = DocumentError::FileNotFound;
+        return m_lastError;
+    }
+    if ((st.st_mode & _S_IFREG) == 0 || st.st_size < 4) {
+        if (takeOwnership) ::_close(fd);
+        m_lastError = DocumentError::InvalidFormat;
+        return m_lastError;
+    }
+    fileSize = static_cast<uint64_t>(st.st_size);
+#else
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) {
+        if (takeOwnership) ::close(fd);
+        m_lastError = DocumentError::FileNotFound;
+        return m_lastError;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size < 4) {
+        if (takeOwnership) ::close(fd);
+        m_lastError = DocumentError::InvalidFormat;
+        return m_lastError;
+    }
+    fileSize = static_cast<uint64_t>(st.st_size);
+#endif
+
+    const size_t threshold = s_streamThreshold.load();
+
+    // Strategy 1: Heap Vector Pinning (fileSize <= threshold)
+    // Copies file bytes into RAM to guarantee true immutability (immune to SIGBUS on truncation
+    // and external tampering) and closes fd immediately.
+    if (fileSize <= threshold) {
+        auto buffer = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(fileSize));
+        size_t totalRead = 0;
+        while (totalRead < static_cast<size_t>(fileSize)) {
+#ifdef _WIN32
+            int bytes = ::_read(fd, buffer->data() + totalRead, static_cast<unsigned int>(fileSize - totalRead));
+            if (bytes <= 0) break;
+            totalRead += static_cast<size_t>(bytes);
+#else
+            ssize_t bytes = ::pread(fd, buffer->data() + totalRead, static_cast<size_t>(fileSize) - totalRead, static_cast<off_t>(totalRead));
+            if (bytes < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (bytes == 0) break;
+            totalRead += static_cast<size_t>(bytes);
+#endif
+        }
+
+        if (takeOwnership) {
+#ifdef _WIN32
+            ::_close(fd);
+#else
+            ::close(fd);
+#endif
+        }
+
+        if (totalRead != static_cast<size_t>(fileSize)) {
+            m_lastError = DocumentError::InvalidFormat;
+            return m_lastError;
+        }
+
+        return loadFromBuffer(std::move(buffer), password);
+    }
+
+    // Strategy 2: FPDF_FILEACCESS with pread (fileSize > threshold)
+    auto source = std::make_shared<PreadDocumentSource>(fd, fileSize, takeOwnership);
+
+    const char* pwd = password.empty() ? nullptr : password.c_str();
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    FPDF_DOCUMENT newDoc = FPDF_LoadCustomDocument(&source->fileAccess, pwd);
+    if (!newDoc) {
+        unsigned long err = FPDF_GetLastError();
+        if (err == FPDF_ERR_PASSWORD && !password.empty()) {
+            m_lastError = DocumentError::BadPassword;
+        } else {
+            m_lastError = mapPdfiumError(err);
+        }
+        return m_lastError;
+    }
+
+    int count = FPDF_GetPageCount(newDoc);
+    if (count <= 0) {
+        FPDF_CloseDocument(newDoc);
+        m_lastError = DocumentError::EmptyDocument;
+        return m_lastError;
+    }
+
+    // Tie PreadDocumentSource lifetime (owns fd and FPDF_FILEACCESS) directly to DocumentHandle deleter.
+    m_doc = DocumentHandle(newDoc, [src = std::move(source)](FPDF_DOCUMENT d) {
+        if (d) {
+            std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+            FPDF_CloseDocument(d);
+        }
+    });
+    m_lastError = DocumentError::None;
+    return DocumentError::None;
+}
+
 int PdfiumDocument::pageCount() const {
     if (!m_doc) return 0;
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
@@ -280,7 +488,7 @@ static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK boo
         FPDFBookmark_GetTitle(bookmark, buf.data(), titleBytes);
         size_t charCount = (titleBytes / 2);
         if (charCount > 0 && buf[charCount - 1] == 0) {
-            --charCount;
+            --charCount;\
         }
         item.title = QString::fromUtf16(buf.data(), static_cast<qsizetype>(charCount));
     }
@@ -301,7 +509,7 @@ static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK boo
             if (hasY) {
                 item.hasTargetY = getDisplayedYFraction(doc, item.pageIndex, hasX != 0,
                                                         hasY != 0, xVal, yVal, state,
-                                                        item.targetYFraction);
+                                                        item.targetYFraction);\
             }
         }
     }

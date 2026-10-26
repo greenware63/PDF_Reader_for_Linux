@@ -19,6 +19,13 @@
 #include <QFileInfo>
 #include <QDir>
 #include <QRegularExpression>
+#ifdef Q_OS_LINUX
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <cerrno>
+#endif
 
 static bool waitFor(std::function<bool()> condition, int timeoutMs = 5000) {
     QElapsedTimer timer;
@@ -233,6 +240,47 @@ int main(int argc, char* argv[]) {
         client.flush();
     };
 
+    auto sendPacketWithFd = [&](QLocalSocket& sock, pdf::ipc::MessageType type, const QByteArray& payload, int fd = -1) {
+#ifdef Q_OS_LINUX
+        if (fd >= 0) {
+            sock.flush();
+            int sockfd = static_cast<int>(sock.socketDescriptor());
+            const QByteArray pkt = pdf::ipc::buildPacket(type, payload);
+            struct msghdr msg{};
+            struct iovec iov{};
+            iov.iov_base = const_cast<char*>(pkt.constData());
+            iov.iov_len = static_cast<size_t>(pkt.size());
+            msg.msg_iov = &iov;
+            msg.msg_iovlen = 1;
+
+            char cmsgBuf[CMSG_SPACE(sizeof(int))];
+            msg.msg_control = cmsgBuf;
+            msg.msg_controllen = sizeof(cmsgBuf);
+
+            struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+            cmsg->cmsg_level = SOL_SOCKET;
+            cmsg->cmsg_type = SCM_RIGHTS;
+            cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+            std::memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
+
+            ::sendmsg(sockfd, &msg, MSG_NOSIGNAL);
+            ::close(fd);
+            return;
+        }
+#else
+        (void)fd;
+#endif
+        QByteArray pkt = pdf::ipc::buildPacket(type, payload);
+        sock.write(pkt);
+        sock.flush();
+#ifdef Q_OS_LINUX
+        if (fd >= 0) {
+            ::close(fd);
+        }
+#endif
+    };
+    (void)sendPacketWithFd;
+
     // Send Ping
     pdf::ipc::PingRequest pingReq{42};
     sendPacket(pdf::ipc::MessageType::Ping, pdf::ipc::serialize(pingReq));
@@ -260,7 +308,12 @@ int main(int argc, char* argv[]) {
     // --- TEST 2: OpenDocumentRequest and Response ---
     std::cout << "[TEST 2] Testing document loading over IPC..." << std::endl;
     pdf::ipc::OpenDocumentRequest openReq{1, samplePdf, QString()};
+#ifdef Q_OS_LINUX
+    int sampleFd = ::open(samplePdf.toLocal8Bit().constData(), O_RDONLY | O_CLOEXEC);
+    sendPacketWithFd(client, pdf::ipc::MessageType::OpenDocumentRequest, pdf::ipc::serialize(openReq), sampleFd);
+#else
     sendPacket(pdf::ipc::MessageType::OpenDocumentRequest, pdf::ipc::serialize(openReq));
+#endif
 
     bool gotOpenResp = waitFor([&]() {
         return readPacket(msgType, msgPayload) && msgType == pdf::ipc::MessageType::OpenDocumentResponse;
@@ -561,8 +614,11 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] seccomp must not deny ordinary syscalls (getuid regression)." << std::endl;
             return 1;
         }
-        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] read_outside: PERMITTED")) ||
-            !output.contains(QStringLiteral("[ISOLATION_SELFTEST] dev_shm_foreign: PERMITTED"))) {
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] read_outside: BLOCKED"))) {
+            std::cerr << "[FAIL] read_outside probe should be BLOCKED by Landlock on Linux: " << output.toStdString() << std::endl;
+            return 1;
+        }
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] dev_shm_foreign: PERMITTED"))) {
             std::cerr << "[FAIL] Probes failed to report expected baseline access: " << output.toStdString() << std::endl;
             return 1;
         }
@@ -1250,6 +1306,206 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: " << kHeartbeatTestPages << "-page redaction took " << elapsedMs << " ms, outliving the "
                   << kStallMs << " ms stall limit and the " << kSilenceMs << " ms silence limit." << std::endl;
     }
+
+    // --- TEST 15: Valid Document Reads Work via Descriptor Passing ---
+    std::cout << "[TEST 15] Testing valid document reads and rendering work via descriptor passing..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto opened = client.openDocumentSync(15, samplePdf.toStdString());
+        if (opened.error != pdf::DocumentError::None || opened.pageCount <= 0) {
+            std::cerr << "[FAIL] Failed to open document over IPC with descriptor passing: error="
+                      << static_cast<int>(opened.error) << std::endl;
+            return 1;
+        }
+        bool tileReady = false;
+        QObject::connect(&client, &pdf::ipc::WorkerClient::tileReady,
+                         [&](int64_t docId, uint64_t, const pdf::TileKey&, const pdf::PixelBuffer& buf) {
+                             if (docId == 15 && buf.isValid()) {
+                                 tileReady = true;
+                             }
+                         });
+        pdf::TileRenderRequest req;
+        req.documentId = 15;
+        req.generation = 1;
+        req.pageIndex = 0;
+        req.rect = pdf::PixelRect{0, 0, 128, 128};
+        req.scale = 1.0;
+        req.dpr = 1.0;
+        req.key = pdf::TileKey::create(15, 0, 0, 0, 1.0, 1.0);
+        client.enqueueRequest(req);
+        if (!waitFor([&]() { return tileReady; }, 5000)) {
+            std::cerr << "[FAIL] Tile rendering failed after opening document via descriptor passing." << std::endl;
+            return 1;
+        }
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: Valid document loaded and rendered successfully via passed descriptor." << std::endl;
+    }
+
+    // --- TEST 16: Denied Reads of Unrelated Files (Landlock Read Confinement) ---
+    std::cout << "[TEST 16] Testing worker Landlock read confinement denies arbitrary file reads..." << std::endl;
+    {
+        const QString noFdSocket = QStringLiteral("pdf_test_nofd_%1").arg(QCoreApplication::applicationPid());
+        QProcess noFdWorker;
+        noFdWorker.start(workerExe, QStringList() << QStringLiteral("--socket") << noFdSocket);
+        if (!noFdWorker.waitForStarted(3000)) {
+            std::cerr << "[FAIL] Failed to spawn worker for Landlock read confinement test." << std::endl;
+            return 1;
+        }
+        QLocalSocket rawClient;
+#ifdef Q_OS_LINUX
+        rawClient.setSocketOptions(QLocalSocket::AbstractNamespaceOption);
+#endif
+        if (!waitFor([&]() {
+                if (rawClient.state() != QLocalSocket::ConnectedState && rawClient.state() != QLocalSocket::ConnectingState) {
+                    rawClient.connectToServer(noFdSocket);
+                }
+                return rawClient.state() == QLocalSocket::ConnectedState;
+            }, 5000)) {
+            std::cerr << "[FAIL] Could not connect to worker for read confinement test." << std::endl;
+            noFdWorker.kill();
+            return 1;
+        }
+        QByteArray rawIn;
+        QObject::connect(&rawClient, &QLocalSocket::readyRead, [&]() { rawIn.append(rawClient.readAll()); });
+
+        // Send OpenDocumentRequest WITHOUT passing a file descriptor over SCM_RIGHTS
+        pdf::ipc::OpenDocumentRequest req{16, samplePdf, QString()};
+        QByteArray pkt = pdf::ipc::buildPacket(pdf::ipc::MessageType::OpenDocumentRequest, pdf::ipc::serialize(req));
+        rawClient.write(pkt);
+        rawClient.flush();
+
+        pdf::ipc::MessageType type{};
+        QByteArray reply;
+        bool gotReply = waitFor([&]() {
+            if (static_cast<size_t>(rawIn.size()) < sizeof(pdf::ipc::PacketHeader)) return false;
+            pdf::ipc::PacketHeader hdr;
+            std::memcpy(&hdr, rawIn.constData(), sizeof(hdr));
+            if (hdr.magic != pdf::ipc::IPC_MAGIC) return false;
+            const size_t full = sizeof(hdr) + hdr.payloadSize;
+            if (static_cast<size_t>(rawIn.size()) < full) return false;
+            type = static_cast<pdf::ipc::MessageType>(hdr.type);
+            reply = rawIn.mid(static_cast<qsizetype>(sizeof(hdr)), static_cast<qsizetype>(hdr.payloadSize));
+            return true;
+        }, 5000);
+
+        if (!gotReply || type != pdf::ipc::MessageType::OpenDocumentResponse) {
+            std::cerr << "[FAIL] Worker did not reply to OpenDocumentRequest without descriptor." << std::endl;
+            noFdWorker.kill();
+            return 1;
+        }
+        pdf::ipc::OpenDocumentResponse resp;
+        if (!pdf::ipc::deserialize(reply, resp)) {
+            std::cerr << "[FAIL] Failed to deserialize OpenDocumentResponse." << std::endl;
+            noFdWorker.kill();
+            return 1;
+        }
+#ifdef Q_OS_LINUX
+        // On Linux under Landlock, worker cannot open the file path directly without descriptor passing.
+        if (resp.result.error == pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Worker unexpectedly opened file by path without descriptor passing under Landlock!" << std::endl;
+            noFdWorker.kill();
+            return 1;
+        }
+#endif
+        rawClient.disconnectFromServer();
+        noFdWorker.kill();
+        noFdWorker.waitForFinished(3000);
+        std::cout << "  -> Passed: Worker is confined by Landlock and cannot read arbitrary files without descriptor passing." << std::endl;
+    }
+
+    // --- TEST 17: Unexpected Descriptor Hygiene (Unsolicited Descriptors Are Closed) ---
+    std::cout << "[TEST 17] Testing unexpected descriptor hygiene (unsolicited descriptors closed)..." << std::endl;
+    {
+        const QString hygieneSocket = QStringLiteral("pdf_test_hygiene_%1").arg(QCoreApplication::applicationPid());
+        QProcess hygieneWorker;
+        hygieneWorker.start(workerExe, QStringList() << QStringLiteral("--socket") << hygieneSocket);
+        if (!hygieneWorker.waitForStarted(3000)) {
+            std::cerr << "[FAIL] Failed to spawn worker for descriptor hygiene test." << std::endl;
+            return 1;
+        }
+        QLocalSocket hygieneClient;
+#ifdef Q_OS_LINUX
+        hygieneClient.setSocketOptions(QLocalSocket::AbstractNamespaceOption);
+#endif
+        if (!waitFor([&]() {
+                if (hygieneClient.state() != QLocalSocket::ConnectedState && hygieneClient.state() != QLocalSocket::ConnectingState) {
+                    hygieneClient.connectToServer(hygieneSocket);
+                }
+                return hygieneClient.state() == QLocalSocket::ConnectedState;
+            }, 5000)) {
+            std::cerr << "[FAIL] Could not connect to worker for descriptor hygiene test." << std::endl;
+            hygieneWorker.kill();
+            return 1;
+        }
+        QByteArray hygieneIn;
+        QObject::connect(&hygieneClient, &QLocalSocket::readyRead, [&]() { hygieneIn.append(hygieneClient.readAll()); });
+
+        // Send a PingRequest with an unsolicited descriptor attached
+        pdf::ipc::PingRequest pingReq{99};
+        QByteArray pingPayload = pdf::ipc::serialize(pingReq);
+#ifdef Q_OS_LINUX
+        int dummyFd = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+        sendPacketWithFd(hygieneClient, pdf::ipc::MessageType::Ping, pingPayload, dummyFd);
+#else
+        hygieneClient.write(pdf::ipc::buildPacket(pdf::ipc::MessageType::Ping, pingPayload));
+        hygieneClient.flush();
+#endif
+
+        pdf::ipc::MessageType type{};
+        QByteArray reply;
+        bool gotPong = waitFor([&]() {
+            if (static_cast<size_t>(hygieneIn.size()) < sizeof(pdf::ipc::PacketHeader)) return false;
+            pdf::ipc::PacketHeader hdr;
+            std::memcpy(&hdr, hygieneIn.constData(), sizeof(hdr));
+            if (hdr.magic != pdf::ipc::IPC_MAGIC) return false;
+            const size_t full = sizeof(hdr) + hdr.payloadSize;
+            if (static_cast<size_t>(hygieneIn.size()) < full) return false;
+            type = static_cast<pdf::ipc::MessageType>(hdr.type);
+            reply = hygieneIn.mid(static_cast<qsizetype>(sizeof(hdr)), static_cast<qsizetype>(hdr.payloadSize));
+            return true;
+        }, 5000);
+
+        if (!gotPong || type != pdf::ipc::MessageType::Pong) {
+            std::cerr << "[FAIL] Worker failed to respond to Ping sent with unexpected descriptor." << std::endl;
+            hygieneWorker.kill();
+            return 1;
+        }
+        pdf::ipc::PongResponse pongResp;
+        if (!pdf::ipc::deserialize(reply, pongResp) || pongResp.seq != 99) {
+            std::cerr << "[FAIL] Invalid Pong reply sequence on hygiene test." << std::endl;
+            hygieneWorker.kill();
+            return 1;
+        }
+
+        hygieneClient.disconnectFromServer();
+        hygieneWorker.kill();
+        hygieneWorker.waitForFinished(3000);
+        std::cout << "  -> Passed: Worker handled unsolicited descriptor and preserved protocol stability." << std::endl;
+    }
+
+    // --- TEST 18: Startup Fails Without Landlock (Fail-Closed) ---
+    std::cout << "[TEST 18] Testing worker startup fails when Landlock is unavailable (fail-closed)..." << std::endl;
+#ifdef PDF_WORKER_TEST_HOOKS
+    {
+        QProcess landlockProc;
+        landlockProc.start(workerExe, QStringList() << QStringLiteral("--test-fail-landlock"));
+        landlockProc.waitForFinished(5000);
+        if (landlockProc.exitCode() == 0) {
+            std::cerr << "[FAIL] Worker should fail startup when Landlock is unavailable." << std::endl;
+            return 1;
+        }
+        const QString errOut = QString::fromUtf8(landlockProc.readAllStandardError());
+        if (!errOut.contains(QStringLiteral("Landlock is unavailable"))) {
+            std::cerr << "[FAIL] Error message did not cite Landlock failure: " << errOut.toStdString() << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Worker strictly fails closed when Landlock is unavailable: "
+                  << errOut.trimmed().toStdString() << std::endl;
+    }
+#else
+    std::cout << "  -> Skipped: ENABLE_TEST_HOOKS is OFF (--test-fail-landlock hook compiled out of shipping build)." << std::endl;
+#endif
 
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;

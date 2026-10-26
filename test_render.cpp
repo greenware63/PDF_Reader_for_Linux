@@ -12,7 +12,15 @@
 #include "engine/PixelBuffer.h"
 #include "layout/DocumentLayout.h"
 #include "engine/PageText.h"
+#include "engine/PdfiumDocument.h"
 #include "engine/PdfiumPage.h"
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include "engine/RenderWorker.h"
 #include "engine/SearchTypes.h"
 #include "engine/SearchText.h"
@@ -2156,8 +2164,88 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: snippets carry the hit, collapse whitespace, use ellipses only where text was cut, stay bounded." << std::endl;
     }
 
+    // --- TEST 24: Descriptor-backed document loading (loadFromDescriptor) & pread streaming ---
+    std::cout << "[TEST 24] Testing descriptor-backed document loading and pread streaming path..." << std::endl;
+    {
+        auto doc = pdf::createDocument();
+        // 1. Invalid fd handling
+        auto errBad = doc->loadFromDescriptor(-1, "", true);
+        if (errBad == pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Expected failure on invalid fd -1, got None" << std::endl;
+            return 1;
+        }
+
+        // 2. Valid fd loading (buffered heap path <= 512 MiB)
+#ifdef _WIN32
+        int fd1 = _open(samplePath.c_str(), _O_RDONLY | _O_BINARY);
+#else
+        int fd1 = ::open(samplePath.c_str(), O_RDONLY | O_CLOEXEC);
+#endif
+        if (fd1 < 0) {
+            std::cerr << "[FAIL] Failed to open " << samplePath << " for descriptor test" << std::endl;
+            return 1;
+        }
+        auto errFd1 = doc->loadFromDescriptor(fd1, "", true);
+        if (errFd1 != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to load document from descriptor: " << static_cast<int>(errFd1) << std::endl;
+            return 1;
+        }
+        if (doc->pageCount() <= 0) {
+            std::cerr << "[FAIL] Expected at least 1 page from descriptor document, got " << doc->pageCount() << std::endl;
+            return 1;
+        }
+        auto page0 = doc->getPage(0);
+        if (!page0) {
+            std::cerr << "[FAIL] Failed to get page 0 from descriptor document" << std::endl;
+            return 1;
+        }
+        auto buf1 = page0->renderWholePage(1.0, 1.0);
+        if (!buf1.isValid() || buf1.width() <= 0 || buf1.height() <= 0) {
+            std::cerr << "[FAIL] Failed to render page 0 from descriptor document" << std::endl;
+            return 1;
+        }
+
+        // 3. Forced pread streaming path (threshold = 0)
+        pdf::PdfiumDocument::setDescriptorStreamThresholdForTesting(0);
+        auto streamDoc = pdf::createDocument();
+#ifdef _WIN32
+        int fd2 = _open(samplePath.c_str(), _O_RDONLY | _O_BINARY);
+#else
+        int fd2 = ::open(samplePath.c_str(), O_RDONLY | O_CLOEXEC);
+#endif
+        if (fd2 < 0) {
+            pdf::PdfiumDocument::resetDescriptorStreamThresholdForTesting();
+            std::cerr << "[FAIL] Failed to open " << samplePath << " for streaming descriptor test" << std::endl;
+            return 1;
+        }
+        auto errFd2 = streamDoc->loadFromDescriptor(fd2, "", true);
+        pdf::PdfiumDocument::resetDescriptorStreamThresholdForTesting();
+
+        if (errFd2 != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Failed to load document via pread streaming path: " << static_cast<int>(errFd2) << std::endl;
+            return 1;
+        }
+        if (streamDoc->pageCount() != doc->pageCount()) {
+            std::cerr << "[FAIL] Page count mismatch on streaming descriptor: expected " << doc->pageCount()
+                      << ", got " << streamDoc->pageCount() << std::endl;
+            return 1;
+        }
+        auto streamPage0 = streamDoc->getPage(0);
+        if (!streamPage0) {
+            std::cerr << "[FAIL] Failed to get page 0 from streaming descriptor document" << std::endl;
+            return 1;
+        }
+        auto buf2 = streamPage0->renderWholePage(1.0, 1.0);
+        if (!buf2.isValid() || buf2.width() != buf1.width() || buf2.height() != buf1.height()) {
+            std::cerr << "[FAIL] Render mismatch on streaming descriptor document" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: loadFromDescriptor correctly handled invalid fd, buffered load, and pread streaming." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 23 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 24 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

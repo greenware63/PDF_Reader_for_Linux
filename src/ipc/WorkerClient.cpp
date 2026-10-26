@@ -11,6 +11,13 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#ifdef Q_OS_LINUX
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <cerrno>
+#endif
 
 namespace pdf::ipc {
 namespace {
@@ -214,6 +221,93 @@ bool WorkerClient::sendPacket(MessageType type, const QByteArray& payload) {
     return true;
 }
 
+bool WorkerClient::sendOpenDocumentPacket(const OpenDocumentRequest& request, int docFd) {
+#ifdef Q_OS_LINUX
+    if (!ensureConnected()) {
+        if (docFd >= 0) {
+            ::close(docFd);
+        }
+        return false;
+    }
+
+    m_socket.flush();
+
+    const QByteArray payload = serialize(request);
+    const QByteArray packet = buildPacket(MessageType::OpenDocumentRequest, payload);
+    if (packet.isEmpty()) {
+        if (docFd >= 0) {
+            ::close(docFd);
+        }
+        failWorker(tr("An IPC message exceeded the protocol size limit."));
+        return false;
+    }
+
+    if (docFd < 0) {
+        return sendPacket(MessageType::OpenDocumentRequest, payload);
+    }
+
+    int sockfd = static_cast<int>(m_socket.socketDescriptor());
+    if (sockfd < 0) {
+        ::close(docFd);
+        failWorker(tr("Worker socket descriptor is invalid."));
+        return false;
+    }
+
+    struct msghdr msg{};
+    struct iovec iov{};
+    iov.iov_base = const_cast<char*>(packet.constData());
+    iov.iov_len = static_cast<size_t>(packet.size());
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+
+    char cmsgBuf[CMSG_SPACE(sizeof(int))];
+    msg.msg_control = cmsgBuf;
+    msg.msg_controllen = sizeof(cmsgBuf);
+
+    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    std::memcpy(CMSG_DATA(cmsg), &docFd, sizeof(int));
+
+    ssize_t sent = 0;
+    while (true) {
+        sent = ::sendmsg(sockfd, &msg, MSG_NOSIGNAL);
+        if (sent < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ::close(docFd);
+            failWorker(tr("Failed to send document descriptor to worker: %1").arg(strerror(errno)));
+            return false;
+        }
+        break;
+    }
+
+    ::close(docFd);
+
+    if (sent < packet.size()) {
+        const char* remainingData = packet.constData() + sent;
+        size_t remainingBytes = static_cast<size_t>(packet.size() - sent);
+        while (remainingBytes > 0) {
+            ssize_t n = ::write(sockfd, remainingData, remainingBytes);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                failWorker(tr("Failed to complete sending packet to worker: %1").arg(strerror(errno)));
+                return false;
+            }
+            remainingData += n;
+            remainingBytes -= static_cast<size_t>(n);
+        }
+    }
+
+    return true;
+#else
+    (void)docFd;
+    return sendPacket(MessageType::OpenDocumentRequest, serialize(request));
+#endif
+}
+
 void WorkerClient::flushOutgoing() {
     for (const QByteArray& packet : m_outgoingPackets) {
         if (m_socket.write(packet) != packet.size()) {
@@ -253,7 +347,12 @@ OpenResult WorkerClient::openDocumentSync(int64_t documentId, const std::string&
     connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
     OpenDocumentRequest request{documentId, QString::fromStdString(filePath),
                                 QString::fromStdString(password)};
+#ifdef Q_OS_LINUX
+    int docFd = ::open(filePath.c_str(), O_RDONLY | O_CLOEXEC | O_NOCTTY);
+    sendOpenDocumentPacket(request, docFd);
+#else
     sendMessage(MessageType::OpenDocumentRequest, serialize(request));
+#endif
     timeout.start(RESPONSE_TIMEOUT_MS);
     loop.exec();
     disconnect(responseConnection);
@@ -272,9 +371,14 @@ void WorkerClient::openDocumentAsync(int64_t documentId, const std::string& file
             m_watchdogTimer.start(m_watchdogIntervalMs);
         }
     }
-    sendMessage(MessageType::OpenDocumentRequest,
-                serialize(OpenDocumentRequest{documentId, QString::fromStdString(filePath),
-                                              QString::fromStdString(password)}));
+    OpenDocumentRequest request{documentId, QString::fromStdString(filePath),
+                                QString::fromStdString(password)};
+#ifdef Q_OS_LINUX
+    int docFd = ::open(filePath.c_str(), O_RDONLY | O_CLOEXEC | O_NOCTTY);
+    sendOpenDocumentPacket(request, docFd);
+#else
+    sendMessage(MessageType::OpenDocumentRequest, serialize(request));
+#endif
 }
 
 void WorkerClient::closeDocumentSync() {

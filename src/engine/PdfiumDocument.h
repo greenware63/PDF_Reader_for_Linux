@@ -6,6 +6,8 @@
 #include <utility>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <cstddef>
 
 namespace pdf {
 
@@ -18,6 +20,12 @@ public:
     DocumentError loadFromMemory(const void* data, size_t size, const std::string& password = "") override;
     DocumentError loadFromBuffer(std::shared_ptr<const std::vector<uint8_t>> buffer,
                                  const std::string& password = "") override;
+    DocumentError loadFromDescriptor(int fd, const std::string& password = "", bool takeOwnership = true) override;
+
+    // Test hook for unit testing the pread-backed streaming path on small fixtures
+    static void setDescriptorStreamThresholdForTesting(size_t bytes);
+    static void resetDescriptorStreamThresholdForTesting();
+
     int pageCount() const override;
     std::pair<double, double> pageSizePoints(int pageIndex) const override;
     std::unique_ptr<IPage> getPage(int pageIndex) override;

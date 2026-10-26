@@ -7,6 +7,16 @@
 #include <thread>
 #include <chrono>
 
+#ifdef Q_OS_LINUX
+#include <QSocketNotifier>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <cstddef>
+#include <cerrno>
+#endif
+
 namespace pdf::worker {
 namespace {
 
@@ -26,7 +36,7 @@ bool isRequestType(uint32_t type) {
         case ipc::MessageType::CancelSearchRequest:
         case ipc::MessageType::ThumbnailRequest:
         case ipc::MessageType::RenderPageRequest:
-                case ipc::MessageType::ExtractPagesRequest:
+        case ipc::MessageType::ExtractPagesRequest:
         case ipc::MessageType::RedactDocumentRequest:
         case ipc::MessageType::SharedMemoryAck:
         case ipc::MessageType::WorkerControlRequest:
@@ -80,32 +90,99 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
 
 WorkerServer::~WorkerServer() {
     m_engineWorker.stop();
+#ifdef Q_OS_LINUX
+    if (m_clientNotifier) {
+        m_clientNotifier->setEnabled(false);
+        delete m_clientNotifier;
+        m_clientNotifier = nullptr;
+    }
+    if (m_listenNotifier) {
+        m_listenNotifier->setEnabled(false);
+        delete m_listenNotifier;
+        m_listenNotifier = nullptr;
+    }
+    if (m_clientFd >= 0) {
+        ::close(m_clientFd);
+        m_clientFd = -1;
+    }
+    if (m_listenFd >= 0) {
+        ::close(m_listenFd);
+        m_listenFd = -1;
+    }
+    if (m_pendingReceivedFd >= 0) {
+        ::close(m_pendingReceivedFd);
+        m_pendingReceivedFd = -1;
+    }
+#else
     if (m_clientSocket) {
         m_clientSocket->close();
     }
     if (m_server) {
         m_server->close();
-#ifndef Q_OS_LINUX
         QLocalServer::removeServer(m_serverName);
-#endif
     }
+#endif
 }
 
 bool WorkerServer::start() {
-#ifndef Q_OS_LINUX
-    QLocalServer::removeServer(m_serverName);
-#endif
-    m_server = new QLocalServer(this);
 #ifdef Q_OS_LINUX
-    m_server->setSocketOptions(QLocalServer::AbstractNamespaceOption);
-#endif
+    m_listenFd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (m_listenFd < 0) {
+        return false;
+    }
+
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    addr.sun_path[0] = '\0';
+    const QByteArray nameBytes = m_serverName.toUtf8();
+    if (nameBytes.size() >= static_cast<int>(sizeof(addr.sun_path) - 1)) {
+        ::close(m_listenFd);
+        m_listenFd = -1;
+        return false;
+    }
+    std::memcpy(addr.sun_path + 1, nameBytes.constData(), static_cast<size_t>(nameBytes.size()));
+    socklen_t addrLen = static_cast<socklen_t>(offsetof(struct sockaddr_un, sun_path) + 1 + nameBytes.size());
+
+    if (::bind(m_listenFd, reinterpret_cast<struct sockaddr*>(&addr), addrLen) != 0) {
+        ::close(m_listenFd);
+        m_listenFd = -1;
+        return false;
+    }
+
+    if (::listen(m_listenFd, 1) != 0) {
+        ::close(m_listenFd);
+        m_listenFd = -1;
+        return false;
+    }
+
+    m_listenNotifier = new QSocketNotifier(m_listenFd, QSocketNotifier::Read, this);
+    connect(m_listenNotifier, &QSocketNotifier::activated, this, &WorkerServer::onNewConnection);
+    return true;
+#else
+    QLocalServer::removeServer(m_serverName);
+    m_server = new QLocalServer(this);
     connect(m_server, &QLocalServer::newConnection, this, &WorkerServer::onNewConnection);
     return m_server->listen(m_serverName);
+#endif
 }
 
 void WorkerServer::onNewConnection() {
+#ifdef Q_OS_LINUX
+    int client = ::accept4(m_listenFd, nullptr, nullptr, SOCK_CLOEXEC);
+    if (client < 0) {
+        return;
+    }
+
+    if (m_clientFd >= 0) {
+        ::close(client);
+        return;
+    }
+
+    m_clientFd = client;
+    m_clientNotifier = new QSocketNotifier(m_clientFd, QSocketNotifier::Read, this);
+    connect(m_clientNotifier, &QSocketNotifier::activated, this, &WorkerServer::onReadyRead);
+#else
     if (m_clientSocket) {
-        // Only one active UI client per worker instance
         auto* extra = m_server->nextPendingConnection();
         if (extra) {
             extra->disconnectFromServer();
@@ -122,30 +199,101 @@ void WorkerServer::onNewConnection() {
     connect(m_clientSocket, &QLocalSocket::readyRead, this, &WorkerServer::onReadyRead);
     connect(m_clientSocket, &QLocalSocket::disconnected, this, &WorkerServer::onSocketDisconnected);
     m_clientSocket->setReadBufferSize(static_cast<qint64>(ipc::MAX_IPC_PAYLOAD_SIZE + sizeof(ipc::PacketHeader)));
+#endif
 }
 
 void WorkerServer::onSocketDisconnected() {
     m_incomingBuffer.clear();
     m_pendingControlRequests.clear();
+#ifdef Q_OS_LINUX
+    if (m_clientNotifier) {
+        m_clientNotifier->setEnabled(false);
+        delete m_clientNotifier;
+        m_clientNotifier = nullptr;
+    }
+    if (m_clientFd >= 0) {
+        ::close(m_clientFd);
+        m_clientFd = -1;
+    }
+    if (m_pendingReceivedFd >= 0) {
+        ::close(m_pendingReceivedFd);
+        m_pendingReceivedFd = -1;
+    }
+#else
     if (m_clientSocket) {
         m_clientSocket->deleteLater();
         m_clientSocket = nullptr;
     }
+#endif
     Q_EMIT clientDisconnected();
 }
 
 void WorkerServer::onReadyRead() {
-    if (!m_clientSocket) {
+#ifdef Q_OS_LINUX
+    if (m_clientFd < 0) {
         return;
     }
 
     while (true) {
-        if (static_cast<size_t>(m_incomingBuffer.size()) < sizeof(ipc::PacketHeader)) {
-            const qint64 needed = static_cast<qint64>(sizeof(ipc::PacketHeader)) - m_incomingBuffer.size();
-            m_incomingBuffer.append(m_clientSocket->read(std::min(needed, m_clientSocket->bytesAvailable())));
-            if (static_cast<size_t>(m_incomingBuffer.size()) < sizeof(ipc::PacketHeader)) {
-                return;
+        char buf[8192];
+        struct iovec iov;
+        iov.iov_base = buf;
+        iov.iov_len = sizeof(buf);
+
+        char cmsgBuf[CMSG_SPACE(sizeof(int))];
+        struct msghdr msg{};
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cmsgBuf;
+        msg.msg_controllen = sizeof(cmsgBuf);
+
+        ssize_t n = ::recvmsg(m_clientFd, &msg, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            onSocketDisconnected();
+            return;
+        }
+        if (n == 0) {
+            onSocketDisconnected();
+            return;
+        }
+
+        struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+        while (cmsg) {
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+                const size_t numFds = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+                const int* fds = reinterpret_cast<const int*>(CMSG_DATA(cmsg));
+                for (size_t i = 0; i < numFds; ++i) {
+                    int rFd = fds[i];
+                    if (rFd >= 0) {
+                        int flags = ::fcntl(rFd, F_GETFD);
+                        if (flags >= 0) {
+                            ::fcntl(rFd, F_SETFD, flags | FD_CLOEXEC);
+                        }
+
+                        if (m_pendingReceivedFd >= 0) {
+                            ::close(m_pendingReceivedFd);
+                        }
+                        m_pendingReceivedFd = rFd;
+                    }
+                }
             }
+            cmsg = CMSG_NXTHDR(&msg, cmsg);
+        }
+
+        m_incomingBuffer.append(buf, static_cast<qsizetype>(n));
+    }
+#else
+    if (!m_clientSocket) {
+        return;
+    }
+    m_incomingBuffer.append(m_clientSocket->readAll());
+#endif
+
+    while (true) {
+        if (static_cast<size_t>(m_incomingBuffer.size()) < sizeof(ipc::PacketHeader)) {
+            return;
         }
         ipc::PacketHeader header;
         std::memcpy(&header, m_incomingBuffer.constData(), sizeof(ipc::PacketHeader));
@@ -155,17 +303,17 @@ void WorkerServer::onReadyRead() {
             header.payloadSize > ipc::MAX_IPC_PAYLOAD_SIZE ||
             !isRequestType(header.type)) {
             std::cerr << "[WorkerServer] Protocol error: Invalid header received. Disconnecting." << std::endl;
+#ifdef Q_OS_LINUX
+            onSocketDisconnected();
+#else
             m_clientSocket->disconnectFromServer();
+#endif
             return;
         }
 
         const size_t totalPacketSize = sizeof(ipc::PacketHeader) + header.payloadSize;
         if (static_cast<size_t>(m_incomingBuffer.size()) < totalPacketSize) {
-            const qint64 needed = static_cast<qint64>(totalPacketSize - static_cast<size_t>(m_incomingBuffer.size()));
-            m_incomingBuffer.append(m_clientSocket->read(std::min(needed, m_clientSocket->bytesAvailable())));
-            if (static_cast<size_t>(m_incomingBuffer.size()) < totalPacketSize) {
-                return;
-            }
+            return;
         }
 
         QByteArray payload;
@@ -180,6 +328,15 @@ void WorkerServer::onReadyRead() {
 }
 
 void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payload) {
+#ifdef Q_OS_LINUX
+    if (type != ipc::MessageType::OpenDocumentRequest && m_pendingReceivedFd >= 0) {
+        // Unsolicited descriptor received with a non-OpenDocumentRequest message.
+        // Descriptor hygiene closes unexpected descriptors immediately.
+        ::close(m_pendingReceivedFd);
+        m_pendingReceivedFd = -1;
+    }
+#endif
+
     switch (type) {
         case ipc::MessageType::Ping: {
             ipc::PingRequest req;
@@ -196,8 +353,19 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
 
         case ipc::MessageType::OpenDocumentRequest: {
             ipc::OpenDocumentRequest req;
+            int docFd = -1;
+#ifdef Q_OS_LINUX
+            docFd = m_pendingReceivedFd;
+            m_pendingReceivedFd = -1;
+#endif
             if (ipc::deserialize(payload, req)) {
-                m_engineWorker.openDocumentAsync(req.documentId, req.filePath.toStdString(), req.password.toStdString());
+                m_engineWorker.openDocumentAsync(req.documentId, req.filePath.toStdString(), req.password.toStdString(), docFd);
+            } else {
+                if (docFd >= 0) {
+#ifdef Q_OS_LINUX
+                    ::close(docFd);
+#endif
+                }
             }
             break;
         }
@@ -340,6 +508,7 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
                 }
                 break;
             }
+
             ipc::WorkerControlResponse response;
             response.requestId = request.requestId;
             if (request.queryStatus) {
@@ -378,6 +547,31 @@ void WorkerServer::onIdle() {
 }
 
 void WorkerServer::sendPacket(ipc::MessageType type, const QByteArray& payload) {
+#ifdef Q_OS_LINUX
+    if (m_clientFd < 0) {
+        return;
+    }
+
+    QByteArray packet = ipc::buildPacket(type, payload);
+    if (packet.isEmpty()) {
+        std::cerr << "[WorkerServer] Refusing oversized IPC payload." << std::endl;
+        onSocketDisconnected();
+        return;
+    }
+
+    const char* ptr = packet.constData();
+    size_t remaining = static_cast<size_t>(packet.size());
+    while (remaining > 0) {
+        ssize_t written = ::write(m_clientFd, ptr, remaining);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            onSocketDisconnected();
+            return;
+        }
+        ptr += written;
+        remaining -= static_cast<size_t>(written);
+    }
+#else
     if (!m_clientSocket || m_clientSocket->state() != QLocalSocket::ConnectedState) {
         return;
     }
@@ -390,6 +584,7 @@ void WorkerServer::sendPacket(ipc::MessageType type, const QByteArray& payload) 
     }
     m_clientSocket->write(packet);
     m_clientSocket->flush();
+#endif
 }
 
 void WorkerServer::onDocumentOpened(int64_t documentId, pdf::OpenResult result) {
@@ -413,9 +608,13 @@ void WorkerServer::onTileReady(int64_t documentId, uint64_t generation, const pd
         }
         if (buffer.sizeBytes() > MAX_OUTSTANDING_TILE_BYTES ||
             outstandingBytes > MAX_OUTSTANDING_TILE_BYTES - buffer.sizeBytes()) {
+#ifdef Q_OS_LINUX
+            onSocketDisconnected();
+#else
             if (m_clientSocket) {
                 m_clientSocket->disconnectFromServer();
             }
+#endif
             return;
         }
         const QString shmKey = QStringLiteral("pdf-tile-%1-%2")
