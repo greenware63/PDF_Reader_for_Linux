@@ -387,6 +387,71 @@ void PdfViewerWidget::restoreReadingPosition(int pageIndex, double zoom, int64_t
     }
 }
 
+void PdfViewerWidget::restoreReadingPosition(int pageIndex, double zoom, double fractionX, double fractionY,
+                                            int64_t fallbackScrollX, int64_t fallbackScrollY) {
+    if (!isDocumentOpen()) {
+        return;
+    }
+    if (zoom >= 0.1 && zoom <= 10.0) {
+        setZoom(zoom);
+    }
+    // Continuous layout: restore exact fractional offset on page
+    if (m_layout.viewMode() == layout::ViewMode::Continuous) {
+        if (pageIndex >= 0 && pageIndex < pageCount() && std::isfinite(fractionY) && fractionY >= 0.0) {
+            const auto& pl = m_layout.getPageLayout(pageIndex);
+            int64_t targetY = pl.topPixel + static_cast<int64_t>(std::llround(fractionY * static_cast<double>(pl.heightPixel)));
+            int64_t targetX = 0;
+            if (std::isfinite(fractionX) && fractionX > 0.0) {
+                targetX = pl.leftPixel + static_cast<int64_t>(std::llround(fractionX * static_cast<double>(pl.widthPixel)));
+            } else if (fallbackScrollX > 0) {
+                targetX = fallbackScrollX;
+            }
+            setDocScrollPosition(targetX, targetY);
+            viewport()->update();
+            return;
+        } else if (fallbackScrollY > 0 || fallbackScrollX > 0) {
+            setDocScrollPosition(fallbackScrollX, fallbackScrollY);
+            viewport()->update();
+            return;
+        }
+    }
+    if (pageIndex >= 0 && pageIndex < pageCount()) {
+        goToPage(pageIndex);
+    }
+}
+
+bool PdfViewerWidget::getReadingPosition(int& outPage, double& outFractionX, double& outFractionY) const {
+    if (!isDocumentOpen() || pageCount() <= 0) {
+        return false;
+    }
+    if (m_layout.viewMode() == layout::ViewMode::Continuous) {
+        auto anchor = m_layout.createAnchor(m_docScrollX, m_docScrollY);
+        if (anchor.isValid() && anchor.pageIndex >= 0 && anchor.pageIndex < pageCount()) {
+            outPage = anchor.pageIndex;
+            const auto& pl = m_layout.getPageLayout(anchor.pageIndex);
+            if (m_docScrollX > pl.leftPixel && pl.widthPixel > 0) {
+                outFractionX = std::clamp(static_cast<double>(m_docScrollX - pl.leftPixel) / static_cast<double>(pl.widthPixel), 0.0, 1.0);
+            } else {
+                outFractionX = 0.0;
+            }
+            if (pl.heightPixel > 0) {
+                if (m_docScrollY >= pl.topPixel) {
+                    outFractionY = std::clamp(static_cast<double>(m_docScrollY - pl.topPixel) / static_cast<double>(pl.heightPixel), 0.0, 1.0);
+                } else {
+                    outFractionY = 0.0;
+                }
+            } else {
+                outFractionY = 0.0;
+            }
+            return true;
+        }
+    }
+    outPage = std::clamp(m_currentPage, 0, pageCount() - 1);
+    outFractionX = 0.0;
+    outFractionY = 0.0;
+    return true;
+}
+
 QString PdfViewerWidget::pageLabel(int pageIndex) const {
     if (pageIndex >= 0 && pageIndex < static_cast<int>(m_pageLabels.size())) {
         return m_pageLabels[static_cast<size_t>(pageIndex)];

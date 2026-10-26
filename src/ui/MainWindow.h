@@ -82,6 +82,8 @@ public:
     void saveReadingPosition(PdfViewerWidget* viewer);
     void restoreReadingPosition(PdfViewerWidget* viewer, const QString& filePath);
     void clearReadingHistory();
+    static QString readingPositionKey(const QString& filePath);
+    static QString documentFingerprint(const QString& filePath);
 
     QTabWidget* documentTabs() const noexcept { return m_docTabs; }
     QDockWidget* sidebarDock() const noexcept { return m_sidebarDock; }
