@@ -105,6 +105,9 @@ public:
 
     /// Reading position restoration & scroll positioning
     void restoreReadingPosition(int pageIndex, double zoom, int64_t scrollX, int64_t scrollY);
+    void restoreReadingPosition(int pageIndex, double zoom, double fractionX, double fractionY,
+                                int64_t fallbackScrollX = 0, int64_t fallbackScrollY = 0);
+    bool getReadingPosition(int& outPage, double& outFractionX, double& outFractionY) const;
     void setDocScrollPosition(int64_t docX, int64_t docY);
 
     /**

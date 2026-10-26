@@ -35,6 +35,8 @@
 #include <cmath>
 #include <QPointer>
 #include <QFileInfo>
+#include <QFile>
+#include <QCryptographicHash>
 #include "RedactionFileSafety.h"
 
 namespace ui {
@@ -101,7 +103,9 @@ static QStandardItem* findBestOutlineItem(QStandardItem* parent, int currentPage
     return best;
 }
 
-static QString readingPositionKey(const QString& filePath) {
+} // namespace
+
+QString MainWindow::readingPositionKey(const QString& filePath) {
     if (filePath.isEmpty()) {
         return QString();
     }
@@ -112,7 +116,39 @@ static QString readingPositionKey(const QString& filePath) {
     return QString::fromUtf8(canonical.toUtf8().toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
 }
 
-} // namespace
+QString MainWindow::documentFingerprint(const QString& filePath) {
+    if (filePath.isEmpty()) {
+        return QString();
+    }
+    QFileInfo fi(filePath);
+    if (!fi.exists() || !fi.isFile()) {
+        return QString();
+    }
+    const qint64 size = fi.size();
+    if (size <= 0) {
+        return QString();
+    }
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return QString();
+    }
+
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(QByteArrayView(reinterpret_cast<const char*>(&size), sizeof(size)));
+
+    constexpr qint64 kChunkSize = 4096;
+    if (size <= kChunkSize * 2) {
+        hash.addData(file.readAll());
+    } else {
+        QByteArray header = file.read(kChunkSize);
+        hash.addData(header);
+        if (file.seek(size - kChunkSize)) {
+            QByteArray trailer = file.read(kChunkSize);
+            hash.addData(trailer);
+        }
+    }
+    return QString::fromUtf8(hash.result().toHex());
+}
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
@@ -650,21 +686,39 @@ void MainWindow::saveReadingPosition(PdfViewerWidget* viewer) {
     if (!viewer || !viewer->isDocumentOpen() || viewer->currentFilePath().isEmpty()) {
         return;
     }
-    const QString key = readingPositionKey(viewer->currentFilePath());
+    const QString filePath = viewer->currentFilePath();
+    const QString key = readingPositionKey(filePath);
     if (key.isEmpty()) {
         return;
     }
+
+    int savedPage = viewer->currentPage();
+    double fractionX = 0.0;
+    double fractionY = 0.0;
+    viewer->getReadingPosition(savedPage, fractionX, fractionY);
+
+    const QString fingerprint = documentFingerprint(filePath);
+
     QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
     settings.beginGroup(QStringLiteral("readingHistory/") + key);
-    settings.setValue(QStringLiteral("filePath"), viewer->currentFilePath());
-    settings.setValue(QStringLiteral("page"), viewer->currentPage());
+    settings.setValue(QStringLiteral("filePath"), filePath);
+    settings.setValue(QStringLiteral("page"), savedPage);
     settings.setValue(QStringLiteral("zoom"), viewer->currentZoom());
+    settings.setValue(QStringLiteral("pageFractionX"), fractionX);
+    settings.setValue(QStringLiteral("pageFractionY"), fractionY);
     // Scroll offsets are only meaningful in the continuous layout; other view modes restore by page.
     const bool continuous = viewer->viewMode() == layout::ViewMode::Continuous;
     settings.setValue(QStringLiteral("scrollX"), static_cast<qlonglong>(continuous ? viewer->currentDocScrollX() : 0));
     settings.setValue(QStringLiteral("scrollY"), static_cast<qlonglong>(continuous ? viewer->currentDocScrollY() : 0));
+    if (!fingerprint.isEmpty()) {
+        settings.setValue(QStringLiteral("fingerprint"), fingerprint);
+    }
     settings.setValue(QStringLiteral("timestamp"), QDateTime::currentSecsSinceEpoch());
     settings.endGroup();
+
+    if (!fingerprint.isEmpty()) {
+        settings.setValue(QStringLiteral("readingHistoryByFingerprint/") + fingerprint, key);
+    }
 }
 
 void MainWindow::restoreReadingPosition(PdfViewerWidget* viewer, const QString& filePath) {
@@ -676,23 +730,49 @@ void MainWindow::restoreReadingPosition(PdfViewerWidget* viewer, const QString& 
         return;
     }
     QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
-    const QString group = QStringLiteral("readingHistory/") + key;
+    QString group = QStringLiteral("readingHistory/") + key;
+
+    // If path-based entry doesn't exist, try fingerprint-based lookup (e.g. moved or renamed file)
+    if (!settings.contains(group + QStringLiteral("/page"))) {
+        const QString fingerprint = documentFingerprint(filePath);
+        if (!fingerprint.isEmpty()) {
+            const QString fpKey = QStringLiteral("readingHistoryByFingerprint/") + fingerprint;
+            if (settings.contains(fpKey)) {
+                const QString mappedKey = settings.value(fpKey).toString();
+                if (!mappedKey.isEmpty() && settings.contains(QStringLiteral("readingHistory/") + mappedKey + QStringLiteral("/page"))) {
+                    group = QStringLiteral("readingHistory/") + mappedKey;
+                    // Associate current key so subsequent lookups hit path key directly
+                    settings.setValue(QStringLiteral("readingHistoryByFingerprint/") + fingerprint, key);
+                }
+            }
+        }
+    }
+
     if (!settings.contains(group + QStringLiteral("/page"))) {
         return;
     }
+
     settings.beginGroup(group);
     int savedPage = settings.value(QStringLiteral("page"), 0).toInt();
     double savedZoom = settings.value(QStringLiteral("zoom"), viewer->currentZoom()).toDouble();
+    const bool hasFraction = settings.contains(QStringLiteral("pageFractionY"));
+    double fractionX = settings.value(QStringLiteral("pageFractionX"), 0.0).toDouble();
+    double fractionY = settings.value(QStringLiteral("pageFractionY"), 0.0).toDouble();
     int64_t scrollX = settings.value(QStringLiteral("scrollX"), 0).toLongLong();
     int64_t scrollY = settings.value(QStringLiteral("scrollY"), 0).toLongLong();
     settings.endGroup();
 
-    viewer->restoreReadingPosition(savedPage, savedZoom, scrollX, scrollY);
+    if (hasFraction) {
+        viewer->restoreReadingPosition(savedPage, savedZoom, fractionX, fractionY, scrollX, scrollY);
+    } else {
+        viewer->restoreReadingPosition(savedPage, savedZoom, scrollX, scrollY);
+    }
 }
 
 void MainWindow::clearReadingHistory() {
     QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
     settings.remove(QStringLiteral("readingHistory"));
+    settings.remove(QStringLiteral("readingHistoryByFingerprint"));
 }
 
 PdfViewerWidget* MainWindow::currentViewer() const {

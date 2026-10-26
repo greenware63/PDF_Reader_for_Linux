@@ -3120,6 +3120,150 @@ int main(int argc, char* argv[]) {
         }
 
         window.closeCurrentTab();
+        QCoreApplication::processEvents();
+
+        // 5. Test DPI-independent fractional reading position restoration
+        if (!window.openFile(QString::fromStdString(sampleDoc))) {
+            std::cerr << "[FAIL] Failed to open document for DPI-independent test" << std::endl;
+            return 1;
+        }
+        auto* dpiViewer = window.currentViewer();
+        {
+            QElapsedTimer t; t.start();
+            while (t.elapsed() < 5000 && (!dpiViewer || !dpiViewer->isDocumentOpen())) {
+                QCoreApplication::processEvents();
+                QThread::msleep(5);
+            }
+        }
+        if (!dpiViewer || !dpiViewer->isDocumentOpen()) {
+            std::cerr << "[FAIL] Document failed to open in DPI-independent test" << std::endl;
+            return 1;
+        }
+        dpiViewer->setZoom(1.0);
+        dpiViewer->goToPage(2);
+        const auto& pl2 = dpiViewer->layout().getPageLayout(2);
+        const int64_t targetScrollY = pl2.topPixel + static_cast<int64_t>(std::round(0.35 * static_cast<double>(pl2.heightPixel)));
+        dpiViewer->setDocScrollPosition(0, targetScrollY);
+        QCoreApplication::processEvents();
+
+        int savedPageDpi = -1;
+        double savedFracX = 0.0, savedFracY = 0.0;
+        dpiViewer->getReadingPosition(savedPageDpi, savedFracX, savedFracY);
+        if (savedPageDpi != 2 || std::abs(savedFracY - 0.35) > 0.02) {
+            std::cerr << "[FAIL] Expected page 2 at ~0.35 fraction, got page " << savedPageDpi << " frac=" << savedFracY << std::endl;
+            return 1;
+        }
+
+        window.saveReadingPosition(dpiViewer);
+        window.closeCurrentTab();
+        QCoreApplication::processEvents();
+
+        // Re-open document and simulate high-DPI display (DPR = 2.0)
+        if (!window.openFile(QString::fromStdString(sampleDoc))) {
+            std::cerr << "[FAIL] Failed to re-open document under simulated high DPR" << std::endl;
+            return 1;
+        }
+        auto* highDpiViewer = window.currentViewer();
+        {
+            QElapsedTimer t; t.start();
+            while (t.elapsed() < 5000 && (!highDpiViewer || !highDpiViewer->isDocumentOpen())) {
+                QCoreApplication::processEvents();
+                QThread::msleep(5);
+            }
+        }
+        highDpiViewer->setDevicePixelRatioOverride(2.0);
+        window.restoreReadingPosition(highDpiViewer, QString::fromStdString(sampleDoc));
+        QCoreApplication::processEvents();
+
+        int restoredPageDpi = -1;
+        double restoredFracX = 0.0, restoredFracY = 0.0;
+        highDpiViewer->getReadingPosition(restoredPageDpi, restoredFracX, restoredFracY);
+        if (restoredPageDpi != 2 || std::abs(restoredFracY - 0.35) > 0.02) {
+            std::cerr << "[FAIL] High-DPI restored reading position mismatch: expected page 2 at ~0.35, got page "
+                      << restoredPageDpi << " frac=" << restoredFracY << std::endl;
+            return 1;
+        }
+        highDpiViewer->setDevicePixelRatioOverride(0.0);
+        window.closeCurrentTab();
+        QCoreApplication::processEvents();
+
+        // 6. Test moved/renamed document reading position restoration via fingerprint
+        std::string movedDoc = "widget_test_reading_history_moved.pdf";
+        QFile::remove(QString::fromStdString(movedDoc));
+        if (!QFile::copy(QString::fromStdString(sampleDoc), QString::fromStdString(movedDoc))) {
+            std::cerr << "[FAIL] Failed to copy sampleDoc to movedDoc" << std::endl;
+            return 1;
+        }
+
+        // Open the moved document (different file path, same content/fingerprint)
+        if (!window.openFile(QString::fromStdString(movedDoc))) {
+            std::cerr << "[FAIL] Failed to open moved document" << std::endl;
+            return 1;
+        }
+        auto* movedViewer = window.currentViewer();
+        {
+            QElapsedTimer t; t.start();
+            while (t.elapsed() < 5000 && (!movedViewer || !movedViewer->isDocumentOpen())) {
+                QCoreApplication::processEvents();
+                QThread::msleep(5);
+            }
+        }
+        if (!movedViewer || !movedViewer->isDocumentOpen()) {
+            std::cerr << "[FAIL] Moved document failed to open" << std::endl;
+            return 1;
+        }
+
+        // It should automatically restore to page 2 at ~0.35 fraction via fingerprint match!
+        int movedPage = -1;
+        double movedFracX = 0.0, movedFracY = 0.0;
+        movedViewer->getReadingPosition(movedPage, movedFracX, movedFracY);
+        if (movedPage != 2 || std::abs(movedFracY - 0.35) > 0.02) {
+            std::cerr << "[FAIL] Moved file failed to restore position via fingerprint: expected page 2 at ~0.35, got page "
+                      << movedPage << " frac=" << movedFracY << std::endl;
+            return 1;
+        }
+
+        window.closeCurrentTab();
+        QFile::remove(QString::fromStdString(movedDoc));
+        QCoreApplication::processEvents();
+
+        // 7. Test backward compatibility fallback with legacy QSettings (scrollX/scrollY integers only)
+        {
+            const QString legacyKey = ui::MainWindow::readingPositionKey(QString::fromStdString(sampleDoc));
+            QSettings legacySettings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+            legacySettings.beginGroup(QStringLiteral("readingHistory/") + legacyKey);
+            legacySettings.setValue(QStringLiteral("filePath"), QString::fromStdString(sampleDoc));
+            legacySettings.setValue(QStringLiteral("page"), 1);
+            legacySettings.setValue(QStringLiteral("zoom"), 1.25);
+            legacySettings.remove(QStringLiteral("pageFractionX"));
+            legacySettings.remove(QStringLiteral("pageFractionY"));
+            legacySettings.setValue(QStringLiteral("scrollX"), 20LL);
+            legacySettings.setValue(QStringLiteral("scrollY"), 150LL);
+            legacySettings.endGroup();
+        }
+
+        if (!window.openFile(QString::fromStdString(sampleDoc))) {
+            std::cerr << "[FAIL] Failed to open document for legacy settings test" << std::endl;
+            return 1;
+        }
+        auto* legacyViewer = window.currentViewer();
+        {
+            QElapsedTimer t; t.start();
+            while (t.elapsed() < 5000 && (!legacyViewer || !legacyViewer->isDocumentOpen())) {
+                QCoreApplication::processEvents();
+                QThread::msleep(5);
+            }
+        }
+        if (legacyViewer->currentDocScrollY() != 150LL) {
+            std::cerr << "[FAIL] Legacy scrollY fallback mismatch: expected 150, got "
+                      << legacyViewer->currentDocScrollY() << std::endl;
+            return 1;
+        }
+
+        window.closeCurrentTab();
+        window.clearReadingHistory();
+        QCoreApplication::processEvents();
+
         std::cout << "  -> Passed: Reading position persistence across documents/sessions in QSettings and clearReadingHistory verified." << std::endl;
     }
 
