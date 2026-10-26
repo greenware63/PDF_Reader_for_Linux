@@ -1,0 +1,37 @@
+app-id: org.greenware.PDFReader
+runtime: org.kde.Platform
+runtime-version: '6.7'
+sdk: org.kde.Sdk
+command: pdf-reader
+
+finish-args:
+  # Wayland and X11 display access with fallback
+  - --socket=wayland
+  - --socket=fallback-x11
+  # Shared memory for fast tile passing
+  - --share=ipc
+  # Hardware accelerated graphics
+  - --device=dri
+  # File Chooser and Print Portals (XDG Desktop Portal)
+  - --talk-name=org.freedesktop.portal.FileChooser
+  - --talk-name=org.freedesktop.portal.Print
+  - --talk-name=org.freedesktop.portal.Desktop
+  # D-Bus isolation: blanket session-bus and system-bus access are strictly omitted
+  # Document portal read-only fallback
+  - --filesystem=xdg-documents:ro
+
+modules:
+  - name: pdf-reader
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DENABLE_TEST_HOOKS=OFF
+      - -DFETCHCONTENT_SOURCE_DIR_PDFIUM_BINARIES=/run/build/pdf-reader/pdfium_extracted
+    sources:
+      - type: dir
+        path: .
+      - type: archive
+        url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8100/pdfium-linux-x64.tgz
+        sha256: 1c1894a12d4d96ee01400c3874444126254180c5c7d2ab628576b67f8120320a
+        dest: pdfium_extracted

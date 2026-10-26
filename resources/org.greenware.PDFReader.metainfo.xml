@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.greenware.PDFReader</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>PDF Reader</name>
+  <summary>High-performance sandboxed PDF reader</summary>
+  <developer id="org.greenware">
+    <name>Greenware</name>
+  </developer>
+  <url type="homepage">https://github.com/greenware63/PDF_Reader_for_Linux</url>
+  <url type="bugtracker">https://github.com/greenware63/PDF_Reader_for_Linux/issues</url>
+  <description>
+    <p>
+      PDF Reader is a modern, high-performance Linux PDF viewer designed with security
+      and responsive rendering as top priorities.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Process-isolated rendering engine with Linux Landlock and seccomp sandboxing.</li>
+      <li>Continuous scrolling, multi-page view modes, and smooth zooming.</li>
+      <li>Fast full-text search with match navigation and keyword highlighting.</li>
+      <li>True burn-in permanent redactions with irreversible structural sanitization.</li>
+      <li>Dark mode and reading color themes with shader-based inversion.</li>
+      <li>Robust reading position remembering across sessions and file moves.</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">org.greenware.PDFReader.desktop</launchable>
+  <provides>
+    <mediatype>application/pdf</mediatype>
+  </provides>
+  <categories>
+    <category>Office</category>
+    <category>Viewer</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-10-26">
+      <description>
+        <p>Initial release with process-isolated rendering, redaction pipeline, and search.</p>
+      </description>
+    </release>
+  </releases>
+</component>

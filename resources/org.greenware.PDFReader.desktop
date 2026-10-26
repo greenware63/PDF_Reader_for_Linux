@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=PDF Reader
+Comment=High-performance sandboxed PDF viewer
+Exec=pdf-reader %U
+Terminal=false
+Type=Application
+Icon=org.greenware.PDFReader
+Categories=Office;Viewer;
+MimeType=application/pdf;
+StartupNotify=true
