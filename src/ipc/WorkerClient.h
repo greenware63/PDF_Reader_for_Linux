@@ -106,6 +106,7 @@ private:
     void tryConnect();
     void sendMessage(MessageType type, const QByteArray& payload);
     bool sendPacket(MessageType type, const QByteArray& payload);
+    bool sendOpenDocumentPacket(const OpenDocumentRequest& request, int docFd);
     void flushOutgoing();
     void failWorker(const QString& message);
     WorkerControlResponse requestControl(const WorkerControlRequest& request);

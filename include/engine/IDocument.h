@@ -63,6 +63,20 @@ public:
     }
 
     /**
+     * @brief Opens a PDF document from an open read-only file descriptor.
+     * For files <= 512 MiB, loads into an immutable pinned heap buffer and closes fd if owned.
+     * For files > 512 MiB, streams via pread-backed custom file access without blowing memory budgets.
+     * @param fd Open file descriptor.
+     * @param password Optional password for encrypted PDFs.
+     * @param takeOwnership If true, the document takes ownership and will close fd when done.
+     * @return DocumentError indicating success or failure.
+     */
+    virtual DocumentError loadFromDescriptor(int fd, const std::string& password = "", bool takeOwnership = true) {
+        (void)fd; (void)password; (void)takeOwnership;
+        return DocumentError::Unknown;
+    }
+
+    /**
      * @return Total number of pages in the document.
      */
     virtual int pageCount() const = 0;
@@ -104,7 +118,7 @@ public:
     /**
      * @brief Renders a thumbnail miniature of the specified page.
      * @param pageIndex 0-based page index.
-     * @param targetWidth Desired thumbnail width in pixels (height scales to maintain aspect ratio).
+     * @param targetWidth Desired thumbnail width in pixels (height scales to maintain aspect ratio).\
      * @return PixelBuffer containing the rendered thumbnail.
      */
     virtual PixelBuffer renderThumbnail(int pageIndex, int targetWidth) = 0;
@@ -114,7 +128,7 @@ public:
      * The output keeps text, fonts, vectors and links of the copied pages (no rasterization).
      * @return true on success; the default implementation does not support extraction.
      */
-    virtual bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const {
+    virtual bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const {\
         (void)firstPage; (void)lastPage; (void)out;
         return false;
     }

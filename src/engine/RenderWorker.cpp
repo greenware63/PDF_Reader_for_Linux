@@ -6,6 +6,17 @@
 #include <QFileInfo>
 #include <QDateTime>
 #include <algorithm>
+#include <cerrno>
+
+#ifdef _WIN32
+#include <io.h>
+#include <sys/stat.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#endif
 
 namespace pdf {
 
@@ -27,12 +38,91 @@ struct LoadedSource {
     std::shared_ptr<const std::vector<uint8_t>> snapshot; // set when the bytes were pinned in memory
     long long fileSize{-1};      // unpinned only: identity of the file at open time
     long long fileMtimeMs{0};
+    int fd{-1};                  // unpinned descriptor for pread streaming / redaction
     DocumentError error{DocumentError::Unknown};
 };
 
-LoadedSource loadSource(const std::string& filePath, const std::string& password, unsigned long long maxPinned) {
+LoadedSource loadSource(const std::string& filePath, const std::string& password, unsigned long long maxPinned, int fd = -1) {
     LoadedSource out;
     out.doc = createDocument();
+
+    if (fd >= 0) {
+        uint64_t size = 0;
+        long long mtimeMs = 0;
+#ifdef _WIN32
+        struct _stat64 st{};
+        if (::_fstat64(fd, &st) != 0 || (st.st_mode & _S_IFREG) == 0 || st.st_size < 4) {
+            ::_close(fd);
+            out.error = DocumentError::InvalidFormat;
+            return out;
+        }
+        size = static_cast<uint64_t>(st.st_size);
+        mtimeMs = static_cast<long long>(st.st_mtime) * 1000LL;
+#else
+        struct stat st{};
+        if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 4) {
+            ::close(fd);
+            out.error = DocumentError::InvalidFormat;
+            return out;
+        }
+        size = static_cast<uint64_t>(st.st_size);
+        mtimeMs = static_cast<long long>(st.st_mtime) * 1000LL;
+#endif
+
+        if (size <= maxPinned) {
+            auto buffer = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(size));
+            size_t totalRead = 0;
+            while (totalRead < static_cast<size_t>(size)) {
+#ifdef _WIN32
+                int bytes = ::_read(fd, buffer->data() + totalRead, static_cast<unsigned int>(size - totalRead));
+                if (bytes <= 0) break;
+                totalRead += static_cast<size_t>(bytes);
+#else
+                ssize_t bytes = ::pread(fd, buffer->data() + totalRead, static_cast<size_t>(size) - totalRead, static_cast<off_t>(totalRead));
+                if (bytes < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                if (bytes == 0) break;
+                totalRead += static_cast<size_t>(bytes);
+#endif
+            }
+#ifdef _WIN32
+            ::_close(fd);
+#else
+            ::close(fd);
+#endif
+            if (totalRead != static_cast<size_t>(size)) {
+                out.error = DocumentError::InvalidFormat;
+                return out;
+            }
+            out.snapshot = buffer;
+            out.error = out.doc->loadFromBuffer(out.snapshot, password);
+            return out;
+        }
+
+        // > maxPinned: Stream via pread.
+        // For redaction to be able to read without opening by path under Landlock, dup the descriptor.
+        int redactFd = -1;
+#ifdef _WIN32
+        redactFd = ::_dup(fd);
+#else
+        redactFd = ::fcntl(fd, F_DUPFD_CLOEXEC, 3);
+#endif
+        out.fileSize = static_cast<long long>(size);
+        out.fileMtimeMs = mtimeMs;
+        out.fd = redactFd;
+        out.error = out.doc->loadFromDescriptor(fd, password, /*takeOwnership=*/true);
+        if (out.error != DocumentError::None && redactFd >= 0) {
+#ifdef _WIN32
+            ::_close(redactFd);
+#else
+            ::close(redactFd);
+#endif
+            out.fd = -1;
+        }
+        return out;
+    }
 
     const QFileInfo info(QString::fromStdString(filePath));
     const qint64 size = info.isFile() ? info.size() : -1;
@@ -61,16 +151,33 @@ LoadedSource loadSource(const std::string& filePath, const std::string& password
 
 void RenderWorker::installActiveSourceLocked(const std::string& filePath, const std::string& password,
                                              std::shared_ptr<const std::vector<uint8_t>> snapshot,
-                                             long long fileSize, long long fileMtimeMs) {
+                                             long long fileSize, long long fileMtimeMs, int fd) {
+    if (m_activeFd >= 0) {
+#ifdef _WIN32
+        ::_close(m_activeFd);
+#else
+        ::close(m_activeFd);
+#endif
+        m_activeFd = -1;
+    }
     secureWipe(m_activePassword);
     m_activeFilePath = filePath;
     m_activePassword = password;
     m_activeSnapshot = std::move(snapshot);
     m_activeFileSize = fileSize;
     m_activeFileMtimeMs = fileMtimeMs;
+    m_activeFd = fd;
 }
 
 void RenderWorker::clearActiveSourceLocked() {
+    if (m_activeFd >= 0) {
+#ifdef _WIN32
+        ::_close(m_activeFd);
+#else
+        ::close(m_activeFd);
+#endif
+        m_activeFd = -1;
+    }
     secureWipe(m_activePassword);
     m_activeFilePath.clear();
     m_activeSnapshot.reset();
@@ -88,7 +195,7 @@ RenderWorker::RenderWorker(QObject* parent)
     qRegisterMetaType<pdf::SearchMatch>("pdf::SearchMatch");
     qRegisterMetaType<std::vector<pdf::SearchMatch>>("std::vector<pdf::SearchMatch>");
     qRegisterMetaType<pdf::OutlineItem>("pdf::OutlineItem");
-        qRegisterMetaType<std::vector<pdf::OutlineItem>>("std::vector<pdf::OutlineItem>");
+    qRegisterMetaType<std::vector<pdf::OutlineItem>>("std::vector<pdf::OutlineItem>");
     qRegisterMetaType<pdf::ipc::RedactDocumentResponse>("pdf::ipc::RedactDocumentResponse");
 
     m_thread = std::thread(&RenderWorker::workerLoop, this);
@@ -117,13 +224,14 @@ void RenderWorker::stop() {
     if (shouldEmitIdle) {
         Q_EMIT idle();
     }
+    Q_EMIT idle();
 
     if (m_thread.joinable()) {
         m_thread.join();
     }
 }
 
-OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string& filePath, const std::string& password) {
+OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string& filePath, const std::string& password, int fd) {
     cancelSearch();
     auto promise = std::make_shared<std::promise<OpenResult>>();
     auto future = promise->get_future();
@@ -131,6 +239,13 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_running.load()) {
+            if (fd >= 0) {
+#ifdef _WIN32
+                ::_close(fd);
+#else
+                ::close(fd);
+#endif
+            }
             return {DocumentError::Unknown, 0, {}, {}};
         }
 
@@ -143,9 +258,9 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
         auto savedQueue = std::move(m_queue);
         m_activeDocumentId.store(documentId);
 
-        m_controlQueue.push_back({[this, documentId, oldDocId, savedQueue = std::move(savedQueue), filePath, password, promise]() mutable {
+        m_controlQueue.push_back({[this, documentId, oldDocId, savedQueue = std::move(savedQueue), filePath, password, fd, promise]() mutable {
             OpenResult result;
-            auto loaded = loadSource(filePath, password, m_maxPinnedBytes.load());
+            auto loaded = loadSource(filePath, password, m_maxPinnedBytes.load(), fd);
             auto newDoc = std::move(loaded.doc);
             auto err = loaded.error;
             if (err != DocumentError::None) {
@@ -166,7 +281,7 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_activeDocumentId.store(documentId);
-                installActiveSourceLocked(filePath, password, loaded.snapshot, loaded.fileSize, loaded.fileMtimeMs);
+                installActiveSourceLocked(filePath, password, loaded.snapshot, loaded.fileSize, loaded.fileMtimeMs, loaded.fd);
             }
             m_workerPageCache.clear();
             m_workerPageLru.clear();
@@ -192,18 +307,25 @@ OpenResult RenderWorker::openDocumentSync(int64_t documentId, const std::string&
     return future.get();
 }
 
-void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& filePath, const std::string& password) {
+void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& filePath, const std::string& password, int fd) {
     cancelSearch();
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_running.load()) {
+            if (fd >= 0) {
+#ifdef _WIN32
+                ::_close(fd);
+#else
+                ::close(fd);
+#endif
+            }
             OpenResult failed;
             failed.error = DocumentError::Unknown;
             Q_EMIT documentOpened(documentId, failed);
             return;
         }
 
-        m_controlQueue.push_back({[this, documentId, filePath, password]() {
+        m_controlQueue.push_back({[this, documentId, filePath, password, fd]() {
             noteProgress(ipc::WorkerOp::Open);
             struct OpenGuard {
                 RenderWorker* w;
@@ -214,7 +336,7 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
             }
 
             OpenResult result;
-            auto loaded = loadSource(filePath, password, m_maxPinnedBytes.load());
+            auto loaded = loadSource(filePath, password, m_maxPinnedBytes.load(), fd);
             auto newDoc = std::move(loaded.doc);
             auto err = loaded.error;
             if (err != DocumentError::None) {
@@ -228,7 +350,7 @@ void RenderWorker::openDocumentAsync(int64_t documentId, const std::string& file
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_activeDocumentId.store(documentId);
-                installActiveSourceLocked(filePath, password, loaded.snapshot, loaded.fileSize, loaded.fileMtimeMs);
+                installActiveSourceLocked(filePath, password, loaded.snapshot, loaded.fileSize, loaded.fileMtimeMs, loaded.fd);
                 m_queue.clear();
             }
 
@@ -378,9 +500,10 @@ void RenderWorker::requestRedactDocument(int64_t documentId,
         std::shared_ptr<const std::vector<uint8_t>> snapshot;
         long long openedSize = -1;
         long long openedMtimeMs = 0;
+        int openedFd = -1;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            if (documentId != m_activeDocumentId.load() || (!m_activeSnapshot && m_activeFilePath.empty())) {
+            if (documentId != m_activeDocumentId.load() || (!m_activeSnapshot && m_activeFilePath.empty() && m_activeFd < 0)) {
                 Q_EMIT redactDocumentFailed(documentId, QStringLiteral("Document is not open or active."));
                 return;
             }
@@ -389,6 +512,7 @@ void RenderWorker::requestRedactDocument(int64_t documentId,
             snapshot = m_activeSnapshot;
             openedSize = m_activeFileSize;
             openedMtimeMs = m_activeFileMtimeMs;
+            openedFd = m_activeFd;
         }
         struct PasswordWipe {
             std::string& s;
@@ -401,6 +525,35 @@ void RenderWorker::requestRedactDocument(int64_t documentId,
         if (snapshot) {
             sourceData = snapshot->data();
             sourceSize = snapshot->size();
+        } else if (openedFd >= 0) {
+            // Read from dup'd file descriptor via pread loops without opening by path!
+            unpinnedBytes.resize(static_cast<qsizetype>(openedSize));
+            size_t totalRead = 0;
+            while (totalRead < static_cast<size_t>(openedSize)) {
+#ifdef _WIN32
+                static std::mutex s_redactSeekMutex;
+                std::lock_guard<std::mutex> lk(s_redactSeekMutex);
+                if (::_lseeki64(openedFd, static_cast<__int64>(totalRead), SEEK_SET) == -1) break;
+                int bytes = ::_read(openedFd, unpinnedBytes.data() + totalRead, static_cast<unsigned int>(openedSize - totalRead));
+                if (bytes <= 0) break;
+                totalRead += static_cast<size_t>(bytes);
+#else
+                ssize_t bytes = ::pread(openedFd, unpinnedBytes.data() + totalRead, static_cast<size_t>(openedSize) - totalRead, static_cast<off_t>(totalRead));
+                if (bytes < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                if (bytes == 0) break;
+                totalRead += static_cast<size_t>(bytes);
+#endif
+            }
+            if (totalRead != static_cast<size_t>(openedSize)) {
+                Q_EMIT redactDocumentFailed(documentId, QStringLiteral(
+                    "The file changed on disk while it was being read. Reopen it before redacting."));
+                return;
+            }
+            sourceData = reinterpret_cast<const uint8_t*>(unpinnedBytes.constData());
+            sourceSize = static_cast<std::size_t>(unpinnedBytes.size());
         } else {
             // Large document opened by path: the bytes on disk are only trustworthy if the file is the
             // same one that was opened. Refuse rather than redact something other than what is displayed.
@@ -796,10 +949,6 @@ void RenderWorker::workerLoop() {
     while (m_running.load()) {
 #ifdef PDF_WORKER_TEST_HOOKS
         if (m_testHangEngine.load(std::memory_order_relaxed)) {
-            // The engine thread itself records the hang (op=Tile, one heartbeat stamp) and then acknowledges
-            // it. The setter waits for that acknowledgement, so no progress write can land after it returns:
-            // previously this thread's own noteProgress(Idle) below could overwrite the setter's Tile, which
-            // made the hang invisible to the watchdog (it only flags non-Idle ops with a frozen heartbeat).
             noteProgress(ipc::WorkerOp::Tile);
             m_testHangParked.store(true, std::memory_order_release);
             while (m_testHangEngine.load(std::memory_order_relaxed) && m_running.load()) {
@@ -846,7 +995,7 @@ void RenderWorker::workerLoop() {
             }
 #ifdef PDF_WORKER_TEST_HOOKS
             if (m_testHangEngine.load(std::memory_order_relaxed)) {
-                continue; // back to the loop head, which parks this thread in the hang loop
+                continue;
             }
 #endif
 
@@ -883,7 +1032,7 @@ void RenderWorker::workerLoop() {
                 hasOutlineTask = true;
             } else if (hasSearch) {
                 hasSearchTask = true;
-                m_isSearchRunning = true; // cleared by SearchRunGuard on every exit of the search branch
+                m_isSearchRunning = true;
                 searchPageIndex = (m_activeSearch.startPage + m_activeSearch.nextPageToSearch) % m_activeSearch.totalPages;
                 ++m_activeSearch.nextPageToSearch;
                 searchDocId = m_activeSearch.documentId;
@@ -948,7 +1097,6 @@ void RenderWorker::workerLoop() {
                 }
             }
 
-            // Test hook: keep the tile in flight for a while when artificially configured (0 disables)
             if (const int delayMs = m_testRenderDelayMs.load(std::memory_order_relaxed); delayMs > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
@@ -979,10 +1127,6 @@ void RenderWorker::workerLoop() {
         }
 
         if (hasSearchTask) {
-            // The page was accounted for (nextPageToSearch) when picked, so the idle predicate alone
-            // would call the worker idle while this page is still being extracted and delivered.
-            // m_isSearchRunning closes that window; the guard clears it on every path out of here
-            // (including the early `continue`s) and wakes waitForIdle().
             struct SearchRunGuard {
                 RenderWorker* w;
                 ~SearchRunGuard() {
@@ -1013,7 +1157,6 @@ void RenderWorker::workerLoop() {
                 }
             }
 
-            // Deliver matches if search is still current
             if (m_running.load() && searchId == m_currentSearchId.load() && searchDocId == m_activeDocumentId.load()) {
                 int totalSoFar = 0;
                 bool searchTruncated = false;
@@ -1051,7 +1194,6 @@ void RenderWorker::workerLoop() {
         }
     }
 
-    // Clean up worker cache and document on the worker thread before exit
     m_workerPageCache.clear();
     m_workerPageLru.clear();
     m_cachedPageCount.store(0, std::memory_order_relaxed);

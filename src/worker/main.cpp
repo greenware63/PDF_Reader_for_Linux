@@ -124,7 +124,7 @@ static bool setWorkerResourceLimit(int resource, rlim_t soft, rlim_t hard, const
 extern "C" __attribute__((used, visibility("default"))) int __lsan_is_turned_off() { return 1; }
 #endif
 
-static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit = false) {
+static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit = false, bool testFailLandlock = false) {
 #ifdef __linux__
     const pid_t parentPid = getppid();
     if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
@@ -345,6 +345,10 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
 #if defined(PDF_WORKER_HAS_LANDLOCK_HEADERS) && \
     defined(LANDLOCK_CREATE_RULESET_VERSION) && defined(SYS_landlock_create_ruleset) && \
     defined(SYS_landlock_restrict_self) && defined(SYS_landlock_add_rule)
+    if (testFailLandlock) {
+        errorMessage = "Landlock is unavailable: Function not implemented (injected test failure)";
+        return false;
+    }
     const long abi = syscall(SYS_landlock_create_ruleset, nullptr, 0,
                              LANDLOCK_CREATE_RULESET_VERSION);
     if (abi < 1) {
@@ -353,8 +357,10 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
     }
 
     landlock_ruleset_attr rulesetAttr{};
-    // Keep reads unrestricted for arbitrary PDFs; allow writes only where the shared-memory IPC needs them.
+    // Restrict both reads and writes; only allow explicitly verified runtime read paths and /dev/shm.
     rulesetAttr.handled_access_fs =
+        LANDLOCK_ACCESS_FS_READ_FILE |
+        LANDLOCK_ACCESS_FS_READ_DIR |
         LANDLOCK_ACCESS_FS_WRITE_FILE |
         LANDLOCK_ACCESS_FS_REMOVE_DIR |
         LANDLOCK_ACCESS_FS_REMOVE_FILE |
@@ -401,6 +407,8 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
     // Qt's QSharedMemory tile transport creates, maps, and unlinks segments under /dev/shm.
     landlock_path_beneath_attr sharedMemoryRule{};
     sharedMemoryRule.allowed_access =
+        LANDLOCK_ACCESS_FS_READ_FILE |
+        LANDLOCK_ACCESS_FS_READ_DIR |
         LANDLOCK_ACCESS_FS_WRITE_FILE |
         LANDLOCK_ACCESS_FS_MAKE_REG |
         LANDLOCK_ACCESS_FS_REMOVE_FILE;
@@ -427,6 +435,42 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
         return false;
     }
 
+    // Allow read-only access for verified runtime dependencies:
+    // system fonts, fontconfig configuration & caches, locale data, and timezone info.
+    auto addReadOnlyRule = [&](const char* path) {
+        int fd = open(path, O_PATH | O_CLOEXEC);
+        if (fd < 0) {
+            return;
+        }
+        landlock_path_beneath_attr rule{};
+        rule.allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+        rule.parent_fd = fd;
+        syscall(SYS_landlock_add_rule, rulesetFd, LANDLOCK_RULE_PATH_BENEATH, &rule, 0);
+        close(fd);
+    };
+
+    addReadOnlyRule("/usr/share/fonts");
+    addReadOnlyRule("/usr/local/share/fonts");
+    addReadOnlyRule("/etc/fonts");
+    addReadOnlyRule("/var/cache/fontconfig");
+    addReadOnlyRule("/usr/share/fontconfig");
+    addReadOnlyRule("/usr/lib/locale");
+    addReadOnlyRule("/usr/share/locale");
+    addReadOnlyRule("/usr/share/zoneinfo");
+    addReadOnlyRule("/etc/localtime");
+
+    const char* home = getenv("HOME");
+    if (home && home[0] != '\0') {
+        std::string userFonts = std::string(home) + "/.local/share/fonts";
+        addReadOnlyRule(userFonts.c_str());
+        std::string userFontsOld = std::string(home) + "/.fonts";
+        addReadOnlyRule(userFontsOld.c_str());
+        std::string userFc = std::string(home) + "/.cache/fontconfig";
+        addReadOnlyRule(userFc.c_str());
+        std::string userFcOld = std::string(home) + "/.fontconfig";
+        addReadOnlyRule(userFcOld.c_str());
+    }
+
     if (syscall(SYS_landlock_restrict_self, rulesetFd, 0) != 0) {
         const int restrictError = errno;
         close(rulesetFd);
@@ -446,6 +490,10 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
 #else
     if (testFailRlimit) {
         errorMessage = "Setting resource limit RLIMIT_AS failed: Operation not permitted (injected test failure)";
+        return false;
+    }
+    if (testFailLandlock) {
+        errorMessage = "Landlock is unavailable: Function not implemented (injected test failure)";
         return false;
     }
     (void)errorMessage;
@@ -719,6 +767,12 @@ int main(int argc, char* argv[]) {
     );
     parser.addOption(testFailRlimitOption);
 
+    QCommandLineOption testFailLandlockOption(
+        QStringLiteral("test-fail-landlock"),
+        QStringLiteral("Test hook: simulate Landlock unavailability during process isolation setup.")
+    );
+    parser.addOption(testFailLandlockOption);
+
     QCommandLineOption testHangEngineOption(
         QStringLiteral("test-hang-engine"),
         QStringLiteral("Test hook: simulate engine-thread hang for watchdog verification.")
@@ -730,13 +784,15 @@ int main(int argc, char* argv[]) {
 
 #ifdef PDF_WORKER_TEST_HOOKS
     const bool testFailRlimit = parser.isSet(testFailRlimitOption);
+    const bool testFailLandlock = parser.isSet(testFailLandlockOption);
 #else
     const bool testFailRlimit = false;
+    const bool testFailLandlock = false;
 #endif
 
     if (parser.isSet(selftestOption)) {
         std::string isolationError;
-        if (!applyProcessIsolation(isolationError, testFailRlimit)) {
+        if (!applyProcessIsolation(isolationError, testFailRlimit, testFailLandlock)) {
             std::cerr << "[pdf_worker] Failed to establish process isolation for selftest: "
                       << isolationError << std::endl;
             return 1;
@@ -748,13 +804,13 @@ int main(int argc, char* argv[]) {
     }
 
     const QString socketName = parser.value(socketOption);
-    if (socketName.isEmpty() && !testFailRlimit) {
+    if (socketName.isEmpty() && !testFailRlimit && !testFailLandlock) {
         std::cerr << "[pdf_worker] Error: --socket argument is required." << std::endl;
         return 1;
     }
 
     std::string isolationError;
-    if (!applyProcessIsolation(isolationError, testFailRlimit)) {
+    if (!applyProcessIsolation(isolationError, testFailRlimit, testFailLandlock)) {
         std::cerr << "[pdf_worker] Failed to establish required process isolation: "
                   << isolationError << std::endl;
         return 1;

@@ -12,6 +12,10 @@
 #include "ipc/IpcMessages.h"
 #include "engine/RenderWorker.h"
 
+#ifdef Q_OS_LINUX
+class QSocketNotifier;
+#endif
+
 namespace pdf::worker {
 
 class WorkerServer : public QObject {
@@ -60,6 +64,13 @@ private:
     QString m_serverName;
     QLocalServer* m_server{nullptr};
     QLocalSocket* m_clientSocket{nullptr};
+#ifdef Q_OS_LINUX
+    int m_listenFd{-1};
+    int m_clientFd{-1};
+    int m_pendingReceivedFd{-1};
+    QSocketNotifier* m_listenNotifier{nullptr};
+    QSocketNotifier* m_clientNotifier{nullptr};
+#endif
     QByteArray m_incomingBuffer;
     std::unordered_map<QString, std::unique_ptr<ipc::SharedTileSegment>> m_sharedTiles;
     std::vector<ipc::WorkerControlRequest> m_pendingControlRequests;
