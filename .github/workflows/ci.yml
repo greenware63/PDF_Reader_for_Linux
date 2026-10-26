@@ -93,7 +93,6 @@ jobs:
               # Job logs are not always retrievable; surface failing tests as annotations too.
               if [ -f build/Testing/Temporary/LastTestsFailed.log ]; then
                 for t in $(cut -d: -f2 build/Testing/Temporary/LastTestsFailed.log); do
-                  tail -n 25 build/Testing/Temporary/LastTest.log | tr '\n' ' ' >/dev/null
                   echo "::error title=ctest failed::$t"
                 done
                 awk '/Test Failed|\[FAIL\]|FAIL|ASSERT|Check failed/ {print "::error title=ctest detail::" $0}' \
