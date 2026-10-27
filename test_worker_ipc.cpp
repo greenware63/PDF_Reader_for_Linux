@@ -4,6 +4,7 @@
 #include "ipc/SharedTile.h"
 #include <cstring>
 #include <vector>
+#include <memory>
 #include <QElapsedTimer>
 #include <QThread>
 #include <iostream>
@@ -24,6 +25,8 @@
 #include <sys/un.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <cerrno>
 #endif
 
@@ -337,8 +340,8 @@ int main(int argc, char* argv[]) {
     }
 
     if (openResp.documentId != 1 || openResp.result.error != pdf::DocumentError::None || openResp.result.pageCount <= 0) {
-        std::cerr << "[FAIL] OpenDocument failed. Error=" << static_cast<int>(openResp.result.error)\
-                  << " pageCount=" << openResp.result.pageCount << std::endl;\
+        std::cerr << "[FAIL] OpenDocument failed. Error=" << static_cast<int>(openResp.result.error)
+                  << " pageCount=" << openResp.result.pageCount << std::endl;
         worker.kill();
         return 1;
     }
@@ -1420,7 +1423,8 @@ int main(int argc, char* argv[]) {
 
     // --- TEST 17: Unexpected Descriptor Hygiene (Unsolicited Descriptors Are Closed) ---
     std::cout << "[TEST 17] Testing unexpected descriptor hygiene (unsolicited descriptors closed)..." << std::endl;
-    {
+    if (qEnvironmentVariableIsEmpty("PDF_TEST19_ONLY")) { // skipped only when isolating Test 19 sub-cases
+
         const QString hygieneSocket = QStringLiteral("pdf_test_hygiene_%1").arg(QCoreApplication::applicationPid());
         QProcess hygieneWorker;
         hygieneWorker.start(workerExe, QStringList() << QStringLiteral("--socket") << hygieneSocket);
@@ -1445,8 +1449,10 @@ int main(int argc, char* argv[]) {
         QByteArray hygieneIn;
         QObject::connect(&hygieneClient, &QLocalSocket::readyRead, [&]() { hygieneIn.append(hygieneClient.readAll()); });
 
-        // Send a PingRequest with an unsolicited descriptor attached
-        pdf::ipc::PingRequest pingReq{99};
+        // Send a PingRequest with an unsolicited descriptor attached: the worker must reject (drop) it and
+        // close the descriptor (closure itself is verified from outside in Test 19). A clean Ping afterwards
+        // must still be answered, and it must be the only Pong.
+        pdf::ipc::PingRequest pingReq{98};
         QByteArray pingPayload = pdf::ipc::serialize(pingReq);
 #ifdef Q_OS_LINUX
         int dummyFd = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -1455,6 +1461,9 @@ int main(int argc, char* argv[]) {
         hygieneClient.write(pdf::ipc::buildPacket(pdf::ipc::MessageType::Ping, pingPayload));
         hygieneClient.flush();
 #endif
+        hygieneClient.write(pdf::ipc::buildPacket(pdf::ipc::MessageType::Ping,
+                                                  pdf::ipc::serialize(pdf::ipc::PingRequest{99})));
+        hygieneClient.flush();
 
         pdf::ipc::MessageType type{};
         QByteArray reply;
@@ -1471,7 +1480,7 @@ int main(int argc, char* argv[]) {
         }, 5000);
 
         if (!gotPong || type != pdf::ipc::MessageType::Pong) {
-            std::cerr << "[FAIL] Worker failed to respond to Ping sent with unexpected descriptor." << std::endl;
+            std::cerr << "[FAIL] Worker failed to respond to the clean Ping sent after one carrying an unexpected descriptor." << std::endl;
             hygieneWorker.kill();
             return 1;
         }
@@ -1485,7 +1494,7 @@ int main(int argc, char* argv[]) {
         hygieneClient.disconnectFromServer();
         hygieneWorker.kill();
         hygieneWorker.waitForFinished(3000);
-        std::cout << "  -> Passed: Worker handled unsolicited descriptor and preserved protocol stability." << std::endl;
+        std::cout << "  -> Passed: Ping with an unsolicited descriptor was dropped; the following clean Ping was answered (descriptor closure: Test 19)." << std::endl;
     }
 
     // --- TEST 18: Startup Fails Without Landlock (Fail-Closed) ---
@@ -1509,6 +1518,431 @@ int main(int argc, char* argv[]) {
     }
 #else
     std::cout << "  -> Skipped: ENABLE_TEST_HOOKS is OFF (--test-fail-landlock hook compiled out of shipping build)." << std::endl;
+#endif
+
+    // --- TEST 19: Descriptor lifecycle (SCM_RIGHTS association, rejection, closure) ---
+    // The worker must (a) only accept a descriptor on OpenDocumentRequest, (b) bind a descriptor to the
+    // packet it travelled with (never to a later request), and (c) really close every descriptor it
+    // refuses. Closure is observed from outside: we hand over the READ end of a pipe, drop our own copy,
+    // and poll the WRITE end, which reports POLLERR as soon as no process holds the read end any more.
+#ifdef Q_OS_LINUX
+    std::cout << "[TEST 19] Testing descriptor lifecycle (association, rejection and closure)..." << std::endl;
+    {
+        struct RawPeer {
+            int fd{-1};
+            QByteArray in;
+            ~RawPeer() { if (fd >= 0) ::close(fd); }
+            bool connectTo(const QString& name, int timeoutMs) {
+                QElapsedTimer t; t.start();
+                while (t.elapsed() < timeoutMs) {
+                    fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+                    sockaddr_un addr{};
+                    addr.sun_family = AF_UNIX;
+                    const QByteArray nb = name.toUtf8();
+                    std::memcpy(addr.sun_path + 1, nb.constData(), static_cast<size_t>(nb.size()));
+                    const socklen_t len = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + nb.size());
+                    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), len) == 0) return true;
+                    ::close(fd); fd = -1;
+                    QThread::msleep(20);
+                }
+                return false;
+            }
+            // Sends `data` in one sendmsg(); `fds` (may be empty) ride with its first byte.
+            bool send(const QByteArray& data, const std::vector<int>& fds = {}) {
+                iovec iov{const_cast<char*>(data.constData()), static_cast<size_t>(data.size())};
+                msghdr msg{};
+                msg.msg_iov = &iov;
+                msg.msg_iovlen = 1;
+                std::vector<char> ctl(fds.empty() ? 0 : CMSG_SPACE(fds.size() * sizeof(int)));
+                if (!fds.empty()) {
+                    msg.msg_control = ctl.data();
+                    msg.msg_controllen = ctl.size();
+                    cmsghdr* c = CMSG_FIRSTHDR(&msg);
+                    c->cmsg_level = SOL_SOCKET;
+                    c->cmsg_type = SCM_RIGHTS;
+                    c->cmsg_len = CMSG_LEN(fds.size() * sizeof(int));
+                    std::memcpy(CMSG_DATA(c), fds.data(), fds.size() * sizeof(int));
+                }
+                return ::sendmsg(fd, &msg, MSG_NOSIGNAL) == data.size();
+            }
+            bool next(pdf::ipc::MessageType& type, QByteArray& payload, int timeoutMs) {
+                QElapsedTimer t; t.start();
+                while (true) {
+                    if (static_cast<size_t>(in.size()) >= sizeof(pdf::ipc::PacketHeader)) {
+                        pdf::ipc::PacketHeader h;
+                        std::memcpy(&h, in.constData(), sizeof(h));
+                        const size_t full = sizeof(h) + h.payloadSize;
+                        if (static_cast<size_t>(in.size()) >= full) {
+                            type = static_cast<pdf::ipc::MessageType>(h.type);
+                            payload = in.mid(static_cast<qsizetype>(sizeof(h)), static_cast<qsizetype>(h.payloadSize));
+                            in.remove(0, static_cast<qsizetype>(full));
+                            return true;
+                        }
+                    }
+                    const int left = timeoutMs - static_cast<int>(t.elapsed());
+                    if (left <= 0) return false;
+                    pollfd p{fd, POLLIN, 0};
+                    if (::poll(&p, 1, left) > 0) {
+                        char buf[4096];
+                        const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+                        if (n <= 0) return false;
+                        in.append(buf, static_cast<qsizetype>(n));
+                    }
+                }
+            }
+            bool peerClosed(int timeoutMs) {
+                pollfd p{fd, POLLIN, 0};
+                if (::poll(&p, 1, timeoutMs) <= 0) return false;
+                char b[1];
+                return ::recv(fd, b, 1, MSG_PEEK) == 0;
+            }
+        };
+        struct Probe { // pipe whose read end is handed to the worker
+            int r{-1}, w{-1};
+            Probe() { int p[2]; if (::pipe2(p, O_CLOEXEC) == 0) { r = p[0]; w = p[1]; } }
+            ~Probe() { if (r >= 0) ::close(r); if (w >= 0) ::close(w); }
+            int giveAway() { const int x = r; r = -1; return x; } // caller sends then closes x
+            bool workerDroppedIt(int timeoutMs) {
+                QElapsedTimer t; t.start();
+                do {
+                    pollfd p{w, 0, 0};
+                    ::poll(&p, 1, 0);
+                    if (p.revents & POLLERR) return true;
+                    QThread::msleep(10);
+                } while (t.elapsed() < timeoutMs);
+                return false;
+            }
+        };
+        struct Env {
+            QProcess proc;
+            RawPeer peer;
+            bool start(const QString& exe, const QString& name) {
+                proc.start(exe, QStringList() << QStringLiteral("--socket") << name);
+                return proc.waitForStarted(3000) && peer.connectTo(name, 5000);
+            }
+            ~Env() { proc.kill(); proc.waitForFinished(2000); }
+        };
+        // PDF_TEST19_ONLY=ACF runs only those sub-cases (used to show each one fails on the old code).
+        const QByteArray only19 = qgetenv("PDF_TEST19_ONLY");
+        auto want = [&](char c) { return only19.isEmpty() || only19.contains(c); };
+        using MT = pdf::ipc::MessageType;
+        static int s_envCounter = 0;
+        auto newEnv = [&](std::unique_ptr<Env>& env) {
+            env = std::make_unique<Env>();
+            return env->start(workerExe, QStringLiteral("pdf_test_fdlife_%1_%2")
+                                             .arg(QCoreApplication::applicationPid()).arg(++s_envCounter));
+        };
+        auto ping = [](int64_t seq) {
+            return pdf::ipc::buildPacket(MT::Ping, pdf::ipc::serialize(pdf::ipc::PingRequest{seq}));
+        };
+        auto openPkt = [&](int64_t id) {
+            return pdf::ipc::buildPacket(MT::OpenDocumentRequest,
+                pdf::ipc::serialize(pdf::ipc::OpenDocumentRequest{id, QFileInfo(samplePdf).absoluteFilePath(), QString()}));
+        };
+        auto expectPong = [&](Env& e, int64_t seq, const char* what) {
+            MT t{}; QByteArray pl;
+            if (!e.peer.next(t, pl, 5000) || t != MT::Pong) {
+                std::cerr << "[FAIL] " << what << ": no Pong" << std::endl; return false;
+            }
+            pdf::ipc::PongResponse r;
+            if (!pdf::ipc::deserialize(pl, r) || r.seq != seq) {
+                std::cerr << "[FAIL] " << what << ": Pong seq " << r.seq << ", expected " << seq << std::endl; return false;
+            }
+            return true;
+        };
+        // Lenient variant: skips Pongs for other sequence numbers (used where the dropped/answered state of an
+        // earlier Ping is not what the case is about).
+        auto awaitPong = [&](Env& e, int64_t seq, const char* what) {
+            MT t{}; QByteArray pl;
+            while (e.peer.next(t, pl, 5000)) {
+                pdf::ipc::PongResponse r;
+                if (t == MT::Pong && pdf::ipc::deserialize(pl, r) && r.seq == seq) return true;
+            }
+            std::cerr << "[FAIL] " << what << ": Pong " << seq << " never arrived" << std::endl;
+            return false;
+        };
+        // Reads the next OpenDocumentResponse; returns false on timeout.
+        auto nextOpen = [&](Env& e, pdf::ipc::OpenDocumentResponse& out) {
+            MT t{}; QByteArray pl;
+            while (e.peer.next(t, pl, 8000)) {
+                if (t == MT::OpenDocumentResponse) return pdf::ipc::deserialize(pl, out);
+            }
+            return false;
+        };
+        const QByteArray samplePath = QFileInfo(samplePdf).absoluteFilePath().toLocal8Bit();
+        auto realFd = [&]() { return ::open(samplePath.constData(), O_RDONLY | O_CLOEXEC); };
+
+        // 19A: a descriptor on every non-Open request type is rejected and closed, and the request is dropped.
+        if (want('A')) {
+            std::unique_ptr<Env> env;
+            if (!newEnv(env)) { std::cerr << "[FAIL] 19A: spawn/connect failed" << std::endl; return 1; }
+            const std::vector<std::pair<const char*, QByteArray>> msgs = {
+                {"Ping", ping(1)},
+                {"CloseDocumentRequest", pdf::ipc::buildPacket(MT::CloseDocumentRequest, pdf::ipc::serialize(pdf::ipc::CloseDocumentRequest{}))},
+                {"CancelRenderRequest", pdf::ipc::buildPacket(MT::CancelRenderRequest, pdf::ipc::serialize(pdf::ipc::CancelRenderRequest{}))},
+                {"GetOutlineRequest", pdf::ipc::buildPacket(MT::GetOutlineRequest, pdf::ipc::serialize(pdf::ipc::GetOutlineRequest{}))},
+            };
+            for (const auto& m : msgs) {
+                Probe p;
+                const int give = p.giveAway();
+                const bool sent = env->peer.send(m.second, {give});
+                ::close(give);
+                if (!sent) { std::cerr << "[FAIL] 19A: send failed for " << m.first << std::endl; return 1; }
+                if (!p.workerDroppedIt(3000)) {
+                    std::cerr << "[FAIL] 19A: worker still holds a descriptor received with " << m.first << std::endl;
+                    return 1;
+                }
+            }
+            // The rejected Ping(1) must not have been answered; a clean Ping(2) must be.
+            env->peer.send(ping(2));
+            if (!expectPong(*env, 2, "19A follow-up")) return 1;
+            std::cout << "  -> 19A passed: descriptors on Ping/Close/Cancel/Outline are rejected, closed and the request dropped." << std::endl;
+        }
+
+        // 19B: a stray descriptor can never be consumed by a later OpenDocumentRequest.
+        if (want('B')) {
+            std::unique_ptr<Env> env;
+            if (!newEnv(env)) { std::cerr << "[FAIL] 19B: spawn/connect failed" << std::endl; return 1; }
+            Probe stray;
+            const int give = stray.giveAway();
+            env->peer.send(ping(10), {give});
+            ::close(give);
+            env->peer.send(ping(11));
+            if (!awaitPong(*env, 11, "19B sync")) return 1;
+            const int fd = realFd();
+            env->peer.send(openPkt(1), {fd});
+            ::close(fd);
+            pdf::ipc::OpenDocumentResponse r;
+            if (!nextOpen(*env, r) || r.result.error != pdf::DocumentError::None || r.result.pageCount <= 0) {
+                std::cerr << "[FAIL] 19B: Open after a stray descriptor did not use its own descriptor (error="
+                          << static_cast<int>(r.result.error) << ")" << std::endl;
+                return 1;
+            }
+            if (!stray.workerDroppedIt(3000)) { std::cerr << "[FAIL] 19B: stray descriptor was never closed" << std::endl; return 1; }
+            std::cout << "  -> 19B passed: stray descriptor closed; the next Open used its own descriptor." << std::endl;
+        }
+
+        // 19C: stalled worker, stray + Open queued back to back (coalesced reads), then released.
+        if (want('C')) {
+            std::unique_ptr<Env> env;
+            if (!newEnv(env)) { std::cerr << "[FAIL] 19C: spawn/connect failed" << std::endl; return 1; }
+            ::kill(static_cast<pid_t>(env->proc.processId()), SIGSTOP);
+            Probe stray;
+            const int give = stray.giveAway();
+            env->peer.send(ping(20), {give});
+            ::close(give);
+            env->peer.send(ping(21));
+            const int fd = realFd();
+            env->peer.send(openPkt(2), {fd});
+            ::close(fd);
+            ::kill(static_cast<pid_t>(env->proc.processId()), SIGCONT);
+            if (!awaitPong(*env, 21, "19C")) return 1;
+            pdf::ipc::OpenDocumentResponse r;
+            if (!nextOpen(*env, r) || r.result.error != pdf::DocumentError::None || r.documentId != 2) {
+                std::cerr << "[FAIL] 19C: coalesced Open got the wrong descriptor (error=" << static_cast<int>(r.result.error) << ")" << std::endl;
+                return 1;
+            }
+            if (!stray.workerDroppedIt(3000)) { std::cerr << "[FAIL] 19C: stray descriptor not closed" << std::endl; return 1; }
+            std::cout << "  -> 19C passed: queued/coalesced packets keep each descriptor with its own packet." << std::endl;
+        }
+
+        // 19D: the descriptor belongs to the packet that carries its first byte. [Ping][Open] in ONE
+        //      sendmsg with one descriptor therefore hands it to the Ping; the Open sees none and fails closed.
+        if (want('D')) {
+            std::unique_ptr<Env> env;
+            if (!newEnv(env)) { std::cerr << "[FAIL] 19D: spawn/connect failed" << std::endl; return 1; }
+            const int fd = realFd();
+            env->peer.send(ping(30) + openPkt(3), {fd});
+            ::close(fd);
+            pdf::ipc::OpenDocumentResponse r;
+            if (!nextOpen(*env, r) || r.result.error == pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 19D: Open succeeded using a descriptor that travelled with a different packet" << std::endl;
+                return 1;
+            }
+            std::cout << "  -> 19D passed: descriptor bound to the packet it travelled with, Open failed closed." << std::endl;
+        }
+
+        // 19E: two Opens with two descriptors in flight at once are matched in order (text file first, PDF second).
+        if (want('E')) {
+            std::unique_ptr<Env> env;
+            if (!newEnv(env)) { std::cerr << "[FAIL] 19E: spawn/connect failed" << std::endl; return 1; }
+            QTemporaryDir tmp;
+            QFile junk(tmp.filePath(QStringLiteral("not_a_pdf.txt")));
+            junk.open(QIODevice::WriteOnly); junk.write("this is definitely not a pdf file\n"); junk.close();
+            ::kill(static_cast<pid_t>(env->proc.processId()), SIGSTOP);
+            const int f1 = ::open(junk.fileName().toLocal8Bit().constData(), O_RDONLY | O_CLOEXEC);
+            const int f2 = realFd();
+            env->peer.send(openPkt(41), {f1});
+            env->peer.send(openPkt(42), {f2});
+            ::close(f1); ::close(f2);
+            ::kill(static_cast<pid_t>(env->proc.processId()), SIGCONT);
+            pdf::ipc::OpenDocumentResponse a, b;
+            if (!nextOpen(*env, a) || !nextOpen(*env, b) || a.documentId != 41 || b.documentId != 42 ||
+                a.result.error == pdf::DocumentError::None || b.result.error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 19E: descriptors were not matched to their own requests" << std::endl;
+                return 1;
+            }
+            std::cout << "  -> 19E passed: two in-flight Opens matched to their own descriptors." << std::endl;
+        }
+
+        // 19F: more than one descriptor on an Open is malformed: all are closed and the Open fails closed.
+        if (want('F')) {
+            std::unique_ptr<Env> env;
+            if (!newEnv(env)) { std::cerr << "[FAIL] 19F: spawn/connect failed" << std::endl; return 1; }
+            Probe extra;
+            const int good = realFd();
+            const int give = extra.giveAway();
+            env->peer.send(openPkt(5), {good, give});
+            ::close(good); ::close(give);
+            pdf::ipc::OpenDocumentResponse r;
+            if (!nextOpen(*env, r) || r.result.error == pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 19F: Open with two descriptors was accepted" << std::endl;
+                return 1;
+            }
+            if (!extra.workerDroppedIt(3000)) { std::cerr << "[FAIL] 19F: extra descriptor not closed" << std::endl; return 1; }
+            std::cout << "  -> 19F passed: Open carrying two descriptors rejected, both closed." << std::endl;
+        }
+
+        // 19G: malformed Open payload with a descriptor: closed, worker stays usable.
+        if (want('G')) {
+            std::unique_ptr<Env> env;
+            if (!newEnv(env)) { std::cerr << "[FAIL] 19G: spawn/connect failed" << std::endl; return 1; }
+            Probe p;
+            const int give = p.giveAway();
+            env->peer.send(pdf::ipc::buildPacket(MT::OpenDocumentRequest, QByteArray("\x01\x02\x03", 3)), {give});
+            ::close(give);
+            if (!p.workerDroppedIt(3000)) { std::cerr << "[FAIL] 19G: descriptor from a malformed Open not closed" << std::endl; return 1; }
+            env->peer.send(ping(50));
+            if (!expectPong(*env, 50, "19G follow-up")) return 1;
+            std::cout << "  -> 19G passed: malformed Open: descriptor closed, protocol still in sync." << std::endl;
+        }
+
+        // 19H: invalid header carrying a descriptor: the worker drops the connection and closes it.
+        if (want('H')) {
+            std::unique_ptr<Env> env;
+            if (!newEnv(env)) { std::cerr << "[FAIL] 19H: spawn/connect failed" << std::endl; return 1; }
+            Probe p;
+            const int give = p.giveAway();
+            QByteArray junk(sizeof(pdf::ipc::PacketHeader), '\xAB');
+            env->peer.send(junk, {give});
+            ::close(give);
+            if (!p.workerDroppedIt(3000)) { std::cerr << "[FAIL] 19H: descriptor from an invalid packet not closed" << std::endl; return 1; }
+            if (!env->peer.peerClosed(3000)) { std::cerr << "[FAIL] 19H: worker kept a connection after a protocol error" << std::endl; return 1; }
+            std::cout << "  -> 19H passed: invalid header: descriptor closed, connection dropped." << std::endl;
+        }
+
+        // 19I: client vanishes mid-packet after the descriptor arrived (cancellation / shutdown): no leak.
+        if (want('I')) {
+            std::unique_ptr<Env> env;
+            if (!newEnv(env)) { std::cerr << "[FAIL] 19I: spawn/connect failed" << std::endl; return 1; }
+            Probe p;
+            const int give = p.giveAway();
+            const QByteArray full = openPkt(6);
+            env->peer.send(full.left(10), {give});
+            ::close(give);
+            QThread::msleep(200);
+            ::shutdown(env->peer.fd, SHUT_RDWR);
+            ::close(env->peer.fd); env->peer.fd = -1;
+            if (!p.workerDroppedIt(3000)) { std::cerr << "[FAIL] 19I: descriptor of a half-received Open leaked after disconnect" << std::endl; return 1; }
+            std::cout << "  -> 19I passed: disconnect mid-packet closes the pending descriptor." << std::endl;
+        }
+
+        // --- TEST 20: Non-Latin text renders inside the sandboxed worker (Landlock read confinement) ---
+        // Every other fixture here is Latin text in a PDFium built-in font, so nothing would notice if read
+        // confinement (or a Flatpak/other sandbox) broke font access. Two fixtures:
+        //  * unicode_embedded.pdf    - Latin, Cyrillic, Greek and Persian, glyphs embedded in the PDF. Must always render.
+        //  * unicode_system_font.pdf - Japanese in a NON-embedded CID font, so PDFium must find a system CJK font via
+        //    fontconfig, i.e. through the worker's read allowlist. Required to render when the host has a Japanese
+        //    font (per fontconfig); otherwise reported as skipped, never as passed.
+        // Ink is counted per 70 px band (one text line per band), so a single missing script is caught.
+        std::cout << "[TEST 20] Testing non-Latin text rendering inside the confined worker..." << std::endl;
+        {
+            const QString dir = QFileInfo(samplePdf).absolutePath();
+            auto findFixture = [&](const QString& name) {
+                for (const QString& c : {dir + "/" + name, dir + "/tests/fixtures/" + name}) {
+                    if (QFileInfo::exists(c)) return c;
+                }
+                return QString();
+            };
+            // Returns per-band count of dark pixels, or an empty vector (with a message) on failure.
+            auto renderBands = [&](const QString& pdfPath, int bands, std::vector<int>& out, QString& why) {
+                std::unique_ptr<Env> env;
+                if (!newEnv(env)) { why = "spawn/connect failed"; return false; }
+                const QByteArray pathBytes = QFileInfo(pdfPath).absoluteFilePath().toLocal8Bit();
+                const int fd = ::open(pathBytes.constData(), O_RDONLY | O_CLOEXEC);
+                if (fd < 0) { why = "cannot open fixture"; return false; }
+                env->peer.send(pdf::ipc::buildPacket(MT::OpenDocumentRequest,
+                    pdf::ipc::serialize(pdf::ipc::OpenDocumentRequest{7, QFileInfo(pdfPath).absoluteFilePath(), QString()})), {fd});
+                ::close(fd);
+                pdf::ipc::OpenDocumentResponse open;
+                if (!nextOpen(*env, open) || open.result.error != pdf::DocumentError::None) { why = "open failed"; return false; }
+                pdf::TileRenderRequest tr;
+                tr.documentId = 7; tr.generation = 1; tr.pageIndex = 0;
+                tr.rect = {0, 0, 512, 512}; tr.scale = 1.0; tr.dpr = 1.0;
+                tr.key = pdf::TileKey::create(7, 0, 0, 0, 1.0, 1.0); tr.priority = 10;
+                env->peer.send(pdf::ipc::buildPacket(MT::RenderTileRequest, pdf::ipc::serialize(pdf::ipc::RenderTileRequest{tr})));
+                MT t{}; QByteArray pl;
+                while (env->peer.next(t, pl, 8000)) {
+                    if (t != MT::TileRenderedResponse) continue;
+                    pdf::ipc::TileRenderedResponse resp;
+                    if (!pdf::ipc::deserialize(pl, resp) || !resp.isShm || resp.width != 512 || resp.height != 512) { why = "bad tile"; return false; }
+                    std::vector<unsigned char> px(static_cast<size_t>(resp.stride) * static_cast<size_t>(resp.height));
+                    if (!pdf::ipc::readAndUnlinkSharedTile(resp.shmKey.toStdString(), static_cast<size_t>(resp.height),
+                            static_cast<size_t>(resp.stride), static_cast<size_t>(resp.width) * 4, px.data(),
+                            static_cast<size_t>(resp.stride))) { why = "cannot read tile"; return false; }
+                    env->peer.send(pdf::ipc::buildPacket(MT::SharedMemoryAck, pdf::ipc::serialize(pdf::ipc::SharedMemoryAck{resp.shmKey})));
+                    out.assign(static_cast<size_t>(bands), 0);
+                    for (int y = 60; y < 60 + 70 * bands && y < 512; ++y) {
+                        for (int x = 0; x < 512; ++x) {
+                            const unsigned char* q = &px[static_cast<size_t>(y) * resp.stride + static_cast<size_t>(x) * 4];
+                            if (std::min({q[0], q[1], q[2]}) < 128) ++out[static_cast<size_t>((y - 60) / 70)];
+                        }
+                    }
+                    return true;
+                }
+                why = "no tile response";
+                return false;
+            };
+            constexpr int kMinInk = 150; // a 32 pt line has thousands of dark pixels; a blank band has none
+
+            const QString embedded = findFixture(QStringLiteral("unicode_embedded.pdf"));
+            if (embedded.isEmpty()) { std::cerr << "[FAIL] 20: unicode_embedded.pdf not found next to " << samplePdf.toStdString() << std::endl; return 1; }
+            std::vector<int> ink; QString why;
+            if (!renderBands(embedded, 4, ink, why)) { std::cerr << "[FAIL] 20 (embedded): " << why.toStdString() << std::endl; return 1; }
+            const char* names[] = {"Latin", "Cyrillic", "Greek", "Persian"};
+            for (int i = 0; i < 4; ++i) {
+                std::cout << "     embedded " << names[i] << " line: " << ink[static_cast<size_t>(i)] << " dark pixels" << std::endl;
+                if (ink[static_cast<size_t>(i)] < kMinInk) {
+                    std::cerr << "[FAIL] 20: " << names[i] << " text did not render in the sandboxed worker" << std::endl;
+                    return 1;
+                }
+            }
+            std::cout << "  -> 20a passed: embedded Latin/Cyrillic/Greek/Persian text renders in the confined worker." << std::endl;
+
+            const QString sysFont = findFixture(QStringLiteral("unicode_system_font.pdf"));
+            if (sysFont.isEmpty()) { std::cerr << "[FAIL] 20: unicode_system_font.pdf not found" << std::endl; return 1; }
+            QProcess fc;
+            fc.start(QStringLiteral("fc-list"), QStringList() << QStringLiteral(":lang=ja") << QStringLiteral("file"));
+            const bool haveJa = fc.waitForStarted(2000) && fc.waitForFinished(5000) && fc.exitCode() == 0 &&
+                                !fc.readAllStandardOutput().trimmed().isEmpty();
+            if (!haveJa) {
+                std::cout << "  -> 20b SKIPPED: fontconfig reports no Japanese font on this host (or fc-list is missing), so the "
+                             "system-font fallback path through the read allowlist was NOT exercised." << std::endl;
+            } else {
+                if (!renderBands(sysFont, 2, ink, why)) { std::cerr << "[FAIL] 20 (system font): " << why.toStdString() << std::endl; return 1; }
+                std::cout << "     system-font Japanese lines: " << ink[0] << " / " << ink[1] << " dark pixels" << std::endl;
+                if (ink[0] < kMinInk || ink[1] < kMinInk) {
+                    std::cerr << "[FAIL] 20: a Japanese font is installed but the confined worker could not use it "
+                                 "(read allowlist too narrow?)" << std::endl;
+                    return 1;
+                }
+                std::cout << "  -> 20b passed: non-embedded CJK text renders through the system-font fallback inside the sandbox." << std::endl;
+            }
+        }
+        std::cout << "  -> Passed: descriptor lifecycle is bound to packets, rejected descriptors are really closed." << std::endl;
+    }
+#else
+    std::cout << "[TEST 19] Skipped: descriptor passing is Linux-only." << std::endl;
 #endif
 
     std::cout << "========================================" << std::endl;

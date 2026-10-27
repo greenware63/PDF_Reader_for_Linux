@@ -69,7 +69,7 @@ jobs:
         if: matrix.build_type == 'Release'
         # Guards the build-shipping assertion: if a flag is renamed, that check would pass vacuously.
         run: |
-          for flag in test-hang-engine test-fail-rlimit; do
+          for flag in test-hang-engine test-fail-rlimit test-fail-landlock; do
             strings -el build/pdf_worker | grep -q -e "$flag"
           done
 
@@ -135,7 +135,7 @@ jobs:
       - name: Assert hook flags are compiled out of the worker binary
         # QStringLiteral stores text as UTF-16, so plain `strings` cannot see it: use -el.
         run: |
-          for flag in test-hang-engine test-fail-rlimit; do
+          for flag in test-hang-engine test-fail-rlimit test-fail-landlock; do
             if strings -el build-shipping/pdf_worker | grep -q -e "$flag"; then
               echo "pdf_worker still contains the --$flag hook" >&2
               exit 1

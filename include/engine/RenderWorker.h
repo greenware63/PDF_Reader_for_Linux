@@ -68,7 +68,7 @@ public:
     /**
      * @brief Opens a PDF file serially on the worker thread.
      * Extracts pageCount and page sizes on the worker thread without touching PDFium from the UI thread.
-     * @param fd Optional open file descriptor (e.g. transferred via SCM_RIGHTS under Landlock).
+     * @param fd Optional open file descriptor (e.g. transferred via SCM_RIGHTS under Landlock). Ownership passes to the engine.
      */
     OpenResult openDocumentSync(int64_t documentId, const std::string& filePath, const std::string& password = "", int fd = -1);
 
@@ -79,7 +79,7 @@ public:
      * tile requests are left completely untouched. On success the active document id switches to
      * `documentId` and queued requests for the old document are discarded.
      * Connect with Qt::QueuedConnection from the UI thread.
-     * @param fd Optional open file descriptor (e.g. transferred via SCM_RIGHTS under Landlock).
+     * @param fd Optional open file descriptor (e.g. transferred via SCM_RIGHTS under Landlock). Ownership passes to the engine.
      */
     void openDocumentAsync(int64_t documentId, const std::string& filePath, const std::string& password = "", int fd = -1);
 
@@ -137,38 +137,39 @@ public:
     void enqueueRequest(TileRenderRequest request);
 
     /**
-     * @brief Enqueues a batch of tile render requests.
+     * @brief Enqueues multiple tile render requests, maintaining priority order.
      */
     void enqueueRequests(std::vector<TileRenderRequest> requests);
 
     /**
-     * @brief Cancels all pending render requests on the queue.
-     */
-    void cancelAll();
-
-    /**
-     * @brief Requests text extraction for the given page.
+     * @brief Requests extraction of text and character bounding boxes for a page asynchronously.
+     * Result is emitted via pageTextReady().
      */
     void requestPageText(int64_t documentId, int pageIndex);
 
     /**
-     * @brief Synchronously extracts text for the given page on the worker thread.
+     * @brief Synchronously extracts text for a page on the worker thread (blocks caller).
      */
     std::shared_ptr<const PageText> getPageTextSync(int64_t documentId, int pageIndex);
 
     /**
-     * @brief Initiates asynchronous document search across all pages.
+     * @brief Starts an asynchronous page-by-page background text search.
+     * Cancels any ongoing search. Results arrive incrementally via searchMatchesFound() and searchProgress().
      */
-    void startSearch(int64_t documentId, int64_t searchId, const QString& query,
-                     bool matchCase, int totalPages, int startPage = 0);
+    void startSearch(int64_t documentId, int64_t searchId, const QString& query, bool matchCase, int totalPages, int startPage = 0);
 
     /**
-     * @brief Cancels any ongoing background search.
+     * @brief Immediately cancels any running or pending background search.
      */
     void cancelSearch();
 
     /**
-     * @brief Blocks until the worker queue is empty and the worker thread is idle.
+     * @brief Cancels all pending queued requests.
+     */
+    void cancelAll();
+
+    /**
+     * @brief Blocks until all queued requests, control tasks, in-flight render, and active searches complete.
      */
     void waitForIdle();
 
@@ -183,19 +184,21 @@ public:
     void stop();
 
     /**
-     * @return Number of pending render requests in the queue.
+     * @return Number of pending requests currently in queue.
      */
     size_t pendingCount();
 
     /**
-     * @brief Test-only delay injected per tile render to simulate slow rendering.
+     * @brief Test hook: artificially delays every completed render by this many milliseconds
+     * (the worker keeps the tile "in flight" during the delay). 0 disables. Never use in production.
      */
     void setRenderDelayForTesting(std::chrono::milliseconds delay) noexcept {
         m_testRenderDelayMs.store(static_cast<int>(delay.count()), std::memory_order_relaxed);
     }
 
     /**
-     * @brief Updates the engine's heartbeat progress timestamp and current operation.
+     * @brief Posts a lightweight health probe to the worker thread control queue.
+     * Invoked on the worker thread when the engine can make progress.
      */
     void noteProgress(ipc::WorkerOp op = ipc::WorkerOp::Idle);
     std::pair<int64_t, uint32_t> progressSnapshot() const noexcept;
@@ -223,6 +226,9 @@ public:
         m_testHangEngine.store(true, std::memory_order_relaxed);
         { std::lock_guard<std::mutex> lock(m_mutex); } // order the store against the engine's wait predicate
         m_cv.notify_all();
+        // Wait (bounded) until the engine thread has parked and recorded the hang, so the heartbeat is frozen
+        // from the moment this returns. If the engine is busy in a long task we return after the bound; the
+        // thread then parks as soon as it reaches the loop head.
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
         while (!m_testHangParked.load(std::memory_order_acquire) &&
                std::chrono::steady_clock::now() < deadline) {
@@ -249,19 +255,29 @@ public:
 Q_SIGNALS:
     void tileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key, const pdf::PixelBuffer& buffer);
     void tileFailed(int64_t documentId, uint64_t generation, const pdf::TileKey& key);
+    /// Emitted exactly once per openDocumentAsync() call, from the worker thread.
     void documentOpened(int64_t documentId, pdf::OpenResult result);
+    /// Emitted when the document outline (bookmarks) has been extracted.
     void documentOutlineReady(int64_t documentId, const std::vector<pdf::OutlineItem>& outline);
+    /// Emitted when thumbnail rendering completes.
     void thumbnailReady(int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer);
     void thumbnailFailed(int64_t documentId, int pageIndex);
+    /// Emitted when full page rendering for printing completes.
     void printPageReady(int64_t documentId, int pageIndex, const pdf::PixelBuffer& buffer);
     void printPageFailed(int64_t documentId, int pageIndex);
+    /// Emitted when a page-range extraction to a standalone PDF completes.
     void extractPagesReady(int64_t documentId, int firstPage, int lastPage, const QByteArray& pdfBytes);
     void extractPagesFailed(int64_t documentId, int firstPage, int lastPage);
+    /// Emitted when burn-in redaction completes.
     void redactDocumentReady(int64_t documentId, const pdf::ipc::RedactDocumentResponse& response);
     void redactDocumentFailed(int64_t documentId, const QString& errorMessage);
+    /// Emitted when text extraction for a page completes on the worker thread.
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
+    /// Emitted when search finds matches on a page.
     void searchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
+    /// Emitted as search progresses page-by-page.
     void searchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);
+    /// Emitted when a search across all pages completes.
     void searchCompleted(int64_t documentId, int64_t searchId, int totalMatches, bool truncated);
     /// Emitted when all queued requests, in-flight render, control tasks, and active searches have completed.
     void idle();
@@ -288,12 +304,17 @@ private:
 
     std::atomic<bool> m_running{true};
     std::atomic<int64_t> m_activeDocumentId{0};
+    // Source of the active document (all guarded by m_mutex). Opening reads the file ONCE into
+    // m_activeSnapshot and loads PDFium from that same buffer, so what is displayed and what redaction
+    // reads are byte-identical and later changes to the file on disk cannot affect either. Files above
+    // m_maxPinnedBytes are opened by path instead; for those, redaction refuses if the file's size or
+    // modification time changed since it was opened.
     std::string m_activeFilePath;
-    std::string m_activePassword;
+    std::string m_activePassword; // wiped on close/replace; the redactor needs it to decrypt its own copy
+    int m_activeFd{-1};           // unpinned (> m_maxPinnedBytes) descriptor kept for pread streaming / redaction
     std::shared_ptr<const std::vector<uint8_t>> m_activeSnapshot;
     long long m_activeFileSize{-1};
     long long m_activeFileMtimeMs{0};
-    int m_activeFd{-1};
     std::atomic<unsigned long long> m_maxPinnedBytes{512ull * 1024 * 1024};
     void installActiveSourceLocked(const std::string& filePath, const std::string& password,
                                    std::shared_ptr<const std::vector<uint8_t>> snapshot,
@@ -315,9 +336,13 @@ private:
     std::condition_variable m_cv;
     std::condition_variable m_idleCv;
     bool m_isRendering{false};
+    // True while a control task (open/close) executes on the worker; included in the idle condition
+    // so waitForIdle() also waits for asynchronous document opens. Guarded by m_mutex.
     bool m_isControlRunning{false};
     bool m_isOutlineRunning{false};
-    bool m_isSearchRunning{false};
+    bool m_isSearchRunning{false}; // a picked search page is being extracted/delivered (guarded by m_mutex)
+    // Key of the tile currently being rendered (valid while m_isRendering); guarded by m_mutex.
+    // enqueueRequest(s) deduplicates against it so a scroll that re-requests the in-flight tile is a no-op.
     TileKey m_inFlightKey;
 
     std::vector<ControlTask> m_controlQueue;
@@ -325,10 +350,12 @@ private:
     std::vector<int64_t> m_outlineQueue;
     ActiveSearch m_activeSearch;
 
+    // Document and open page handles are accessed EXCLUSIVELY on the worker thread inside workerLoop()
     std::unique_ptr<IDocument> m_workerDocument;
 
+    // Bounded LRU page cache on worker thread
     static constexpr size_t MAX_WORKER_PAGE_CACHE = 64;
-    std::list<int> m_workerPageLru;
+    std::list<int> m_workerPageLru; // front = MRU, back = LRU
     std::unordered_map<int, std::pair<std::unique_ptr<IPage>, std::list<int>::iterator>> m_workerPageCache;
 
     std::thread m_thread;

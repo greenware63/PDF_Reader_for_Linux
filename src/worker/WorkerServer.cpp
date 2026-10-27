@@ -109,12 +109,7 @@ WorkerServer::~WorkerServer() {
         ::close(m_listenFd);
         m_listenFd = -1;
     }
-    for (int fd : m_receivedFds) {
-        if (fd >= 0) {
-            ::close(fd);
-        }
-    }
-    m_receivedFds.clear();
+    closePacketFds();
 #else
     if (m_clientSocket) {
         m_clientSocket->close();
@@ -217,12 +212,7 @@ void WorkerServer::onSocketDisconnected() {
         ::close(m_clientFd);
         m_clientFd = -1;
     }
-    for (int fd : m_receivedFds) {
-        if (fd >= 0) {
-            ::close(fd);
-        }
-    }
-    m_receivedFds.clear();
+    closePacketFds();
 #else
     if (m_clientSocket) {
         m_clientSocket->deleteLater();
@@ -232,19 +222,72 @@ void WorkerServer::onSocketDisconnected() {
     Q_EMIT clientDisconnected();
 }
 
+namespace {
+constexpr size_t kMaxFdsPerPacket = 4;
+}
+
+void WorkerServer::closePacketFds() {
+#ifdef Q_OS_LINUX
+    for (int fd : m_packetFds) {
+        if (fd >= 0) {
+            ::close(fd);
+        }
+    }
+    m_packetFds.clear();
+#endif
+}
+
+bool WorkerServer::headerIsValid(const ipc::PacketHeader& header) const {
+    return header.magic == ipc::IPC_MAGIC &&
+           header.version == ipc::IPC_PROTOCOL_VERSION &&
+           header.payloadSize <= ipc::MAX_IPC_PAYLOAD_SIZE &&
+           isRequestType(header.type);
+}
+
 void WorkerServer::onReadyRead() {
 #ifdef Q_OS_LINUX
     if (m_clientFd < 0) {
         return;
     }
 
-    while (true) {
-        char buf[8192];
+    // SCM_RIGHTS descriptors travel with the first byte of the sendmsg() that carried them, but a stream
+    // read has no packet boundaries: one recvmsg() may span several packets, and the kernel hands the
+    // descriptors to whichever read first touches that byte. To keep every descriptor attached to exactly
+    // one packet, never read past the end of the packet being assembled: read the header, validate it, then
+    // read exactly the remaining payload. A descriptor that arrives during those reads belongs to this
+    // packet, and only to this packet.
+    while (m_clientFd >= 0) {
+        const size_t have = static_cast<size_t>(m_incomingBuffer.size());
+        size_t want = 0;
+        if (have < sizeof(ipc::PacketHeader)) {
+            want = sizeof(ipc::PacketHeader) - have;
+        } else {
+            ipc::PacketHeader header;
+            std::memcpy(&header, m_incomingBuffer.constData(), sizeof(header));
+            if (!headerIsValid(header)) {
+                std::cerr << "[WorkerServer] Protocol error: Invalid header received. Disconnecting." << std::endl;
+                onSocketDisconnected();
+                return;
+            }
+            const size_t total = sizeof(ipc::PacketHeader) + header.payloadSize;
+            if (have >= total) {
+                QByteArray payload = m_incomingBuffer.mid(static_cast<qsizetype>(sizeof(ipc::PacketHeader)),
+                                                          static_cast<qsizetype>(header.payloadSize));
+                m_incomingBuffer.clear();
+                std::vector<int> fds;
+                fds.swap(m_packetFds);
+                dispatchMessage(static_cast<ipc::MessageType>(header.type), payload, std::move(fds));
+                continue;
+            }
+            want = total - have;
+        }
+
+        char buf[65536];
         struct iovec iov;
         iov.iov_base = buf;
-        iov.iov_len = sizeof(buf);
+        iov.iov_len = std::min(want, sizeof(buf)); // never past the end of the current packet
 
-        char cmsgBuf[CMSG_SPACE(sizeof(int))];
+        char cmsgBuf[CMSG_SPACE(kMaxFdsPerPacket * sizeof(int))];
         struct msghdr msg{};
         msg.msg_iov = &iov;
         msg.msg_iovlen = 1;
@@ -254,7 +297,27 @@ void WorkerServer::onReadyRead() {
         ssize_t n = ::recvmsg(m_clientFd, &msg, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
         if (n < 0) {
             if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+            onSocketDisconnected();
+            return;
+        }
+
+        // Take ownership of every descriptor first so that none can leak on any error path below.
+        for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+            if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+                continue;
+            }
+            const size_t numFds = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+            const int* fds = reinterpret_cast<const int*>(CMSG_DATA(cmsg));
+            for (size_t i = 0; i < numFds; ++i) {
+                if (fds[i] >= 0) {
+                    m_packetFds.push_back(fds[i]);
+                }
+            }
+        }
+        if ((msg.msg_flags & MSG_CTRUNC) != 0 || m_packetFds.size() > kMaxFdsPerPacket) {
+            // The kernel already closed the descriptors that did not fit; no honest client sends this many.
+            std::cerr << "[WorkerServer] Protocol error: too many descriptors on one packet. Disconnecting." << std::endl;
             onSocketDisconnected();
             return;
         }
@@ -262,26 +325,6 @@ void WorkerServer::onReadyRead() {
             onSocketDisconnected();
             return;
         }
-
-        struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-        while (cmsg) {
-            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-                const size_t numFds = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-                const int* fds = reinterpret_cast<const int*>(CMSG_DATA(cmsg));
-                for (size_t i = 0; i < numFds; ++i) {
-                    int rFd = fds[i];
-                    if (rFd >= 0) {
-                        int flags = ::fcntl(rFd, F_GETFD);
-                        if (flags >= 0) {
-                            ::fcntl(rFd, F_SETFD, flags | FD_CLOEXEC);
-                        }
-                        m_receivedFds.push_back(rFd);
-                    }
-                }
-            }
-            cmsg = CMSG_NXTHDR(&msg, cmsg);
-        }
-
         m_incomingBuffer.append(buf, static_cast<qsizetype>(n));
     }
 #else
@@ -289,7 +332,6 @@ void WorkerServer::onReadyRead() {
         return;
     }
     m_incomingBuffer.append(m_clientSocket->readAll());
-#endif
 
     while (true) {
         if (static_cast<size_t>(m_incomingBuffer.size()) < sizeof(ipc::PacketHeader)) {
@@ -298,16 +340,9 @@ void WorkerServer::onReadyRead() {
         ipc::PacketHeader header;
         std::memcpy(&header, m_incomingBuffer.constData(), sizeof(ipc::PacketHeader));
 
-        if (header.magic != ipc::IPC_MAGIC ||
-            header.version != ipc::IPC_PROTOCOL_VERSION ||
-            header.payloadSize > ipc::MAX_IPC_PAYLOAD_SIZE ||
-            !isRequestType(header.type)) {
+        if (!headerIsValid(header)) {
             std::cerr << "[WorkerServer] Protocol error: Invalid header received. Disconnecting." << std::endl;
-#ifdef Q_OS_LINUX
-            onSocketDisconnected();
-#else
             m_clientSocket->disconnectFromServer();
-#endif
             return;
         }
 
@@ -323,11 +358,31 @@ void WorkerServer::onReadyRead() {
         }
         m_incomingBuffer.remove(0, static_cast<qsizetype>(totalPacketSize));
 
-        dispatchMessage(static_cast<ipc::MessageType>(header.type), payload);
+        dispatchMessage(static_cast<ipc::MessageType>(header.type), payload, {});
     }
+#endif
 }
 
-void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payload) {
+void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payload, std::vector<int> fds) {
+    // Descriptor policy: only OpenDocumentRequest may carry a descriptor, and exactly one. Anything else is
+    // closed here, before it can be paired with a later request. (Linux only; the vector is always empty
+    // on other platforms.)
+    auto closeAll = [&fds]() {
+#ifdef Q_OS_LINUX
+        for (int fd : fds) {
+            ::close(fd);
+        }
+#endif
+        fds.clear();
+    };
+    if (!fds.empty() && type != ipc::MessageType::OpenDocumentRequest) {
+        std::cerr << "[WorkerServer] Rejected " << fds.size()
+                  << " unsolicited descriptor(s) on a message type that does not accept them; message dropped."
+                  << std::endl;
+        closeAll();
+        return;
+    }
+
     switch (type) {
         case ipc::MessageType::Ping: {
             ipc::PingRequest req;
@@ -344,21 +399,27 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
 
         case ipc::MessageType::OpenDocumentRequest: {
             ipc::OpenDocumentRequest req;
-            int docFd = -1;
-#ifdef Q_OS_LINUX
-            if (!m_receivedFds.empty()) {
-                docFd = m_receivedFds.front();
-                m_receivedFds.erase(m_receivedFds.begin());
-            }
-#endif
-            if (ipc::deserialize(payload, req)) {
-                m_engineWorker.openDocumentAsync(req.documentId, req.filePath.toStdString(), req.password.toStdString(), docFd);
-            } else {
-                if (docFd >= 0) {
-#ifdef Q_OS_LINUX
-                    ::close(docFd);
-#endif
+            const bool parsed = ipc::deserialize(payload, req);
+            if (fds.size() > 1) {
+                // Malformed: an Open carries exactly one descriptor. Close all of them and fail closed.
+                std::cerr << "[WorkerServer] Rejected OpenDocumentRequest with " << fds.size()
+                          << " descriptors." << std::endl;
+                closeAll();
+                if (parsed) {
+                    pdf::OpenResult failed;
+                    failed.error = pdf::DocumentError::InvalidFormat;
+                    onDocumentOpened(req.documentId, std::move(failed));
                 }
+                break;
+            }
+            const int docFd = fds.empty() ? -1 : fds.front();
+            fds.clear(); // ownership moves to the engine (or is closed below)
+            if (parsed) {
+                m_engineWorker.openDocumentAsync(req.documentId, req.filePath.toStdString(), req.password.toStdString(), docFd);
+            } else if (docFd >= 0) {
+#ifdef Q_OS_LINUX
+                ::close(docFd);
+#endif
             }
             break;
         }

@@ -118,7 +118,7 @@ public:
     /**
      * @brief Renders a thumbnail miniature of the specified page.
      * @param pageIndex 0-based page index.
-     * @param targetWidth Desired thumbnail width in pixels (height scales to maintain aspect ratio).\
+     * @param targetWidth Desired thumbnail width in pixels (height scales to maintain aspect ratio).
      * @return PixelBuffer containing the rendered thumbnail.
      */
     virtual PixelBuffer renderThumbnail(int pageIndex, int targetWidth) = 0;
@@ -128,7 +128,7 @@ public:
      * The output keeps text, fonts, vectors and links of the copied pages (no rasterization).
      * @return true on success; the default implementation does not support extraction.
      */
-    virtual bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const {\
+    virtual bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const {
         (void)firstPage; (void)lastPage; (void)out;
         return false;
     }

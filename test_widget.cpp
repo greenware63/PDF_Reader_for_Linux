@@ -861,7 +861,7 @@ int main(int argc, char* argv[]) {
 
         // Queue render requests by triggering paint
         QImage target(1200, 800, QImage::Format_ARGB32);
-        QPainter p(&target);\
+        QPainter p(&target);
         tempViewer->viewport()->render(&p);
         p.end();
 

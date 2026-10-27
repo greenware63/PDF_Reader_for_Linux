@@ -867,7 +867,7 @@ void PdfViewerWidget::trimPageTextCache() {
     evictable.reserve(m_pageTextCache.size());
     for (const auto& [page, text] : m_pageTextCache) {
         if (text && (page < keepFirst || page > keepLast)) {
-            evictable.push_back(page);\
+            evictable.push_back(page);
         }
     }
     std::sort(evictable.begin(), evictable.end(), [this](int a, int b) {

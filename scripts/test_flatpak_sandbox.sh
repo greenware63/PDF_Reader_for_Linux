@@ -223,6 +223,21 @@ fi
 # ------------------------------------------------------------------------------
 header "5. Live Flatpak Builder & Sandbox Test"
 
+# Offline prerequisites of the live self-test (these run everywhere, including CI without flatpak).
+for f in tests/fixtures/unicode_embedded.pdf tests/fixtures/unicode_system_font.pdf sample.pdf; do
+    if [[ -s "${REPO_ROOT}/${f}" ]]; then pass "self-test fixture present: ${f}"; else fail "self-test fixture missing: ${f}"; fi
+done
+if grep -q "option(INSTALL_SANDBOX_SELFTEST" "${REPO_ROOT}/CMakeLists.txt"; then
+    pass "CMake exposes INSTALL_SANDBOX_SELFTEST"
+else
+    fail "CMake does not expose INSTALL_SANDBOX_SELFTEST"
+fi
+if grep -q "INSTALL_SANDBOX_SELFTEST" "${MANIFEST_ROOT}"; then
+    fail "the shipping manifest must NOT enable INSTALL_SANDBOX_SELFTEST"
+else
+    pass "shipping manifest does not install the self-test binary"
+fi
+
 RUN_BUILD=false
 if [[ "${1:-}" == "--build" || "${1:-}" == "--test-runtime" ]]; then
     RUN_BUILD=true
@@ -242,15 +257,50 @@ if command -v flatpak-builder >/dev/null 2>&1; then
         REPO_DIR="${REPO_ROOT}/.flatpak-repo"
         rm -rf "${BUILD_DIR}" "${REPO_DIR}"
 
-        flatpak-builder --force-clean --user --repo="${REPO_DIR}" "${BUILD_DIR}" "${MANIFEST_ROOT}"
-        pass "flatpak-builder build completed successfully"
+        # The self-test build is a COPY of the shipping manifest with one extra CMake option, so the real
+        # manifest never installs the test binary.
+        SELFTEST_MANIFEST="${REPO_ROOT}/.flatpak-selftest.yaml"
+        sed 's|^\(\s*\)- -DENABLE_TEST_HOOKS=OFF|\1- -DENABLE_TEST_HOOKS=ON\n\1- -DINSTALL_SANDBOX_SELFTEST=ON|' \
+            "${MANIFEST_ROOT}" > "${SELFTEST_MANIFEST}"
+        grep -q 'INSTALL_SANDBOX_SELFTEST=ON' "${SELFTEST_MANIFEST}" || { fail "could not derive the self-test manifest"; exit 1; }
 
-        # Test worker execution inside the bubblewrap sandbox
-        echo "Testing worker sandbox confinement inside Flatpak..."
-        if flatpak-builder --run "${BUILD_DIR}" "${MANIFEST_ROOT}" pdf_worker --help >/dev/null 2>&1; then
-            pass "pdf_worker successfully spawned and executed inside Flatpak sandbox"
+        flatpak-builder --force-clean --user --repo="${REPO_DIR}" "${BUILD_DIR}" "${SELFTEST_MANIFEST}"
+        pass "flatpak-builder build (self-test variant) completed successfully"
+
+        # Smoke only: --help returns before the worker applies any sandbox, so this proves nothing about confinement.
+        if flatpak-builder --run "${BUILD_DIR}" "${SELFTEST_MANIFEST}" pdf_worker --help >/dev/null 2>&1; then
+            pass "pdf_worker starts inside the Flatpak sandbox (smoke test only, no confinement is checked here)"
         else
-            fail "pdf_worker execution failed inside Flatpak sandbox"
+            fail "pdf_worker failed to start inside the Flatpak sandbox"
+        fi
+
+        # The real check: run the worker IPC suite against /app/bin/pdf_worker INSIDE the sandbox. This covers
+        # Landlock read/write confinement (Test 8/16), fail-closed startup, descriptor passing and lifecycle
+        # (Tests 15-19) and non-Latin text rendering incl. the system-font fallback (Test 20).
+        SELFTEST_LOG="${REPO_ROOT}/.flatpak-selftest.log"
+        if flatpak-builder --run "${BUILD_DIR}" "${SELFTEST_MANIFEST}" \
+               /app/bin/test_worker_ipc /app/bin/pdf_worker /app/share/pdf-reader/selftest/sample.pdf \
+               >"${SELFTEST_LOG}" 2>&1; then
+            pass "test_worker_ipc passed inside the Flatpak sandbox (log: ${SELFTEST_LOG})"
+        else
+            fail "test_worker_ipc FAILED inside the Flatpak sandbox; if the log shows Landlock being unavailable, the sandbox (or its seccomp filter) blocks landlock_* and the fail-closed worker cannot start - see ${SELFTEST_LOG}"
+        fi
+        for needle in "20a passed" "ALL WORKER IPC UNIT TESTS PASSED"; do
+            if grep -q "${needle}" "${SELFTEST_LOG}"; then
+                pass "sandbox log contains: ${needle}"
+            else
+                fail "sandbox log is missing: ${needle}"
+            fi
+        done
+        if grep -q "20b passed" "${SELFTEST_LOG}"; then
+            pass "system-font fallback renders non-embedded CJK text inside the sandbox (Test 20b)"
+        elif grep -q "20b SKIPPED" "${SELFTEST_LOG}"; then
+            skip "Test 20b skipped: the Flatpak runtime has no Japanese font per fontconfig, so the system-font path was NOT verified in the sandbox"
+        else
+            fail "sandbox log has neither 20b passed nor 20b SKIPPED"
+        fi
+        if grep -q "SKIPPED\|Skipped" "${SELFTEST_LOG}"; then
+            skip "other sub-tests reported Skipped inside the sandbox (see log)"
         fi
     else
         skip "Live build skipped (pass --build or --test-runtime to compile and execute in container)"

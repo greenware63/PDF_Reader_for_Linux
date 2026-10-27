@@ -58,7 +58,9 @@ private Q_SLOTS:
     void onRedactDocumentFailed(int64_t documentId, const QString& errorMessage);
 
 private:
-    void dispatchMessage(ipc::MessageType type, const QByteArray& payload);
+    void dispatchMessage(ipc::MessageType type, const QByteArray& payload, std::vector<int> fds);
+    bool headerIsValid(const ipc::PacketHeader& header) const;
+    void closePacketFds();
     void sendPacket(ipc::MessageType type, const QByteArray& payload);
 
     QString m_serverName;
@@ -67,7 +69,7 @@ private:
 #ifdef Q_OS_LINUX
     int m_listenFd{-1};
     int m_clientFd{-1};
-    std::vector<int> m_receivedFds;
+    std::vector<int> m_packetFds; // descriptors received with the packet currently being assembled
     QSocketNotifier* m_listenNotifier{nullptr};
     QSocketNotifier* m_clientNotifier{nullptr};
 #endif

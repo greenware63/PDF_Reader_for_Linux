@@ -949,6 +949,10 @@ void RenderWorker::workerLoop() {
     while (m_running.load()) {
 #ifdef PDF_WORKER_TEST_HOOKS
         if (m_testHangEngine.load(std::memory_order_relaxed)) {
+            // The engine thread itself records the hang (op=Tile, one heartbeat stamp) and then acknowledges
+            // it. The setter waits for that acknowledgement, so no progress write can land after it returns:
+            // previously this thread's own noteProgress(Idle) below could overwrite the setter's Tile, which
+            // made the hang invisible to the watchdog (it only flags non-Idle ops with a frozen heartbeat).
             noteProgress(ipc::WorkerOp::Tile);
             m_testHangParked.store(true, std::memory_order_release);
             while (m_testHangEngine.load(std::memory_order_relaxed) && m_running.load()) {
@@ -1097,6 +1101,7 @@ void RenderWorker::workerLoop() {
                 }
             }
 
+            // Test hook: keep the tile in flight for a while when artificially configured (0 disables)
             if (const int delayMs = m_testRenderDelayMs.load(std::memory_order_relaxed); delayMs > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
@@ -1127,6 +1132,10 @@ void RenderWorker::workerLoop() {
         }
 
         if (hasSearchTask) {
+            // The page was accounted for (nextPageToSearch) when picked, so the idle predicate alone
+            // would call the worker idle while this page is still being extracted and delivered.
+            // m_isSearchRunning closes that window; the guard clears it on every path out of here
+            // (including the early `continue`s) and wakes waitForIdle().
             struct SearchRunGuard {
                 RenderWorker* w;
                 ~SearchRunGuard() {
@@ -1157,6 +1166,7 @@ void RenderWorker::workerLoop() {
                 }
             }
 
+            // Deliver matches if search is still current
             if (m_running.load() && searchId == m_currentSearchId.load() && searchDocId == m_activeDocumentId.load()) {
                 int totalSoFar = 0;
                 bool searchTruncated = false;
@@ -1194,6 +1204,7 @@ void RenderWorker::workerLoop() {
         }
     }
 
+    // Clean up worker cache and document on the worker thread before exit
     m_workerPageCache.clear();
     m_workerPageLru.clear();
     m_cachedPageCount.store(0, std::memory_order_relaxed);

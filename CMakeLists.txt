@@ -229,6 +229,7 @@ target_link_libraries(pdf_worker PRIVATE
 )
 
 option(ENABLE_TEST_HOOKS "Enable test-only hooks in worker (fault injection). OFF for shipping builds." OFF)
+option(INSTALL_SANDBOX_SELFTEST "Also install test_worker_ipc and its fixtures so the confinement tests can run inside a package sandbox (Flatpak). OFF for shipping builds." OFF)
 if(ENABLE_TEST_HOOKS)
     message(WARNING "ENABLE_TEST_HOOKS=ON: worker fault-injection hooks are compiled in. Do not ship this build.")
     target_compile_definitions(pdf_worker PRIVATE PDF_WORKER_TEST_HOOKS=1)
@@ -615,5 +616,15 @@ if(UNIX AND NOT APPLE)
         install(FILES "${pdfium_binaries_SOURCE_DIR}/lib/libpdfium.so"
             DESTINATION lib
         )
+    endif()
+    if(INSTALL_SANDBOX_SELFTEST)
+        # scripts/test_flatpak_sandbox.sh --test-runtime runs these inside the sandbox. Never enabled in shipping manifests.
+        message(WARNING "INSTALL_SANDBOX_SELFTEST=ON: the test binary will be installed. Do not ship this build.")
+        # Next to pdf_worker: WorkerClient looks for the worker in QCoreApplication::applicationDirPath().
+        install(TARGETS test_worker_ipc RUNTIME DESTINATION bin)
+        install(FILES sample.pdf
+                      tests/fixtures/unicode_embedded.pdf
+                      tests/fixtures/unicode_system_font.pdf
+                DESTINATION share/pdf-reader/selftest)
     endif()
 endif()

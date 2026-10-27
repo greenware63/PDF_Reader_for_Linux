@@ -160,13 +160,13 @@ public:
      * @brief Checks if a failed tile is eligible for retry based on exponential backoff.
      * @param key The tile key.
      * @param baseBackoff Base delay (default 1000ms).
-     * @return true if the tile has failed and the backoff interval has elapsed; false otherwise.\
+     * @return true if the tile has failed and the backoff interval has elapsed; false otherwise.
      */
     bool canRetry(const TileKey& key, std::chrono::milliseconds baseBackoff = std::chrono::milliseconds(1000)) const;
 
     /**
      * @brief Number of failures after which a tile is treated as permanently failed
-     * (canRetry() returns false) until resetFailureHistory() is called.\
+     * (canRetry() returns false) until resetFailureHistory() is called.
      */
     static constexpr int MAX_RETRY_ATTEMPTS = 6;
 
@@ -176,7 +176,7 @@ public:
     bool isPermanentlyFailed(const TileKey& key) const;
 
     /**
-     * @brief Forgets all recorded failure counts (explicit user retry). Does not remove tombstones;\
+     * @brief Forgets all recorded failure counts (explicit user retry). Does not remove tombstones;
      * call clearAllFailed() as well to make failed tiles eligible for rendering again.
      */
     void resetFailureHistory();

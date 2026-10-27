@@ -488,7 +488,7 @@ static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK boo
         FPDFBookmark_GetTitle(bookmark, buf.data(), titleBytes);
         size_t charCount = (titleBytes / 2);
         if (charCount > 0 && buf[charCount - 1] == 0) {
-            --charCount;\
+            --charCount;
         }
         item.title = QString::fromUtf16(buf.data(), static_cast<qsizetype>(charCount));
     }
@@ -509,7 +509,7 @@ static OutlineItem extractBookmarkRecursive(FPDF_DOCUMENT doc, FPDF_BOOKMARK boo
             if (hasY) {
                 item.hasTargetY = getDisplayedYFraction(doc, item.pageIndex, hasX != 0,
                                                         hasY != 0, xVal, yVal, state,
-                                                        item.targetYFraction);\
+                                                        item.targetYFraction);
             }
         }
     }
