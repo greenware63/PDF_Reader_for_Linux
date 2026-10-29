@@ -300,7 +300,8 @@ if command -v flatpak-builder >/dev/null 2>&1; then
         else
             fail "sandbox log has neither 20b passed nor 20b SKIPPED"
         fi
-        if grep -q "SKIPPED\|Skipped" "${SELFTEST_LOG}"; then
+        # 20b is reported above; do not count its SKIPPED line a second time.
+        if grep -v "20b" "${SELFTEST_LOG}" | grep -q "SKIPPED\|Skipped"; then
             skip "other sub-tests reported Skipped inside the sandbox (see log)"
         fi
     else
