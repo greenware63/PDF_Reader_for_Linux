@@ -37,3 +37,9 @@ text_test.pdf
 actual_supp_unicode.pdf
 persian_test.pdf
 .mcp.json
+
+# Flatpak build artifacts
+.flatpak-builder/
+.flatpak-build/
+.flatpak-repo/
+.flatpak-selftest.*

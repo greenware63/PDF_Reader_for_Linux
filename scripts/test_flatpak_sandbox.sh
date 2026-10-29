@@ -253,9 +253,10 @@ if command -v flatpak-builder >/dev/null 2>&1; then
 
     if [[ "$RUN_BUILD" == true ]]; then
         echo "Starting live flatpak-builder compilation..."
-        BUILD_DIR="${REPO_ROOT}/.flatpak-build"
-        REPO_DIR="${REPO_ROOT}/.flatpak-repo"
-        rm -rf "${BUILD_DIR}" "${REPO_DIR}"
+        BUILD_DIR="${FLATPAK_BUILD_DIR:-/tmp/flatpak-pdf-reader-build}"
+        REPO_DIR="${FLATPAK_REPO_DIR:-/tmp/flatpak-pdf-reader-repo}"
+        STATE_DIR="${FLATPAK_STATE_DIR:-/tmp/flatpak-pdf-reader-state}"
+        rm -rf "${BUILD_DIR}" "${REPO_DIR}" "${STATE_DIR}"
 
         # The self-test build is a COPY of the shipping manifest with one extra CMake option, so the real
         # manifest never installs the test binary.
@@ -264,11 +265,11 @@ if command -v flatpak-builder >/dev/null 2>&1; then
             "${MANIFEST_ROOT}" > "${SELFTEST_MANIFEST}"
         grep -q 'INSTALL_SANDBOX_SELFTEST=ON' "${SELFTEST_MANIFEST}" || { fail "could not derive the self-test manifest"; exit 1; }
 
-        flatpak-builder --force-clean --user --repo="${REPO_DIR}" "${BUILD_DIR}" "${SELFTEST_MANIFEST}"
+        flatpak-builder --disable-rofiles-fuse --state-dir="${STATE_DIR}" --force-clean --user --repo="${REPO_DIR}" "${BUILD_DIR}" "${SELFTEST_MANIFEST}"
         pass "flatpak-builder build (self-test variant) completed successfully"
 
         # Smoke only: --help returns before the worker applies any sandbox, so this proves nothing about confinement.
-        if flatpak-builder --run "${BUILD_DIR}" "${SELFTEST_MANIFEST}" pdf_worker --help >/dev/null 2>&1; then
+        if (cd "${BUILD_DIR}" && flatpak-builder --run "${BUILD_DIR}" "${SELFTEST_MANIFEST}" pdf_worker --help) >/dev/null 2>&1; then
             pass "pdf_worker starts inside the Flatpak sandbox (smoke test only, no confinement is checked here)"
         else
             fail "pdf_worker failed to start inside the Flatpak sandbox"
@@ -278,8 +279,8 @@ if command -v flatpak-builder >/dev/null 2>&1; then
         # Landlock read/write confinement (Test 8/16), fail-closed startup, descriptor passing and lifecycle
         # (Tests 15-19) and non-Latin text rendering incl. the system-font fallback (Test 20).
         SELFTEST_LOG="${REPO_ROOT}/.flatpak-selftest.log"
-        if flatpak-builder --run "${BUILD_DIR}" "${SELFTEST_MANIFEST}" \
-               /app/bin/test_worker_ipc /app/bin/pdf_worker /app/share/pdf-reader/selftest/sample.pdf \
+        if (cd "${BUILD_DIR}" && flatpak-builder --run "${BUILD_DIR}" "${SELFTEST_MANIFEST}" \
+               /app/bin/test_worker_ipc /app/bin/pdf_worker /app/share/pdf-reader/selftest/sample.pdf) \
                >"${SELFTEST_LOG}" 2>&1; then
             pass "test_worker_ipc passed inside the Flatpak sandbox (log: ${SELFTEST_LOG})"
         else
