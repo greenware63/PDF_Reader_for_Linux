@@ -13,6 +13,7 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/un.h>
@@ -443,7 +444,13 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
             return;
         }
         landlock_path_beneath_attr rule{};
-        rule.allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+        rule.allowed_access = LANDLOCK_ACCESS_FS_READ_FILE;
+        // READ_DIR is only valid on directories: the kernel rejects a rule that names it for a regular file
+        // (EINVAL), which would silently drop single-file entries such as /etc/localtime or font-dirs.xml.
+        struct stat st{};
+        if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
+            rule.allowed_access |= LANDLOCK_ACCESS_FS_READ_DIR;
+        }
         rule.parent_fd = fd;
         syscall(SYS_landlock_add_rule, rulesetFd, LANDLOCK_RULE_PATH_BENEATH, &rule, 0);
         close(fd);
@@ -458,6 +465,12 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
     addReadOnlyRule("/usr/share/locale");
     addReadOnlyRule("/usr/share/zoneinfo");
     addReadOnlyRule("/etc/localtime");
+    // Flatpak maps the host's fonts and the fontconfig fragment that lists them under /run/host. Absent elsewhere,
+    // in which case addReadOnlyRule() is a no-op. Test 21 checks every font directory fontconfig reports.
+    addReadOnlyRule("/run/host/fonts");
+    addReadOnlyRule("/run/host/user-fonts");
+    addReadOnlyRule("/run/host/local-fonts");
+    addReadOnlyRule("/run/host/font-dirs.xml");
 
     const char* home = getenv("HOME");
     if (home && home[0] != '\0') {
@@ -778,6 +791,13 @@ int main(int argc, char* argv[]) {
         QStringLiteral("Test hook: simulate engine-thread hang for watchdog verification.")
     );
     parser.addOption(testHangEngineOption);
+
+    QCommandLineOption testProbeReadOption(
+        QStringLiteral("test-probe-read"),
+        QStringLiteral("Test hook (with --isolation-selftest): after sandboxing, try to open this path read-only and report. Repeatable."),
+        QStringLiteral("path")
+    );
+    parser.addOption(testProbeReadOption);
 #endif
 
     parser.process(app);
@@ -797,6 +817,26 @@ int main(int argc, char* argv[]) {
                       << isolationError << std::endl;
             return 1;
         }
+#ifdef PDF_WORKER_TEST_HOOKS
+        if (parser.isSet(testProbeReadOption)) {
+            for (const QString& probe : parser.values(testProbeReadOption)) {
+                const QByteArray path = probe.toLocal8Bit();
+                const int fd = open(path.constData(), O_RDONLY | O_CLOEXEC);
+                if (fd >= 0) {
+                    char b;
+                    const ssize_t n = read(fd, &b, 1); // really read a byte: open() alone is not the whole check
+                    close(fd);
+                    std::cout << "[PROBE_READ] " << path.constData() << ": "
+                              << (n >= 0 ? "PERMITTED" : "READ_FAILED") << std::endl;
+                } else if (errno == EACCES || errno == EPERM) {
+                    std::cout << "[PROBE_READ] " << path.constData() << ": BLOCKED" << std::endl;
+                } else {
+                    std::cout << "[PROBE_READ] " << path.constData() << ": MISSING (" << std::strerror(errno) << ")" << std::endl;
+                }
+            }
+            return 0;
+        }
+#endif
         const int tcpPort = parser.value(tcpPortOption).toInt();
         const std::string dbusSocket = parser.value(dbusSocketOption).toStdString();
         const std::string shmMarker = parser.value(shmMarkerOption).toStdString();

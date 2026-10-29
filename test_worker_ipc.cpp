@@ -18,6 +18,7 @@
 #include <QFile>
 #include <QTemporaryDir>
 #include <QFileInfo>
+#include <QMap>
 #include <QDir>
 #include <QRegularExpression>
 #ifdef Q_OS_LINUX
@@ -1939,6 +1940,79 @@ int main(int argc, char* argv[]) {
                 std::cout << "  -> 20b passed: non-embedded CJK text renders through the system-font fallback inside the sandbox." << std::endl;
             }
         }
+
+        // --- TEST 21: every font directory fontconfig reports is readable by the confined worker ---
+        // Flatpak exposes host fonts under /run/host/{fonts,user-fonts,local-fonts} and lists them in a fontconfig
+        // fragment (/run/host/font-dirs.xml); the Landlock read allowlist has to cover those paths or user-installed
+        // fonts (e.g. Persian ones) silently disappear. Instead of assuming paths, ask fontconfig which font files it
+        // knows (fc-list) and have the sandboxed worker (--isolation-selftest --test-probe-read, hooks builds only)
+        // try to read one file per font root. Roots under /run/host/ MUST be readable; other unreadable roots are
+        // reported as notes because a developer machine can keep fonts in arbitrary places.
+        std::cout << "[TEST 21] Testing that the confined worker can read every font root fontconfig reports..." << std::endl;
+#ifdef PDF_WORKER_TEST_HOOKS
+        {
+            QProcess fc;
+            fc.start(QStringLiteral("fc-list"), QStringList() << QStringLiteral(":") << QStringLiteral("file"));
+            QStringList files;
+            if (fc.waitForStarted(2000) && fc.waitForFinished(15000) && fc.exitCode() == 0) {
+                for (QString line : QString::fromLocal8Bit(fc.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts)) {
+                    line = line.trimmed();
+                    if (line.endsWith(':')) line.chop(1);
+                    if (line.startsWith('/')) files << line;
+                }
+            }
+            if (files.isEmpty()) {
+                std::cout << "  -> 21 SKIPPED: fc-list is missing or reports no fonts, so no font root could be probed." << std::endl;
+            } else {
+                // One representative file per root = first three path components (/usr/share/fonts, /run/host/fonts,
+                // /run/host/user-fonts, /home/u/.local ...).
+                QMap<QString, QString> rootToFile;
+                for (const QString& f : files) {
+                    const QStringList parts = f.split('/', Qt::SkipEmptyParts);
+                    if (parts.size() < 3) continue;
+                    const QString root = "/" + parts.mid(0, 3).join('/');
+                    if (!rootToFile.contains(root)) rootToFile.insert(root, f);
+                }
+                QStringList probes = rootToFile.values();
+                for (const char* extra : {"/run/host/font-dirs.xml"}) {
+                    if (QFileInfo::exists(QString::fromLatin1(extra))) probes << QString::fromLatin1(extra);
+                }
+                QStringList args{QStringLiteral("--isolation-selftest")};
+                for (const QString& p : probes) args << QStringLiteral("--test-probe-read") << p;
+                QProcess w;
+                w.start(workerExe, args);
+                if (!w.waitForStarted(3000) || !w.waitForFinished(15000) || w.exitCode() != 0) {
+                    std::cerr << "[FAIL] 21: worker probe run failed: " << w.readAllStandardError().toStdString() << std::endl;
+                    return 1;
+                }
+                const QString out = QString::fromLocal8Bit(w.readAllStandardOutput());
+                bool failed = false;
+                int checked = 0;
+                for (const QString& p : probes) {
+                    const QString key = "[PROBE_READ] " + p + ": ";
+                    const int at = out.indexOf(key);
+                    const QString verdict = at < 0 ? QStringLiteral("NO_RESULT")
+                        : out.mid(at + key.size(), out.indexOf('\n', at) - at - key.size()).trimmed();
+                    ++checked;
+                    std::cout << "     " << p.toStdString() << " -> " << verdict.toStdString() << std::endl;
+                    if (verdict == "PERMITTED") continue;
+                    if (p.startsWith("/run/host/")) {
+                        std::cerr << "[FAIL] 21: fontconfig exposes " << p.toStdString()
+                                  << " but the confined worker cannot read it (" << verdict.toStdString()
+                                  << "): Flatpak host fonts would be unusable. Add it to the Landlock read allowlist." << std::endl;
+                        failed = true;
+                    } else {
+                        std::cout << "     NOTE: font root not readable by the confined worker (" << verdict.toStdString()
+                                  << "); fonts there will not be used. Not an error on a developer machine." << std::endl;
+                    }
+                }
+                if (failed) return 1;
+                std::cout << "  -> 21 passed: " << checked << " font root(s) reported by fontconfig were probed; none under /run/host is blocked." << std::endl;
+            }
+        }
+#else
+        std::cout << "  -> 21 SKIPPED: ENABLE_TEST_HOOKS is OFF (--test-probe-read hook compiled out of shipping build)." << std::endl;
+#endif
         std::cout << "  -> Passed: descriptor lifecycle is bound to packets, rejected descriptors are really closed." << std::endl;
     }
 #else

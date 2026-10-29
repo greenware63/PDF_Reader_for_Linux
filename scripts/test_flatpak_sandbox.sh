@@ -293,6 +293,16 @@ if command -v flatpak-builder >/dev/null 2>&1; then
                 fail "sandbox log is missing: ${needle}"
             fi
         done
+        # Test 21: every font root fontconfig reports inside the sandbox (incl. /run/host/*) must be readable by the
+        # Landlock-confined worker. It FAILS the whole run if a /run/host font path is blocked.
+        if grep -q "21 passed" "${SELFTEST_LOG}"; then
+            pass "confined worker can read every font root fontconfig reports inside the sandbox (Test 21)"
+            grep -E "^     /" "${SELFTEST_LOG}" | sed 's/^/        /' || true
+        elif grep -q "21 SKIPPED" "${SELFTEST_LOG}"; then
+            skip "Test 21 skipped: fc-list reports no fonts inside the sandbox, so host font exposure was NOT verified"
+        else
+            fail "sandbox log has neither 21 passed nor 21 SKIPPED"
+        fi
         if grep -q "20b passed" "${SELFTEST_LOG}"; then
             pass "system-font fallback renders non-embedded CJK text inside the sandbox (Test 20b)"
         elif grep -q "20b SKIPPED" "${SELFTEST_LOG}"; then
@@ -301,7 +311,7 @@ if command -v flatpak-builder >/dev/null 2>&1; then
             fail "sandbox log has neither 20b passed nor 20b SKIPPED"
         fi
         # 20b is reported above; do not count its SKIPPED line a second time.
-        if grep -v "20b" "${SELFTEST_LOG}" | grep -q "SKIPPED\|Skipped"; then
+        if grep -v "20b\|21 SKIPPED" "${SELFTEST_LOG}" | grep -q "SKIPPED\|Skipped"; then
             skip "other sub-tests reported Skipped inside the sandbox (see log)"
         fi
     else

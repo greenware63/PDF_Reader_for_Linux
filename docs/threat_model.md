@@ -44,6 +44,8 @@ A PDF that exploits a vulnerability in the parsing engine must **not** be able t
 |  - Links to libpdfium (chromium/8100 pinned)                            |
 |  - Sandboxed via Landlock ABI 1-5 (deny reads & writes)                 |
 |  - Whitelisted read-only paths: system fonts, fontconfig, locales, tz   |
+|    (+ Flatpak host fonts under /run/host/{fonts,user-fonts,local-fonts}  |
+|    and /run/host/font-dirs.xml)                                         |
 |  - Scoped read/write path: /dev/shm (shared memory tile transport)      |
 |  - Cannot open arbitrary files by path; loads exclusively from passed fd|
 |  - <= 512 MiB: heap buffer copy provides disk-immutability (no SIGBUS)  |
@@ -106,5 +108,6 @@ Every security control is mapped directly to regression unit tests executed unde
 - **Test 17**: A Ping carrying an unsolicited descriptor is dropped and the connection stays usable.
 - **Test 19**: Descriptor lifecycle, checked from outside the worker (the test hands over the read end of a pipe and detects closure through POLLERR on the write end): 19A descriptors on Ping/Close/Cancel/Outline are closed and the request dropped; 19B a stray descriptor is not consumed by a later Open; 19C queued, coalesced packets keep each descriptor with its own packet (worker stopped with SIGSTOP while packets accumulate); 19D `[Ping][Open]` in one `sendmsg` binds the descriptor to the Ping, so the Open fails closed; 19E two in-flight Opens are matched in order; 19F an Open with two descriptors is rejected and both are closed; 19G malformed Open payload: descriptor closed and protocol stays in sync; 19H invalid header: descriptor closed and connection dropped; 19I disconnect mid-packet: pending descriptor closed.
 - **Test 18**: Worker startup strictly fails closed when Landlock is unavailable (`--test-fail-landlock`).
+- **Test 21**: Every font root that fontconfig reports (one probe file per root, plus `/run/host/font-dirs.xml` when present) must be readable by the Landlock-confined worker; roots under `/run/host/` that are blocked fail the test, other blocked roots are printed as notes. Uses the hooks-only `--isolation-selftest --test-probe-read`, which opens and reads one byte after sandboxing. Run inside Flatpak by `scripts/test_flatpak_sandbox.sh --test-runtime`.
 - **`test_render` Test 22**: `loadFromDescriptor` handles invalid fds, buffered loading ($\le 512\text{ MiB}$), and pread streaming ($> 512\text{ MiB}$).
 - **Redaction Verification**: Structural sanitization, canary elimination, and independent parser inspection in `RedactionTestSuite`; UI rotation and file overwrite protection in `test_redaction_rotation` and `test_redaction_file_safety`; the 1.5 pt selection margin in `test_widget.cpp` (`ViewportWidgetTestSuite`).
