@@ -312,7 +312,12 @@ if command -v flatpak-builder >/dev/null 2>&1; then
         ' >"${DIAG_LOG}" 2>&1 || true
         echo "  Sandbox diagnostics (full log: ${DIAG_LOG}):"
         sed 's/^/        /' "${DIAG_LOG}"
-        if flatpak run --command=sh "${APP_ID}" -c 'ls /run/host/fonts /run/host/user-fonts /run/host/local-fonts >/dev/null 2>&1'; then
+        # At least ONE non-empty host font directory is enough; a single `ls A B C` would fail when any one is absent
+        # (user-fonts only exists when the host user has ~/.local/share/fonts).
+        HOST_FONT_DIR_CHECK='for d in /run/host/fonts /run/host/user-fonts /run/host/local-fonts; do
+            if [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then exit 0; fi
+        done; exit 1'
+        if flatpak run --command=sh "${APP_ID}" -c "${HOST_FONT_DIR_CHECK}"; then
             pass "sandbox exposes at least one host font directory under /run/host"
         else
             skip "sandbox exposes NO host font directory under /run/host (see diagnostics above); host-font checks cannot apply here"
