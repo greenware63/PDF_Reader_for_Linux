@@ -17,6 +17,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
+#elif defined(_WIN32)
+#include <io.h>
 #endif
 
 namespace pdf::ipc {
@@ -49,6 +51,8 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::RedactDocumentFailedResponse:
         case MessageType::ListAnnotationsResponse:
         case MessageType::HitTestAnnotationResponse:
+        case MessageType::AddAnnotationResponse:
+        case MessageType::SaveDocumentResponse:
         case MessageType::WorkerError:
         case MessageType::WorkerControlResponse:
             return true;
@@ -223,11 +227,11 @@ bool WorkerClient::sendPacket(MessageType type, const QByteArray& payload) {
     return true;
 }
 
-bool WorkerClient::sendOpenDocumentPacket(const OpenDocumentRequest& request, int docFd) {
+bool WorkerClient::sendPacketWithFd(MessageType type, const QByteArray& payload, int fd) {
 #ifdef Q_OS_LINUX
     if (!ensureConnected()) {
-        if (docFd >= 0) {
-            ::close(docFd);
+        if (fd >= 0) {
+            ::close(fd);
         }
         return false;
     }
@@ -235,31 +239,30 @@ bool WorkerClient::sendOpenDocumentPacket(const OpenDocumentRequest& request, in
     flushOutgoing();
     while (m_socket.bytesToWrite() > 0) {
         if (!m_socket.waitForBytesWritten(200)) {
-            if (docFd >= 0) {
-                ::close(docFd);
+            if (fd >= 0) {
+                ::close(fd);
             }
-            failWorker(tr("Timed out waiting to flush socket before sending document descriptor."));
+            failWorker(tr("Timed out waiting to flush socket before sending descriptor."));
             return false;
         }
     }
 
-    const QByteArray payload = serialize(request);
-    const QByteArray packet = buildPacket(MessageType::OpenDocumentRequest, payload);
+    const QByteArray packet = buildPacket(type, payload);
     if (packet.isEmpty()) {
-        if (docFd >= 0) {
-            ::close(docFd);
+        if (fd >= 0) {
+            ::close(fd);
         }
         failWorker(tr("An IPC message exceeded the protocol size limit."));
         return false;
     }
 
-    if (docFd < 0) {
-        return sendPacket(MessageType::OpenDocumentRequest, payload);
+    if (fd < 0) {
+        return sendPacket(type, payload);
     }
 
     int sockfd = static_cast<int>(m_socket.socketDescriptor());
     if (sockfd < 0) {
-        ::close(docFd);
+        ::close(fd);
         failWorker(tr("Worker socket descriptor is invalid."));
         return false;
     }
@@ -279,7 +282,7 @@ bool WorkerClient::sendOpenDocumentPacket(const OpenDocumentRequest& request, in
     cmsg->cmsg_level = SOL_SOCKET;
     cmsg->cmsg_type = SCM_RIGHTS;
     cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-    std::memcpy(CMSG_DATA(cmsg), &docFd, sizeof(int));
+    std::memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
 
     ssize_t sent = 0;
     while (true) {
@@ -288,14 +291,14 @@ bool WorkerClient::sendOpenDocumentPacket(const OpenDocumentRequest& request, in
             if (errno == EINTR) {
                 continue;
             }
-            ::close(docFd);
-            failWorker(tr("Failed to send document descriptor to worker: %1").arg(strerror(errno)));
+            ::close(fd);
+            failWorker(tr("Failed to send descriptor to worker: %1").arg(strerror(errno)));
             return false;
         }
         break;
     }
 
-    ::close(docFd);
+    ::close(fd);
 
     if (sent < packet.size()) {
         const char* remainingData = packet.constData() + sent;
@@ -314,9 +317,23 @@ bool WorkerClient::sendOpenDocumentPacket(const OpenDocumentRequest& request, in
 
     return true;
 #else
-    (void)docFd;
-    return sendPacket(MessageType::OpenDocumentRequest, serialize(request));
+    if (fd >= 0) {
+#if defined(_WIN32)
+        _close(fd);
+#else
+        ::close(fd);
 #endif
+    }
+    return sendPacket(type, payload);
+#endif
+}
+
+bool WorkerClient::sendOpenDocumentPacket(const OpenDocumentRequest& request, int docFd) {
+    return sendPacketWithFd(MessageType::OpenDocumentRequest, serialize(request), docFd);
+}
+
+bool WorkerClient::sendSaveDocumentPacket(const SaveDocumentRequest& request, int saveFd) {
+    return sendPacketWithFd(MessageType::SaveDocumentRequest, serialize(request), saveFd);
 }
 
 void WorkerClient::flushOutgoing() {
@@ -843,6 +860,165 @@ RedactDocumentResponse WorkerClient::redactDocumentSync(int64_t documentId,
     return result;
 }
 
+void WorkerClient::requestAddAnnotation(int64_t documentId, int pageIndex, const pdf::AnnotationItem& annotation) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT annotationAddFailed(documentId, pageIndex, tr("Worker is stopped or failed."));
+        return;
+    }
+    sendMessage(MessageType::AddAnnotationRequest,
+                serialize(AddAnnotationRequest{documentId, pageIndex, annotation}));
+}
+
+AddAnnotationResponse WorkerClient::addAnnotationSync(int64_t documentId, int pageIndex,
+                                                      const pdf::AnnotationItem& annotation,
+                                                      int timeoutMs) {
+    if (!ensureConnected()) {
+        AddAnnotationResponse fail;
+        fail.documentId = documentId;
+        fail.pageIndex = pageIndex;
+        fail.success = false;
+        fail.errorMessage = tr("Worker connection unavailable.");
+        return fail;
+    }
+
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    AddAnnotationResponse result;
+    result.documentId = documentId;
+    result.pageIndex = pageIndex;
+    result.success = false;
+
+    const auto readyConn = connect(this, &WorkerClient::annotationAdded, &loop,
+        [&](int64_t docId, int pIdx, const QString& name) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.success = true;
+                result.annotationName = name;
+                loop.quit();
+            }
+        });
+
+    const auto failConn = connect(this, &WorkerClient::annotationAddFailed, &loop,
+        [&](int64_t docId, int pIdx, const QString& error) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.success = false;
+                result.errorMessage = error;
+                loop.quit();
+            }
+        });
+
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop,
+        [&](const QString& error) {
+            result.success = false;
+            result.errorMessage = error;
+            loop.quit();
+        });
+
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestAddAnnotation(documentId, pageIndex, annotation);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+
+    if (!result.success && result.errorMessage.isEmpty()) {
+        result.errorMessage = tr("Timed out waiting for addAnnotation response from worker.");
+    }
+    return result;
+}
+
+void WorkerClient::requestSaveDocument(int64_t documentId, int writeFd, bool incremental, const QString& tempFilePath) {
+    if (m_stopping || m_failureReported) {
+        if (writeFd >= 0) {
+#if defined(_WIN32)
+            _close(writeFd);
+#else
+            ::close(writeFd);
+#endif
+        }
+        Q_EMIT documentSaveFailed(documentId, tr("Worker is stopped or failed."));
+        return;
+    }
+    SaveDocumentRequest req;
+    req.documentId = documentId;
+    req.tempFilePath = tempFilePath;
+    req.incremental = incremental;
+    sendSaveDocumentPacket(req, writeFd);
+}
+
+SaveDocumentResponse WorkerClient::saveDocumentSync(int64_t documentId, int writeFd, bool incremental,
+                                                    const QString& tempFilePath, int timeoutMs) {
+    if (!ensureConnected()) {
+        if (writeFd >= 0) {
+#if defined(_WIN32)
+            _close(writeFd);
+#else
+            ::close(writeFd);
+#endif
+        }
+        SaveDocumentResponse fail;
+        fail.documentId = documentId;
+        fail.success = false;
+        fail.errorMessage = tr("Worker connection unavailable.");
+        return fail;
+    }
+
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    SaveDocumentResponse result;
+    result.documentId = documentId;
+    result.success = false;
+
+    const auto readyConn = connect(this, &WorkerClient::documentSaved, &loop,
+        [&](int64_t docId, uint64_t bytesWritten) {
+            if (docId == documentId) {
+                result.success = true;
+                result.bytesWritten = bytesWritten;
+                loop.quit();
+            }
+        });
+
+    const auto failConn = connect(this, &WorkerClient::documentSaveFailed, &loop,
+        [&](int64_t docId, const QString& error) {
+            if (docId == documentId || docId == 0) {
+                result.success = false;
+                result.errorMessage = error;
+                loop.quit();
+            }
+        });
+
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop,
+        [&](const QString& error) {
+            result.documentId = documentId;
+            result.success = false;
+            result.errorMessage = error;
+            loop.quit();
+        });
+
+    const auto progressConn = connect(this, &WorkerClient::engineProgressed, &loop,
+        [&]() { timeout.start(timeoutMs); });
+
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestSaveDocument(documentId, writeFd, incremental, tempFilePath);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    disconnect(progressConn);
+
+    if (!result.success && result.errorMessage.isEmpty()) {
+        result.errorMessage = tr("Timed out waiting for saveDocument response from worker.");
+    }
+    return result;
+}
+
 void WorkerClient::stop() {
     if (m_stopping) {
         return;
@@ -1162,6 +1338,34 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
             RedactDocumentFailedResponse response;
             if (deserialize(payload, response)) {
                 Q_EMIT redactDocumentFailed(response.documentId, response.errorMessage);
+            }
+            break;
+        }
+
+        case MessageType::AddAnnotationResponse: {
+            AddAnnotationResponse response;
+            if (deserialize(payload, response)) {
+                if (response.success) {
+                    Q_EMIT annotationAdded(response.documentId, response.pageIndex, response.annotationName);
+                } else {
+                    Q_EMIT annotationAddFailed(response.documentId, response.pageIndex, response.errorMessage);
+                }
+            } else {
+                Q_EMIT annotationAddFailed(0, 0, tr("Failed to deserialize AddAnnotationResponse."));
+            }
+            break;
+        }
+
+        case MessageType::SaveDocumentResponse: {
+            SaveDocumentResponse response;
+            if (deserialize(payload, response)) {
+                if (response.success) {
+                    Q_EMIT documentSaved(response.documentId, response.bytesWritten);
+                } else {
+                    Q_EMIT documentSaveFailed(response.documentId, response.errorMessage);
+                }
+            } else {
+                Q_EMIT documentSaveFailed(0, tr("Failed to deserialize SaveDocumentResponse."));
             }
             break;
         }

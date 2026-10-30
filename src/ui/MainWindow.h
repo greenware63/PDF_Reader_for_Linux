@@ -108,6 +108,11 @@ public Q_SLOTS:
     void markSelectionForRedaction();
     void clearRedactionMarks();
     void applyAndSaveRedactions();
+    void saveDocument();
+    void saveDocumentAs();
+    void highlightSelection();
+    void undoEdit();
+    void redoEdit();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -124,6 +129,7 @@ private Q_SLOTS:
     void onCurrentTabChanged(int index);
     void onRedactionModeChanged(bool enabled);
     void onRedactionMarksChanged();
+    void onEditLogDirtyChanged(bool dirty);
 
 private:
     void setupUi();
@@ -169,6 +175,11 @@ private:
     QAction* m_applyRedactionsAction{nullptr};
     QLabel* m_redactStatusLabel{nullptr};
     bool m_redactionBusy{false};
+    QAction* m_saveAction{nullptr};
+    QAction* m_saveAsAction{nullptr};
+    QAction* m_undoAction{nullptr};
+    QAction* m_redoAction{nullptr};
+    QAction* m_highlightAction{nullptr};
 };
 
 } // namespace ui

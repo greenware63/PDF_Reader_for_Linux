@@ -13,6 +13,7 @@
 #include "ipc/IpcProtocol.h"
 #include "ipc/IpcMessages.h"
 #include "ipc/WorkerClient.h"
+#include "engine/EditLog.h"
 #include <QTcpServer>
 #include <QLocalServer>
 #include <QFile>
@@ -2268,6 +2269,220 @@ int main(int argc, char* argv[]) {
             client.stop();
         }
         std::cout << "  -> Passed: oversized lists are truncated (flagged), within budget, and the session survives." << std::endl;
+    }
+
+    // --- TEST 25: Add Annotation and Save Document over IPC Pipeline ---
+    std::cout << "[TEST 25] Testing Add Annotation and Save Document over IPC Pipeline..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto openResp = client.openDocumentSync(25, samplePdf.toStdString());
+        if (openResp.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 25: Failed to open document over IPC" << std::endl;
+            return 1;
+        }
+
+        // Add highlight
+        pdf::AnnotationItem hl;
+        hl.subtype = pdf::AnnotationSubtype::Highlight;
+        hl.pageIndex = 0;
+        hl.left = 50.0; hl.bottom = 700.0; hl.right = 200.0; hl.top = 720.0;
+        hl.colorArgb = 0xFFFFFF00;
+        hl.hasColor = true;
+        hl.flags = 4;
+        hl.contents = QStringLiteral("IPC Highlight Note");
+        hl.author = QStringLiteral("IPC Tester");
+        hl.quadPoints.push_back({50.0, 720.0, 200.0, 720.0, 50.0, 700.0, 200.0, 700.0});
+
+        auto addResp = client.addAnnotationSync(25, 0, hl);
+        if (!addResp.success) {
+            std::cerr << "[FAIL] 25: addAnnotationSync failed: " << addResp.errorMessage.toStdString() << std::endl;
+            return 1;
+        }
+        if (addResp.annotationName.isEmpty()) {
+            std::cerr << "[FAIL] 25: addAnnotationSync returned empty annotationName (/NM)" << std::endl;
+            return 1;
+        }
+
+        // Verify listing reflects the added annotation
+        auto listResp = client.listAnnotationsSync(25, 0);
+        if (!listResp.success || listResp.annotations.empty()) {
+            std::cerr << "[FAIL] 25: listAnnotationsSync failed to find added annotation" << std::endl;
+            return 1;
+        }
+        bool foundOurAnnot = false;
+        for (const auto& a : listResp.annotations) {
+            if (a.name == addResp.annotationName && a.contents == "IPC Highlight Note") {
+                foundOurAnnot = true;
+                break;
+            }
+        }
+        if (!foundOurAnnot) {
+            std::cerr << "[FAIL] 25: Added annotation with name " << addResp.annotationName.toStdString()
+                      << " not found in listed annotations" << std::endl;
+            return 1;
+        }
+
+        // Test saving document over IPC
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] 25: Failed to create temp dir" << std::endl;
+            return 1;
+        }
+        const QString savedPath = tempDir.filePath("ipc_saved_doc.pdf");
+#ifdef Q_OS_LINUX
+        int writeFd = ::open(savedPath.toLocal8Bit().constData(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+        if (writeFd < 0) {
+            std::cerr << "[FAIL] 25: Failed to open saveFd" << std::endl;
+            return 1;
+        }
+        auto saveResp = client.saveDocumentSync(25, writeFd, true, "");
+#else
+        auto saveResp = client.saveDocumentSync(25, -1, true, savedPath);
+#endif
+        if (!saveResp.success || saveResp.bytesWritten == 0) {
+            std::cerr << "[FAIL] 25: saveDocumentSync failed: " << saveResp.errorMessage.toStdString() << std::endl;
+            return 1;
+        }
+
+        QFile savedFile(savedPath);
+        if (!savedFile.open(QIODevice::ReadOnly)) {
+            std::cerr << "[FAIL] 25: Failed to read saved file" << std::endl;
+            return 1;
+        }
+        QByteArray savedBytes = savedFile.readAll();
+        savedFile.close();
+
+        if (!savedBytes.startsWith("%PDF-")) {
+            std::cerr << "[FAIL] 25: Saved file does not start with PDF magic header" << std::endl;
+            return 1;
+        }
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: Add annotation and Save document completed over IPC." << std::endl;
+    }
+
+    // --- TEST 26: Worker Crash Recovery and EditLog Replay ---
+    std::cout << "[TEST 26] Testing worker crash recovery and EditLog replay..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto openResp = client.openDocumentSync(26, samplePdf.toStdString());
+        if (openResp.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 26: Failed to open document" << std::endl;
+            return 1;
+        }
+
+        pdf::EditLog log;
+
+        pdf::AnnotationItem hl1;
+        hl1.subtype = pdf::AnnotationSubtype::Highlight;
+        hl1.pageIndex = 0;
+        hl1.left = 100.0; hl1.bottom = 600.0; hl1.right = 300.0; hl1.top = 620.0;
+        hl1.colorArgb = 0xFFFFFF00;
+        hl1.hasColor = true;
+        hl1.contents = QStringLiteral("Highlight before crash 1");
+        hl1.quadPoints.push_back({100.0, 620.0, 300.0, 620.0, 100.0, 600.0, 300.0, 600.0});
+
+        log.recordAddAnnotation(0, hl1);
+        auto r1 = client.addAnnotationSync(26, 0, hl1);
+        if (!r1.success) {
+            std::cerr << "[FAIL] 26: Failed to add initial annotation" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem hl2;
+        hl2.subtype = pdf::AnnotationSubtype::Highlight;
+        hl2.pageIndex = 0;
+        hl2.left = 100.0; hl2.bottom = 550.0; hl2.right = 300.0; hl2.top = 570.0;
+        hl2.colorArgb = 0xFFFF00FF;
+        hl2.hasColor = true;
+        hl2.contents = QStringLiteral("Highlight before crash 2");
+        hl2.quadPoints.push_back({100.0, 570.0, 300.0, 570.0, 100.0, 550.0, 300.0, 550.0});
+
+        log.recordAddAnnotation(0, hl2);
+        auto r2 = client.addAnnotationSync(26, 0, hl2);
+        if (!r2.success) {
+            std::cerr << "[FAIL] 26: Failed to add second annotation" << std::endl;
+            return 1;
+        }
+
+        // Simulate crash
+        client.killWorkerForTesting();
+
+        // Reconnect fresh worker and reopen original file
+        pdf::ipc::WorkerClient freshClient;
+        auto reOpen = freshClient.openDocumentSync(26, samplePdf.toStdString());
+        if (reOpen.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 26: Failed to reopen document on fresh worker" << std::endl;
+            return 1;
+        }
+
+        // Replay edit log onto fresh worker
+        bool replayed = log.replay(&freshClient, 26);
+        if (!replayed) {
+            std::cerr << "[FAIL] 26: EditLog::replay failed" << std::endl;
+            return 1;
+        }
+
+        // Verify annotations are present on fresh worker
+        auto listResp = freshClient.listAnnotationsSync(26, 0);
+        if (!listResp.success) {
+            std::cerr << "[FAIL] 26: listAnnotationsSync failed after replay" << std::endl;
+            return 1;
+        }
+
+        int matchesFound = 0;
+        for (const auto& a : listResp.annotations) {
+            if (a.contents == "Highlight before crash 1" || a.contents == "Highlight before crash 2") {
+                matchesFound++;
+            }
+        }
+        if (matchesFound != 2) {
+            std::cerr << "[FAIL] 26: Expected 2 replayed annotations, found " << matchesFound << std::endl;
+            return 1;
+        }
+
+        freshClient.closeDocumentSync();
+        freshClient.stop();
+        std::cout << "  -> Passed: Worker crash survived and EditLog replayed seamlessly." << std::endl;
+    }
+
+    // --- TEST 27: Malformed Requests & Save Descriptor Validation ---
+    std::cout << "[TEST 27] Testing malformed Add/Save requests and descriptor validation..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto openResp = client.openDocumentSync(27, samplePdf.toStdString());
+        if (openResp.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 27: Failed to open document" << std::endl;
+            return 1;
+        }
+
+        // 1. Add annotation on non-existent page
+        pdf::AnnotationItem hl;
+        hl.subtype = pdf::AnnotationSubtype::Highlight;
+        hl.pageIndex = 9999;
+        hl.left = 10.0; hl.bottom = 10.0; hl.right = 20.0; hl.top = 20.0;
+        auto failAdd = client.addAnnotationSync(27, 9999, hl);
+        if (failAdd.success) {
+            std::cerr << "[FAIL] 27: addAnnotationSync should have failed for invalid page 9999" << std::endl;
+            return 1;
+        }
+
+#ifdef Q_OS_LINUX
+        // 2. Pass read-only descriptor on Linux: worker must reject
+        int roFd = ::open(samplePdf.toLocal8Bit().constData(), O_RDONLY | O_CLOEXEC);
+        if (roFd >= 0) {
+            auto roSave = client.saveDocumentSync(27, roFd, true, "");
+            if (roSave.success) {
+                std::cerr << "[FAIL] 27: saveDocumentSync should have failed with read-only descriptor" << std::endl;
+                return 1;
+            }
+        }
+#endif
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: Malformed Add/Save requests rejected safely." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

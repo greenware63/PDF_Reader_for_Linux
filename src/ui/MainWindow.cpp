@@ -203,6 +203,26 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     if (m_docTabs) {
         for (int i = 0; i < m_docTabs->count(); ++i) {
             if (auto* v = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(i))) {
+                if (v->editLog().isDirty()) {
+                    QString name = QFileInfo(v->currentFilePath()).fileName();
+                    if (name.isEmpty()) name = tr("Untitled");
+                    auto res = QMessageBox::question(
+                        this,
+                        tr("Unsaved Changes"),
+                        tr("The document \"%1\" has unsaved edits.\nDo you want to save before closing?").arg(name),
+                        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+                        QMessageBox::Save
+                    );
+                    if (res == QMessageBox::Save) {
+                        if (!v->saveDocument()) {
+                            event->ignore();
+                            return;
+                        }
+                    } else if (res == QMessageBox::Cancel) {
+                        event->ignore();
+                        return;
+                    }
+                }
                 saveReadingPosition(v);
             }
         }
@@ -405,6 +425,27 @@ void MainWindow::connectViewer(PdfViewerWidget* viewer) {
             onRedactionMarksChanged();
         }
     });
+    connect(&viewer->editLog(), &pdf::EditLog::dirtyChanged, this, [this, viewer](bool dirty) {
+        if (viewer == currentViewer()) {
+            onEditLogDirtyChanged(dirty);
+        }
+        int idx = m_docTabs ? m_docTabs->indexOf(viewer) : -1;
+        if (idx >= 0) {
+            QString title = QFileInfo(viewer->currentFilePath()).fileName();
+            if (title.isEmpty()) title = tr("Untitled");
+            if (dirty) {
+                m_docTabs->setTabText(idx, title + QStringLiteral(" *"));
+            } else {
+                m_docTabs->setTabText(idx, title);
+            }
+        }
+    });
+    connect(viewer, &PdfViewerWidget::selectionChanged, this, [this]() {
+        if (m_highlightAction) {
+            auto* v = currentViewer();
+            m_highlightAction->setEnabled(v && v->hasSelection());
+        }
+    });
 }
 
 void MainWindow::setupActions() {
@@ -422,6 +463,14 @@ void MainWindow::setupActions() {
     m_recentFilesMenu = fileMenu->addMenu(tr("Open &Recent"));
 
     fileMenu->addSeparator();
+    m_saveAction = fileMenu->addAction(tr("&Save"), this, &MainWindow::saveDocument);
+    m_saveAction->setShortcut(QKeySequence::Save);
+    m_saveAction->setEnabled(false);
+
+    m_saveAsAction = fileMenu->addAction(tr("Save &As..."), this, &MainWindow::saveDocumentAs);
+    m_saveAsAction->setShortcut(QKeySequence::SaveAs);
+
+    fileMenu->addSeparator();
     QAction* printAction = fileMenu->addAction(tr("&Print..."), this, &MainWindow::printDocument);
     printAction->setShortcut(QKeySequence::Print);
 
@@ -437,6 +486,19 @@ void MainWindow::setupActions() {
     exitAction->setShortcut(QKeySequence::Quit);
 
     QMenu* editMenu = menuBar()->addMenu(tr("&Edit"));
+    m_undoAction = editMenu->addAction(tr("&Undo"), this, &MainWindow::undoEdit);
+    m_undoAction->setShortcut(QKeySequence::Undo);
+
+    m_redoAction = editMenu->addAction(tr("&Redo"), this, &MainWindow::redoEdit);
+    m_redoAction->setShortcut(QKeySequence::Redo);
+
+    editMenu->addSeparator();
+
+    m_highlightAction = editMenu->addAction(tr("&Highlight Selection"), this, &MainWindow::highlightSelection);
+    m_highlightAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_H));
+    m_highlightAction->setEnabled(false);
+
+    editMenu->addSeparator();
     QAction* copyAction = editMenu->addAction(tr("&Copy"), this, [this]() {
         if (auto* v = currentViewer()) {
             v->copySelection();
@@ -852,6 +914,24 @@ void MainWindow::closeTab(int index) {
         return;
     }
     auto* viewer = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(index));
+    if (viewer && viewer->editLog().isDirty()) {
+        QString name = QFileInfo(viewer->currentFilePath()).fileName();
+        if (name.isEmpty()) name = tr("Untitled");
+        auto res = QMessageBox::question(
+            this,
+            tr("Unsaved Changes"),
+            tr("The document \"%1\" has unsaved edits.\nDo you want to save before closing?").arg(name),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+            QMessageBox::Save
+        );
+        if (res == QMessageBox::Save) {
+            if (!viewer->saveDocument()) {
+                return;
+            }
+        } else if (res == QMessageBox::Cancel) {
+            return;
+        }
+    }
     if (viewer) {
         saveReadingPosition(viewer);
     }
@@ -1579,6 +1659,63 @@ void MainWindow::applyAndSaveRedactions() {
 
     if (viewerGuard) {
         viewerGuard->clearStagedRedactions();
+    }
+}
+
+
+void MainWindow::saveDocument() {
+    auto* v = currentViewer();
+    if (!v || !v->isDocumentOpen()) return;
+    if (v->currentFilePath().isEmpty()) {
+        saveDocumentAs();
+        return;
+    }
+    if (!v->saveDocument()) {
+        QMessageBox::warning(this, tr("Save Error"), tr("Failed to save document."));
+    }
+}
+
+void MainWindow::saveDocumentAs() {
+    auto* v = currentViewer();
+    if (!v || !v->isDocumentOpen()) return;
+    QString filter = tr("PDF Documents (*.pdf)");
+    QString path = QFileDialog::getSaveFileName(this, tr("Save PDF As"), v->currentFilePath(), filter);
+    if (path.isEmpty()) return;
+    if (!v->saveDocument(path)) {
+        QMessageBox::warning(this, tr("Save Error"), tr("Failed to save document as %1.").arg(path));
+    }
+}
+
+void MainWindow::highlightSelection() {
+    auto* v = currentViewer();
+    if (v && v->hasSelection()) {
+        v->highlightSelection();
+    }
+}
+
+void MainWindow::undoEdit() {
+    auto* v = currentViewer();
+    if (v && v->editLog().canUndo()) {
+        pdf::EditCommand cmd;
+        v->editLog().undo(cmd);
+        v->cache().clear();
+        v->viewport()->update();
+    }
+}
+
+void MainWindow::redoEdit() {
+    auto* v = currentViewer();
+    if (v && v->editLog().canRedo()) {
+        pdf::EditCommand cmd;
+        v->editLog().redo(cmd);
+        v->cache().clear();
+        v->viewport()->update();
+    }
+}
+
+void MainWindow::onEditLogDirtyChanged(bool dirty) {
+    if (m_saveAction) {
+        m_saveAction->setEnabled(dirty);
     }
 }
 

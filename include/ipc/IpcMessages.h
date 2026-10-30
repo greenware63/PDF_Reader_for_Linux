@@ -321,6 +321,33 @@ struct HitTestAnnotationResponse {
     pdf::AnnotationItem annotation;
 };
 
+struct AddAnnotationRequest {
+    int64_t documentId{0};
+    int pageIndex{0};
+    pdf::AnnotationItem annotation;
+};
+
+struct AddAnnotationResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+    bool success{false};
+    QString annotationName; // /NM identifier
+    QString errorMessage;
+};
+
+struct SaveDocumentRequest {
+    int64_t documentId{0};
+    QString tempFilePath;   // Destination temp file path (for Windows / non-SCM_RIGHTS fallback)
+    bool incremental{true};
+};
+
+struct SaveDocumentResponse {
+    int64_t documentId{0};
+    bool success{false};
+    uint64_t bytesWritten{0};
+    QString errorMessage;
+};
+
 
 // Message stream operators
 QDataStream& operator<<(QDataStream& out, const ExtractPagesRequest& req);
@@ -437,6 +464,18 @@ QDataStream& operator>>(QDataStream& in, HitTestAnnotationRequest& req);
 
 QDataStream& operator<<(QDataStream& out, const HitTestAnnotationResponse& res);
 QDataStream& operator>>(QDataStream& in, HitTestAnnotationResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const AddAnnotationRequest& req);
+QDataStream& operator>>(QDataStream& in, AddAnnotationRequest& req);
+
+QDataStream& operator<<(QDataStream& out, const AddAnnotationResponse& res);
+QDataStream& operator>>(QDataStream& in, AddAnnotationResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const SaveDocumentRequest& req);
+QDataStream& operator>>(QDataStream& in, SaveDocumentRequest& req);
+
+QDataStream& operator<<(QDataStream& out, const SaveDocumentResponse& res);
+QDataStream& operator>>(QDataStream& in, SaveDocumentResponse& res);
 
 // --- Serialization Templates ---
 

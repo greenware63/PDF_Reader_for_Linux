@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <utility>
 #include <vector>
+#include <functional>
 
 namespace pdf {
 
@@ -131,6 +132,28 @@ public:
     virtual bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const {
         (void)firstPage; (void)lastPage; (void)out;
         return false;
+    }
+
+    /**
+     * @brief Saves the current document state into an open writable file descriptor.
+     * Streams output directly to the descriptor without blowing memory budgets.
+     * @param writeFd Writable file descriptor.
+     * @param incremental True to perform incremental save (FPDF_INCREMENTAL), false for full rewrite (FPDF_NO_INCREMENTAL).
+     * @param outBytesWritten Receives the count of bytes written.
+     * @param progressCallback Optional heartbeat callback invoked with bytes written.
+     * @return true on success, false if save failed or signatures forbid full rewrite.
+     */
+    virtual bool saveAsCopy(int writeFd, bool incremental, uint64_t& outBytesWritten,
+                            std::function<void(uint64_t)> progressCallback = nullptr) {
+        (void)writeFd; (void)incremental; (void)outBytesWritten; (void)progressCallback;
+        return false;
+    }
+
+    /**
+     * @return Number of digital signatures present in the document.
+     */
+    virtual int signatureCount() const {
+        return 0;
     }
 
     /**

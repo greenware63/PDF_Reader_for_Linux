@@ -5,10 +5,10 @@
 namespace pdf::ipc {
 
 constexpr uint32_t IPC_MAGIC = 0x50444657; // 'PDFW'
-// v5 added ListAnnotationsRequest, ListAnnotationsResponse, HitTestAnnotationRequest, HitTestAnnotationResponse and WorkerOp::Annotate.
+// v6 added AddAnnotationRequest, AddAnnotationResponse, SaveDocumentRequest, SaveDocumentResponse and WorkerOp::Save.
 // Bump this whenever a serialised layout changes: the frame-level version check is the only thing
 // that turns a wire mismatch into a clean rejection instead of silent garbage.
-constexpr uint32_t IPC_PROTOCOL_VERSION = 5;
+constexpr uint32_t IPC_PROTOCOL_VERSION = 6;
 constexpr uint32_t MAX_IPC_PAYLOAD_SIZE = 64 * 1024 * 1024;
 
 enum class WorkerOp : uint32_t {
@@ -20,7 +20,8 @@ enum class WorkerOp : uint32_t {
     Extract,
     Search,
     Redact,
-    Annotate
+    Annotate,
+    Save
 };
 
 enum class MessageType : uint32_t {
@@ -76,11 +77,15 @@ enum class MessageType : uint32_t {
     RedactDocumentResponse = 81,
     RedactDocumentFailedResponse = 82,
 
-    // Annotations (M1 Read-Only)
+    // Annotations & Save Pipeline (Phase 2 M1 & M2)
     ListAnnotationsRequest = 90,
     ListAnnotationsResponse = 91,
     HitTestAnnotationRequest = 92,
     HitTestAnnotationResponse = 93,
+    AddAnnotationRequest = 94,
+    AddAnnotationResponse = 95,
+    SaveDocumentRequest = 96,
+    SaveDocumentResponse = 97,
 
     // Error / Diagnostic
     WorkerError = 99

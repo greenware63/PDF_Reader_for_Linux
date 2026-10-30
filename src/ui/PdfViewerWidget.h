@@ -17,6 +17,7 @@
 #include "ipc/WorkerClient.h"
 #include "engine/PageText.h"
 #include "engine/SearchTypes.h"
+#include "engine/EditLog.h"
 
 namespace ui {
 
@@ -151,6 +152,13 @@ public:
     size_t prefetchRequestsIssued() const noexcept { return m_prefetchRequestsIssued; }
     /// Enables/disables the off-screen prefetch ring (enabled by default).
     void setPrefetchEnabled(bool enabled) noexcept { m_prefetchEnabled = enabled; }
+
+    pdf::EditLog& editLog() noexcept { return m_editLog; }
+    const pdf::EditLog& editLog() const noexcept { return m_editLog; }
+
+    bool highlightSelection(uint32_t colorArgb = 0xFFFFFF00);
+    bool saveDocument(const QString& targetPath = QString());
+    bool saveDocumentAs(const QString& targetPath) { return saveDocument(targetPath); }
 
     // Text selection & copy APIs
     bool hasSelection() const noexcept;
@@ -347,6 +355,8 @@ private:
     int m_redactStartPage{-1};
     QPointF m_redactStartDocPos;
     QPointF m_redactCurrentDocPos;
+
+    pdf::EditLog m_editLog;
 };
 
 } // namespace ui

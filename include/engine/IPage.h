@@ -83,6 +83,17 @@ public:
      * @return true if an annotation was hit, false otherwise.
      */
     virtual bool hitTestAnnotation(double xPoints, double yPoints, AnnotationItem& out) = 0;
+
+    /**
+     * @brief Creates a highlight annotation on this page.
+     * Generates standard QuadPoints, color (/C), flags, /NM identifier, and normal appearance stream (/AP).
+     * @param item Annotation properties (bounding box, quad points, color, /NM identifier, etc.).
+     * @return true if successfully created, false otherwise.
+     */
+    virtual bool addHighlightAnnotation(const AnnotationItem& item) {
+        (void)item;
+        return false;
+    }
 };
 
 } // namespace pdf

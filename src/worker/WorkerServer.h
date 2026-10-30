@@ -60,6 +60,10 @@ private Q_SLOTS:
     void onAnnotationsFailed(int64_t documentId, int pageIndex);
     void onAnnotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
     void onAnnotationHitTestFailed(int64_t documentId, int pageIndex);
+    void onAnnotationAdded(int64_t documentId, int pageIndex, const QString& annotationName);
+    void onAnnotationAddFailed(int64_t documentId, int pageIndex, const QString& errorMessage);
+    void onDocumentSaved(int64_t documentId, uint64_t bytesWritten);
+    void onDocumentSaveFailed(int64_t documentId, const QString& errorMessage);
 
 private:
     void dispatchMessage(ipc::MessageType type, const QByteArray& payload, std::vector<int> fds);

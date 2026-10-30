@@ -40,6 +40,8 @@ bool isRequestType(uint32_t type) {
         case ipc::MessageType::RedactDocumentRequest:
         case ipc::MessageType::ListAnnotationsRequest:
         case ipc::MessageType::HitTestAnnotationRequest:
+        case ipc::MessageType::AddAnnotationRequest:
+        case ipc::MessageType::SaveDocumentRequest:
         case ipc::MessageType::SharedMemoryAck:
         case ipc::MessageType::WorkerControlRequest:
             return true;
@@ -94,6 +96,14 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
             this, &WorkerServer::onAnnotationHitTestReady, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::annotationHitTestFailed,
             this, &WorkerServer::onAnnotationHitTestFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::annotationAdded,
+            this, &WorkerServer::onAnnotationAdded, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::annotationAddFailed,
+            this, &WorkerServer::onAnnotationAddFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::documentSaved,
+            this, &WorkerServer::onDocumentSaved, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::documentSaveFailed,
+            this, &WorkerServer::onDocumentSaveFailed, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::idle,
             this, &WorkerServer::onIdle, Qt::QueuedConnection);
 }
@@ -385,7 +395,7 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
 #endif
         fds.clear();
     };
-    if (!fds.empty() && type != ipc::MessageType::OpenDocumentRequest) {
+    if (!fds.empty() && type != ipc::MessageType::OpenDocumentRequest && type != ipc::MessageType::SaveDocumentRequest) {
         std::cerr << "[WorkerServer] Rejected " << fds.size()
                   << " unsolicited descriptor(s) on a message type that does not accept them; message dropped."
                   << std::endl;
@@ -539,6 +549,55 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
                 m_engineWorker.requestHitTestAnnotation(req.documentId, req.pageIndex, req.xPoints, req.yPoints);
             } else {
                 onAnnotationHitTestFailed(req.documentId, req.pageIndex);
+            }
+            break;
+        }
+
+        case ipc::MessageType::AddAnnotationRequest: {
+            ipc::AddAnnotationRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestAddAnnotation(req.documentId, req.pageIndex, req.annotation);
+            } else {
+                onAnnotationAddFailed(req.documentId, req.pageIndex, QStringLiteral("Malformed AddAnnotationRequest payload"));
+            }
+            break;
+        }
+
+        case ipc::MessageType::SaveDocumentRequest: {
+            ipc::SaveDocumentRequest req;
+            const bool parsed = ipc::deserialize(payload, req);
+#ifdef Q_OS_LINUX
+            if (fds.size() != 1) {
+                std::cerr << "[WorkerServer] Rejected SaveDocumentRequest with " << fds.size()
+                          << " descriptors (expected exactly 1)." << std::endl;
+                closeAll();
+                if (parsed) {
+                    onDocumentSaveFailed(req.documentId, QStringLiteral("SaveDocumentRequest requires exactly 1 descriptor"));
+                }
+                break;
+            }
+            const int saveFd = fds.front();
+            fds.clear();
+
+            int fl = ::fcntl(saveFd, F_GETFL);
+            if (fl == -1 || ((fl & O_ACCMODE) != O_WRONLY && (fl & O_ACCMODE) != O_RDWR)) {
+                std::cerr << "[WorkerServer] Rejected SaveDocumentRequest: descriptor is not open for writing." << std::endl;
+                ::close(saveFd);
+                if (parsed) {
+                    onDocumentSaveFailed(req.documentId, QStringLiteral("Descriptor is not open for writing"));
+                }
+                break;
+            }
+#else
+            const int saveFd = fds.empty() ? -1 : fds.front();
+            fds.clear();
+#endif
+            if (parsed) {
+                m_engineWorker.requestSaveDocument(req.documentId, saveFd, req.incremental, req.tempFilePath);
+            } else if (saveFd >= 0) {
+#ifdef Q_OS_LINUX
+                ::close(saveFd);
+#endif
             }
             break;
         }
@@ -849,6 +908,40 @@ void WorkerServer::onAnnotationHitTestFailed(int64_t documentId, int pageIndex) 
     res.pageIndex = pageIndex;
     res.hit = false;
     sendPacket(ipc::MessageType::HitTestAnnotationResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onAnnotationAdded(int64_t documentId, int pageIndex, const QString& annotationName) {
+    ipc::AddAnnotationResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.success = true;
+    res.annotationName = annotationName;
+    sendPacket(ipc::MessageType::AddAnnotationResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onAnnotationAddFailed(int64_t documentId, int pageIndex, const QString& errorMessage) {
+    ipc::AddAnnotationResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.success = false;
+    res.errorMessage = errorMessage;
+    sendPacket(ipc::MessageType::AddAnnotationResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onDocumentSaved(int64_t documentId, uint64_t bytesWritten) {
+    ipc::SaveDocumentResponse res;
+    res.documentId = documentId;
+    res.success = true;
+    res.bytesWritten = bytesWritten;
+    sendPacket(ipc::MessageType::SaveDocumentResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onDocumentSaveFailed(int64_t documentId, const QString& errorMessage) {
+    ipc::SaveDocumentResponse res;
+    res.documentId = documentId;
+    res.success = false;
+    res.errorMessage = errorMessage;
+    sendPacket(ipc::MessageType::SaveDocumentResponse, ipc::serialize(res));
 }
 
 } // namespace pdf::worker

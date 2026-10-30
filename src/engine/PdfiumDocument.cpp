@@ -4,6 +4,7 @@
 #include <fpdf_transformpage.h>
 #include <fpdf_ppo.h>
 #include <fpdf_save.h>
+#include <fpdf_signature.h>
 #include <string>
 #include "PdfiumMutex.h"
 #include <mutex>
@@ -646,6 +647,80 @@ bool PdfiumDocument::extractPages(int firstPage, int lastPage, std::vector<uint8
         out = std::move(writer.data);
     }
     return ok;
+}
+
+namespace {
+
+struct FdWriter : public FPDF_FILEWRITE {
+    int fd{-1};
+    uint64_t bytesWritten{0};
+    bool failed{false};
+    std::function<void(uint64_t)> progressCallback;
+
+    FdWriter(int inFd, std::function<void(uint64_t)> progress)
+        : fd(inFd), progressCallback(std::move(progress)) {
+        version = 1;
+        WriteBlock = &FdWriter::write;
+    }
+
+    static int write(FPDF_FILEWRITE* self, const void* buf, unsigned long size) {
+        auto* w = static_cast<FdWriter*>(self);
+        if (w->failed || w->fd < 0 || !buf || size == 0) {
+            return (w->failed || w->fd < 0) ? 0 : 1;
+        }
+        const char* p = static_cast<const char*>(buf);
+        unsigned long remaining = size;
+        while (remaining > 0) {
+#ifdef _WIN32
+            int n = ::_write(w->fd, p, remaining);
+#else
+            ssize_t n = ::write(w->fd, p, remaining);
+#endif
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                w->failed = true;
+                return 0;
+            }
+            p += n;
+            remaining -= static_cast<unsigned long>(n);
+            w->bytesWritten += static_cast<uint64_t>(n);
+        }
+        if (w->progressCallback) {
+            w->progressCallback(w->bytesWritten);
+        }
+        return 1;
+    }
+};
+
+} // namespace
+
+bool PdfiumDocument::saveAsCopy(int writeFd, bool incremental, uint64_t& outBytesWritten,
+                                std::function<void(uint64_t)> progressCallback) {
+    outBytesWritten = 0;
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+    if (!m_doc || writeFd < 0) {
+        return false;
+    }
+
+    int sigs = FPDF_GetSignatureCount(m_doc.get());
+    if (sigs > 0 && !incremental) {
+        return false;
+    }
+
+    FdWriter writer(writeFd, std::move(progressCallback));
+    unsigned long flags = incremental ? FPDF_INCREMENTAL : FPDF_NO_INCREMENTAL;
+    int res = FPDF_SaveAsCopy(m_doc.get(), &writer, flags);
+    if (res == 0 || writer.failed) {
+        return false;
+    }
+    outBytesWritten = writer.bytesWritten;
+    return outBytesWritten > 0;
+}
+
+int PdfiumDocument::signatureCount() const {
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+    if (!m_doc) return 0;
+    return FPDF_GetSignatureCount(m_doc.get());
 }
 
 std::unique_ptr<IDocument> createDocument() {

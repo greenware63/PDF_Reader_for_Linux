@@ -1,4 +1,4 @@
-﻿#include "PdfViewerWidget.h"
+#include "PdfViewerWidget.h"
 #include "ImageUtils.h"
 
 namespace {
@@ -43,6 +43,8 @@ void rotateRectPointsForDisplay(const pdf::PageCharBox& r, double pageW, double 
 #include <QKeyEvent>
 #include <QFileInfo>
 #include <QScrollBar>
+#include <QTemporaryFile>
+#include <QDir>
 #include <QCoreApplication>
 #include <QGuiApplication>
 #include <QClipboard>
@@ -169,6 +171,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_transformedPixmapCache.clear();
     clearSelection();
     clearSearch();
+    m_editLog.clear();
     m_currentDocumentId = nextDocId;
     ++m_currentGeneration;
     m_renderWorker.setGeneration(m_currentGeneration);
@@ -2262,6 +2265,179 @@ void PdfViewerWidget::drawRedactionOverlays(QPainter& painter, const layout::Vie
         painter.setPen(dragPen);
         painter.drawRect(dragBox);
     }
+}
+
+bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
+    if (!hasSelection() || !m_hasDocument) {
+        return false;
+    }
+
+    bool forward = (m_selectionStart.pageIndex < m_selectionEnd.pageIndex) ||
+                   (m_selectionStart.pageIndex == m_selectionEnd.pageIndex && m_selectionStart.charIndex <= m_selectionEnd.charIndex);
+    int p0 = forward ? m_selectionStart.pageIndex : m_selectionEnd.pageIndex;
+    int p1 = forward ? m_selectionEnd.pageIndex : m_selectionStart.pageIndex;
+    int c0 = forward ? m_selectionStart.charIndex : m_selectionEnd.charIndex;
+    int c1 = forward ? m_selectionEnd.charIndex : m_selectionStart.charIndex;
+
+    bool anyAdded = false;
+
+    for (int p = p0; p <= p1; ++p) {
+        auto it = m_pageTextCache.find(p);
+        if (it == m_pageTextCache.end() || !it->second) {
+            continue;
+        }
+        const auto& pt = *it->second;
+        int startChar = (p == p0) ? c0 : 0;
+        int endChar = (p == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
+        auto rects = pt.getSelectionRects(startChar, endChar);
+        if (rects.empty()) {
+            continue;
+        }
+
+        const auto& pl = m_layout.getPageLayout(p);
+        double pageH = pl.heightPoints;
+
+        pdf::AnnotationItem hl;
+        hl.subtype = pdf::AnnotationSubtype::Highlight;
+        hl.pageIndex = p;
+        hl.colorArgb = (colorArgb != 0) ? colorArgb : 0xFFFFFF00;
+        hl.hasColor = true;
+        hl.flags = 4; // FPDF_ANNOT_FLAG_PRINT
+        hl.contents = QString::fromStdU16String(pt.getSelectedText(startChar, endChar));
+
+        double minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+        for (const auto& b : rects) {
+            double pLeft = b.left;
+            double pRight = b.right;
+            double pTop = pageH - b.top;
+            double pBottom = pageH - b.bottom;
+
+            minX = std::min(minX, pLeft);
+            maxX = std::max(maxX, pRight);
+            minY = std::min(minY, pBottom);
+            maxY = std::max(maxY, pTop);
+
+            pdf::AnnotationQuad quad;
+            quad.x1 = pLeft;  quad.y1 = pTop;
+            quad.x2 = pRight; quad.y2 = pTop;
+            quad.x3 = pLeft;  quad.y3 = pBottom;
+            quad.x4 = pRight; quad.y4 = pBottom;
+            hl.quadPoints.push_back(quad);
+        }
+        hl.left = minX;
+        hl.right = maxX;
+        hl.bottom = minY;
+        hl.top = maxY;
+
+        m_editLog.recordAddAnnotation(p, hl);
+        m_renderWorker.requestAddAnnotation(m_currentDocumentId, p, hl);
+        anyAdded = true;
+    }
+
+    if (anyAdded) {
+        clearSelection();
+        m_cache.clear();
+        m_inFlightKeys.clear();
+        ++m_currentGeneration;
+        m_renderWorker.setGeneration(m_currentGeneration);
+        viewport()->update();
+    }
+    return anyAdded;
+}
+
+bool PdfViewerWidget::saveDocument(const QString& targetPath) {
+    if (!m_hasDocument || m_currentDocumentId == 0) {
+        return false;
+    }
+    QString destPath = targetPath.isEmpty() ? m_currentFilePath : targetPath;
+    if (destPath.isEmpty()) {
+        return false;
+    }
+
+    QFileInfo destInfo(destPath);
+    QTemporaryFile tempFile(destInfo.absoluteDir().filePath(QStringLiteral("save_XXXXXX.tmp")));
+    if (!tempFile.open()) {
+        return false;
+    }
+    QString tempPath = tempFile.fileName();
+    int tempFd = -1;
+#ifdef Q_OS_LINUX
+    tempFd = ::dup(tempFile.handle());
+#else
+    tempFile.close();
+#endif
+
+    QFile origFile(m_currentFilePath);
+    QByteArray origBytes;
+    if (origFile.open(QIODevice::ReadOnly)) {
+        origBytes = origFile.readAll();
+        origFile.close();
+    }
+
+    bool incremental = !origBytes.isEmpty() && (destPath == m_currentFilePath);
+    auto saveResp = m_renderWorker.saveDocumentSync(m_currentDocumentId, tempFd, incremental, tempPath);
+    if (!saveResp.success || saveResp.bytesWritten == 0) {
+        tempFile.remove();
+        return false;
+    }
+
+    QFile checkFile(tempPath);
+    if (!checkFile.open(QIODevice::ReadOnly)) {
+        tempFile.remove();
+        return false;
+    }
+    QByteArray checkBytes = checkFile.readAll();
+    checkFile.close();
+
+    if (!checkBytes.startsWith("%PDF-")) {
+        tempFile.remove();
+        return false;
+    }
+
+    if (incremental && !origBytes.isEmpty()) {
+        if (!checkBytes.startsWith(origBytes)) {
+            tempFile.remove();
+            return false;
+        }
+    }
+
+    // Fresh document verification: verify written PDF is non-empty, has PDF header and valid EOF marker
+    if (checkBytes.size() < 16) {
+        tempFile.remove();
+        return false;
+    }
+    qsizetype eofIdx = checkBytes.lastIndexOf("%%EOF");
+    if (eofIdx == -1 || checkBytes.size() - eofIdx > 1024) {
+        tempFile.remove();
+        return false;
+    }
+
+    // Atomic replace destination file
+    if (QFile::exists(destPath)) {
+        QString backupPath = destPath + QStringLiteral(".bak");
+        QFile::remove(backupPath);
+        if (!QFile::rename(destPath, backupPath)) {
+            tempFile.remove();
+            return false;
+        }
+        if (!QFile::copy(tempPath, destPath)) {
+            QFile::rename(backupPath, destPath);
+            tempFile.remove();
+            return false;
+        }
+        QFile::remove(backupPath);
+        tempFile.remove();
+    } else {
+        if (!QFile::copy(tempPath, destPath)) {
+            tempFile.remove();
+            return false;
+        }
+        tempFile.remove();
+    }
+
+    m_currentFilePath = destPath;
+    m_editLog.markSaved();
+    return true;
 }
 
 } // namespace ui
