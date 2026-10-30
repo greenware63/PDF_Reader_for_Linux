@@ -432,7 +432,13 @@ PageText PdfiumPage::extractText() {
 }
 
 
-std::vector<AnnotationItem> PdfiumPage::listAnnotations() {
+std::vector<AnnotationItem> PdfiumPage::listAnnotations(bool* truncated) {
+    bool clippedAny = false;
+    uint64_t budgetUsed = 0;
+    struct TruncGuard {
+        bool* out; const bool& flag;
+        ~TruncGuard() { if (out) *out = flag; }
+    } truncGuard{truncated, clippedAny};
     if (!m_page) {
         return {};
     }
@@ -446,6 +452,7 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations() {
     // Hard bound against hostile-PDF resource exhaustion (RFC §6: reply <= 10 000 items)
     if (annotCount > 10000) {
         annotCount = 10000;
+        clippedAny = true;
     }
 
     std::vector<AnnotationItem> result;
@@ -520,17 +527,20 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations() {
             }
             // Defense against unbounded hostile allocations (cap at 1 MiB)
             if (reqLen > 1024 * 1024) {
+                clippedAny = true;
                 return {};
             }
             std::vector<unsigned char> buf(reqLen, 0);
             unsigned long actual = FPDFAnnot_GetStringValue(annot, key, reinterpret_cast<FPDF_WCHAR*>(buf.data()), reqLen);
             if (actual != reqLen || actual <= 2 || actual > buf.size()) {
+                clippedAny = true;
                 return {};
             }
             const char16_t* u16 = reinterpret_cast<const char16_t*>(buf.data());
             size_t charCount = (actual - 2) / sizeof(char16_t);
             QString str = QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
             if (static_cast<size_t>(str.size()) > maxChars) {
+                clippedAny = true;
                 str.truncate(static_cast<qsizetype>(maxChars));
             }
             return str;
@@ -543,7 +553,7 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations() {
 
         if (FPDFAnnot_HasAttachmentPoints(annot)) {
             size_t qCount = FPDFAnnot_CountAttachmentPoints(annot);
-            if (qCount > 4096) qCount = 4096;
+            if (qCount > 4096) { qCount = 4096; clippedAny = true; }
             item.quadPoints.reserve(qCount);
             for (size_t q = 0; q < qCount; ++q) {
                 FS_QUADPOINTSF quad{};
@@ -576,6 +586,12 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations() {
         FPDFPage_CloseAnnot(annot);
 
         if (item.isValid()) {
+            const uint64_t cost = annotationBudgetCost(item);
+            if (budgetUsed + cost > kMaxAnnotationListBytes) {
+                clippedAny = true;   // stop here: the rest would not fit in one IPC frame
+                break;
+            }
+            budgetUsed += cost;
             result.push_back(std::move(item));
         }
     }

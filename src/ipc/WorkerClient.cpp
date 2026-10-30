@@ -485,9 +485,10 @@ ListAnnotationsResponse WorkerClient::listAnnotationsSync(int64_t documentId, in
     result.success = false;
 
     const auto readyConn = connect(this, &WorkerClient::annotationsReady, &loop,
-        [&](int64_t docId, int pIdx, const std::vector<pdf::AnnotationItem>& annots) {
+        [&](int64_t docId, int pIdx, const std::vector<pdf::AnnotationItem>& annots, bool trunc) {
             if (docId == documentId && pIdx == pageIndex) {
                 result.success = true;
+                result.truncated = trunc;
                 result.annotations = annots;
                 loop.quit();
             }
@@ -1137,7 +1138,7 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
             ListAnnotationsResponse response;
             if (deserialize(payload, response)) {
                 if (response.success) {
-                    Q_EMIT annotationsReady(response.documentId, response.pageIndex, response.annotations);
+                    Q_EMIT annotationsReady(response.documentId, response.pageIndex, response.annotations, response.truncated);
                 } else {
                     Q_EMIT annotationsFailed(response.documentId, response.pageIndex);
                 }

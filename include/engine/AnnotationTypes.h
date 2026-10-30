@@ -174,6 +174,21 @@ struct AnnotationItem {
     }
 };
 
+// ---- Response budget -------------------------------------------------------------------------------------
+// Per-item and per-collection caps alone are not enough: 10 000 annotations x 32 768 chars (or x 4 096 quads)
+// is far beyond the 64 MiB IPC frame limit, and a worker that tries to send an oversized frame drops the
+// connection, which loses the whole document session. The list for one page therefore also has a total budget,
+// enforced by the engine while enumerating (it stops and reports `truncated`) and again by the deserializer.
+// The cost is a conservative over-estimate of the serialized size (UTF-16 text, 64-byte quads, fixed fields).
+constexpr uint64_t kMaxAnnotationListBytes = 16ull * 1024 * 1024;
+
+inline uint64_t annotationBudgetCost(const AnnotationItem& a) noexcept {
+    const uint64_t chars = static_cast<uint64_t>(a.contents.size()) + static_cast<uint64_t>(a.author.size()) +
+                           static_cast<uint64_t>(a.name.size()) + static_cast<uint64_t>(a.modificationDate.size()) +
+                           static_cast<uint64_t>(a.uri.size());
+    return 192ull + 2ull * chars + 64ull * static_cast<uint64_t>(a.quadPoints.size());
+}
+
 QDataStream& operator<<(QDataStream& out, const AnnotationQuad& q);
 QDataStream& operator>>(QDataStream& in, AnnotationQuad& q);
 

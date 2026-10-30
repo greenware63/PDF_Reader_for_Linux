@@ -68,9 +68,11 @@ public:
 
     /**
      * @brief Lists all annotations present on this page as bounded POD data.
+     * If `truncated` is non-null it is set to true when anything was dropped or clipped (more annotations than
+     * the cap, the response budget reached, or a string over its limit), so callers can show the list as incomplete.
      * Must be called only from the worker thread.
      */
-    virtual std::vector<AnnotationItem> listAnnotations() = 0;
+    virtual std::vector<AnnotationItem> listAnnotations(bool* truncated = nullptr) = 0;
 
     /**
      * @brief Hit-tests annotations on this page at the given point (in standard PDF user space points).

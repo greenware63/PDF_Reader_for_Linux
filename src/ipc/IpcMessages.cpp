@@ -1143,6 +1143,7 @@ QDataStream& operator<<(QDataStream& out, const ListAnnotationsResponse& res) {
     out << static_cast<qint64>(res.documentId)
         << static_cast<qint32>(res.pageIndex)
         << res.success
+        << res.truncated
         << static_cast<quint32>(res.annotations.size());
     for (const auto& a : res.annotations) {
         out << a;
@@ -1153,7 +1154,7 @@ QDataStream& operator<<(QDataStream& out, const ListAnnotationsResponse& res) {
 QDataStream& operator>>(QDataStream& in, ListAnnotationsResponse& res) {
     qint64 docId = 0;
     qint32 pageIdx = 0;
-    in >> docId >> pageIdx >> res.success;
+    in >> docId >> pageIdx >> res.success >> res.truncated;
     res.documentId = docId;
     res.pageIndex = pageIdx;
 
@@ -1163,11 +1164,17 @@ QDataStream& operator>>(QDataStream& in, ListAnnotationsResponse& res) {
         return in;
     }
     res.annotations.clear();
-    res.annotations.reserve(count);
+    res.annotations.reserve(std::min<quint32>(count, 256));
+    uint64_t budgetUsed = 0;
     for (quint32 i = 0; i < count; ++i) {
         AnnotationItem item;
         in >> item;
         if (in.status() != QDataStream::Ok) {
+            return in;
+        }
+        budgetUsed += annotationBudgetCost(item);
+        if (budgetUsed > kMaxAnnotationListBytes) {
+            in.setStatus(QDataStream::ReadCorruptData);
             return in;
         }
         res.annotations.push_back(std::move(item));

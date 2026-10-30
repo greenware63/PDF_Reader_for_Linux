@@ -287,7 +287,7 @@ Q_SIGNALS:
     /// Emitted when text extraction for a page completes on the worker thread.
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
     /// Emitted when annotation listing completes on the worker thread.
-    void annotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations);
+    void annotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations, bool truncated);
     void annotationsFailed(int64_t documentId, int pageIndex);
     /// Emitted when annotation hit-testing completes on the worker thread.
     void annotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);

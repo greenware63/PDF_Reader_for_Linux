@@ -79,7 +79,7 @@ Q_SIGNALS:
     void documentOpened(int64_t documentId, pdf::OpenResult result);
     void documentOutlineReady(int64_t documentId, const std::vector<pdf::OutlineItem>& outline);
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
-    void annotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations);
+    void annotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations, bool truncated);
     void annotationsFailed(int64_t documentId, int pageIndex);
     void annotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
     void annotationHitTestFailed(int64_t documentId, int pageIndex);

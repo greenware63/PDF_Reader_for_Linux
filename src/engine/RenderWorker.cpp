@@ -789,8 +789,9 @@ void RenderWorker::requestListAnnotations(int64_t documentId, int pageIndex) {
             Q_EMIT annotationsFailed(documentId, pageIndex);
             return;
         }
-        auto annots = page->listAnnotations();
-        Q_EMIT annotationsReady(documentId, pageIndex, annots);
+        bool truncated = false;
+        auto annots = page->listAnnotations(&truncated);
+        Q_EMIT annotationsReady(documentId, pageIndex, annots, truncated);
     }});
     m_cv.notify_one();
 }
