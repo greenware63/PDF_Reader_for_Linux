@@ -2,6 +2,8 @@
 
 #include "PixelBuffer.h"
 #include "PageText.h"
+#include "AnnotationTypes.h"
+#include <vector>
 
 namespace pdf {
 
@@ -63,6 +65,22 @@ public:
      * Must be called only from the worker thread.
      */
     virtual PageText extractText() = 0;
+
+    /**
+     * @brief Lists all annotations present on this page as bounded POD data.
+     * Must be called only from the worker thread.
+     */
+    virtual std::vector<AnnotationItem> listAnnotations() = 0;
+
+    /**
+     * @brief Hit-tests annotations on this page at the given point (in standard PDF user space points).
+     * Evaluates in reverse z-order (topmost annotation first).
+     * @param xPoints X coordinate in PDF points.
+     * @param yPoints Y coordinate in PDF points.
+     * @param out Receives the hit AnnotationItem if hit.
+     * @return true if an annotation was hit, false otherwise.
+     */
+    virtual bool hitTestAnnotation(double xPoints, double yPoints, AnnotationItem& out) = 0;
 };
 
 } // namespace pdf

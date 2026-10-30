@@ -6,6 +6,7 @@
 #include "engine/PageText.h"
 #include "engine/SearchTypes.h"
 #include "engine/OutlineTypes.h"
+#include "engine/AnnotationTypes.h"
 #include "engine/RenderWorker.h"
 #include "cache/TileCache.h"
 
@@ -292,6 +293,34 @@ struct RedactDocumentFailedResponse {
     QString errorMessage;
 };
 
+// Annotations (M1 Read-Only)
+struct ListAnnotationsRequest {
+    int64_t documentId{0};
+    int pageIndex{0};
+};
+
+struct ListAnnotationsResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+    bool success{false};
+    std::vector<pdf::AnnotationItem> annotations;
+};
+
+struct HitTestAnnotationRequest {
+    int64_t documentId{0};
+    int pageIndex{0};
+    double xPoints{0.0};
+    double yPoints{0.0};
+};
+
+struct HitTestAnnotationResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+    bool hit{false};
+    pdf::AnnotationItem annotation;
+};
+
+
 // Message stream operators
 QDataStream& operator<<(QDataStream& out, const ExtractPagesRequest& req);
 QDataStream& operator>>(QDataStream& in, ExtractPagesRequest& req);
@@ -395,6 +424,18 @@ QDataStream& operator>>(QDataStream& in, RenderPageResponse& res);
 
 QDataStream& operator<<(QDataStream& out, const RenderPageFailedResponse& res);
 QDataStream& operator>>(QDataStream& in, RenderPageFailedResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const ListAnnotationsRequest& req);
+QDataStream& operator>>(QDataStream& in, ListAnnotationsRequest& req);
+
+QDataStream& operator<<(QDataStream& out, const ListAnnotationsResponse& res);
+QDataStream& operator>>(QDataStream& in, ListAnnotationsResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const HitTestAnnotationRequest& req);
+QDataStream& operator>>(QDataStream& in, HitTestAnnotationRequest& req);
+
+QDataStream& operator<<(QDataStream& out, const HitTestAnnotationResponse& res);
+QDataStream& operator>>(QDataStream& in, HitTestAnnotationResponse& res);
 
 // --- Serialization Templates ---
 

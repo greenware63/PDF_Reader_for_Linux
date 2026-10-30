@@ -43,3 +43,6 @@ persian_test.pdf
 .flatpak-build/
 .flatpak-repo/
 .flatpak-selftest.*
+
+# Scratch artifacts
+scratch/

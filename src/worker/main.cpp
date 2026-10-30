@@ -817,7 +817,7 @@ int main(int argc, char* argv[]) {
                       << isolationError << std::endl;
             return 1;
         }
-#ifdef PDF_WORKER_TEST_HOOKS
+#if defined(PDF_WORKER_TEST_HOOKS) && defined(__linux__)
         if (parser.isSet(testProbeReadOption)) {
             for (const QString& probe : parser.values(testProbeReadOption)) {
                 const QByteArray path = probe.toLocal8Bit();

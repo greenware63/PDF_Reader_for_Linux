@@ -1,4 +1,4 @@
-﻿#include <QCoreApplication>
+#include <QCoreApplication>
 #include <QProcess>
 #include <QLocalSocket>
 #include "ipc/SharedTile.h"
@@ -1441,6 +1441,7 @@ int main(int argc, char* argv[]) {
 
     // --- TEST 17: Unexpected Descriptor Hygiene (Unsolicited Descriptors Are Closed) ---
     std::cout << "[TEST 17] Testing unexpected descriptor hygiene (unsolicited descriptors closed)..." << std::endl;
+#ifdef Q_OS_LINUX
     if (qEnvironmentVariableIsEmpty("PDF_TEST19_ONLY")) { // skipped only when isolating Test 19 sub-cases
 
         const QString hygieneSocket = QStringLiteral("pdf_test_hygiene_%1").arg(QCoreApplication::applicationPid());
@@ -1514,6 +1515,9 @@ int main(int argc, char* argv[]) {
         hygieneWorker.waitForFinished(3000);
         std::cout << "  -> Passed: Ping with an unsolicited descriptor was dropped; the following clean Ping was answered (descriptor closure: Test 19)." << std::endl;
     }
+#else
+    std::cout << "  -> 17 SKIPPED: descriptor passing is Linux-only." << std::endl;
+#endif
 
     // --- TEST 18: Startup Fails Without Landlock (Fail-Closed) ---
     std::cout << "[TEST 18] Testing worker startup fails when Landlock is unavailable (fail-closed)..." << std::endl;
@@ -2045,6 +2049,142 @@ int main(int argc, char* argv[]) {
 #else
     std::cout << "[TEST 19] Skipped: descriptor passing is Linux-only." << std::endl;
 #endif
+
+    // --- TEST 22: Testing Annotation Listing and Hit-Testing over IPC ---
+    std::cout << "[TEST 22] Testing annotation listing and hit-testing over IPC..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        QString formsPdf = QFileInfo(samplePdf).dir().filePath(QStringLiteral("tests/fixtures/redaction/annots_forms.pdf"));
+        if (!QFileInfo::exists(formsPdf)) {
+            formsPdf = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../tests/fixtures/redaction/annots_forms.pdf"));
+        }
+        formsPdf = QFileInfo(formsPdf).canonicalFilePath();
+
+        auto opened = client.openDocumentSync(22, formsPdf.toStdString());
+        if (opened.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 22: Failed to open annots_forms.pdf over IPC: " << static_cast<int>(opened.error) << std::endl;
+            return 1;
+        }
+
+        // List annotations on page 0
+        auto listResp = client.listAnnotationsSync(22, 0);
+        if (!listResp.success) {
+            std::cerr << "[FAIL] 22: listAnnotationsSync failed on page 0" << std::endl;
+            return 1;
+        }
+        if (listResp.annotations.size() < 6) {
+            std::cerr << "[FAIL] 22: Expected at least 6 annotations, got " << listResp.annotations.size() << std::endl;
+            return 1;
+        }
+
+        bool foundFreeText = false;
+        bool foundLink = false;
+        for (const auto& a : listResp.annotations) {
+            if (a.subtype == pdf::AnnotationSubtype::FreeText && a.contents.contains("CANARY-ANNOT-CONTENTS")) {
+                foundFreeText = true;
+            } else if (a.subtype == pdf::AnnotationSubtype::Link && a.uri == "https://canary-uri.example/CANARY-URI") {
+                foundLink = true;
+            }
+        }
+        if (!foundFreeText || !foundLink) {
+            std::cerr << "[FAIL] 22: Missing expected FreeText or Link annotation over IPC" << std::endl;
+            return 1;
+        }
+
+        // Hit-test FreeText at (100, 615)
+        auto hitResp1 = client.hitTestAnnotationSync(22, 0, 100.0, 615.0);
+        if (!hitResp1.hit || hitResp1.annotation.subtype != pdf::AnnotationSubtype::FreeText) {
+            std::cerr << "[FAIL] 22: Hit test on FreeText failed over IPC" << std::endl;
+            return 1;
+        }
+
+        // Hit-test outside at (10, 10)
+        auto hitResp2 = client.hitTestAnnotationSync(22, 0, 10.0, 10.0);
+        if (hitResp2.hit) {
+            std::cerr << "[FAIL] 22: Hit test at (10, 10) unexpectedly succeeded over IPC" << std::endl;
+            return 1;
+        }
+
+        // Request invalid page index
+        auto invalidResp = client.listAnnotationsSync(22, 9999);
+        if (invalidResp.success) {
+            std::cerr << "[FAIL] 22: listAnnotationsSync unexpectedly succeeded on invalid page 9999" << std::endl;
+            return 1;
+        }
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: annotation listing, hit-testing, and bounds checking over IPC verified." << std::endl;
+    }
+
+    // --- TEST 23: Testing Malformed Annotation Request Frames ---
+    std::cout << "[TEST 23] Testing that malformed annotation request frames get a failure response..." << std::endl;
+    {
+        const QString sName = QStringLiteral("pdf_test_annot_malformed_%1").arg(QCoreApplication::applicationPid());
+        QProcess worker;
+        QStringList args;
+        args << QStringLiteral("--socket") << sName;
+        worker.start(workerExe, args);
+        if (!worker.waitForStarted(3000)) {
+            std::cerr << "[FAIL] 23: Failed to start worker: " << worker.errorString().toStdString() << std::endl;
+            return 1;
+        }
+
+        QLocalSocket sock;
+        for (int i = 0; i < 50; ++i) {
+            sock.connectToServer(sName);
+            if (sock.waitForConnected(100)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (sock.state() != QLocalSocket::ConnectedState) {
+            std::cerr << "[FAIL] 23: Failed to connect raw socket to worker" << std::endl;
+            worker.kill();
+            return 1;
+        }
+
+        QByteArray badPayload = "CORRUPT_BYTES";
+        QByteArray pkt = pdf::ipc::buildPacket(pdf::ipc::MessageType::ListAnnotationsRequest, badPayload);
+        sock.write(pkt);
+        sock.flush();
+
+        bool gotResponse = false;
+        QByteArray respBuf;
+        for (int i = 0; i < 50; ++i) {
+            if (sock.waitForReadyRead(100)) {
+                respBuf.append(sock.readAll());
+                if (respBuf.size() >= static_cast<qsizetype>(sizeof(pdf::ipc::PacketHeader))) {
+                    gotResponse = true;
+                    break;
+                }
+            }
+        }
+
+        if (!gotResponse) {
+            std::cerr << "[FAIL] 23: Worker never answered malformed ListAnnotationsRequest" << std::endl;
+            worker.kill();
+            return 1;
+        }
+
+        const auto* hdr = reinterpret_cast<const pdf::ipc::PacketHeader*>(respBuf.constData());
+        if (hdr->type != static_cast<uint32_t>(pdf::ipc::MessageType::ListAnnotationsResponse)) {
+            std::cerr << "[FAIL] 23: Expected ListAnnotationsResponse, got " << hdr->type << std::endl;
+            worker.kill();
+            return 1;
+        }
+
+        QByteArray payload = respBuf.mid(sizeof(pdf::ipc::PacketHeader), hdr->payloadSize);
+        pdf::ipc::ListAnnotationsResponse res;
+        if (!pdf::ipc::deserialize(payload, res) || res.success) {
+            std::cerr << "[FAIL] 23: Malformed request did not result in success=false response" << std::endl;
+            worker.kill();
+            return 1;
+        }
+
+        sock.disconnectFromServer();
+        worker.kill();
+        worker.waitForFinished(1000);
+        std::cout << "  -> Passed: malformed annotation request was cleanly rejected without hang." << std::endl;
+    }
 
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;

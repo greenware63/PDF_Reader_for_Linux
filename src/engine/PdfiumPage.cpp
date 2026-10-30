@@ -2,6 +2,8 @@
 #include "PdfiumMutex.h"
 #include "layout/DocumentLayout.h"
 #include <fpdf_text.h>
+#include <fpdf_annot.h>
+#include <fpdf_doc.h>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -427,6 +429,180 @@ PageText PdfiumPage::extractText() {
 
     FPDFText_ClosePage(textPage);
     return result;
+}
+
+
+std::vector<AnnotationItem> PdfiumPage::listAnnotations() {
+    if (!m_page) {
+        return {};
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    int annotCount = FPDFPage_GetAnnotCount(m_page);
+    if (annotCount <= 0) {
+        return {};
+    }
+    // Hard bound against hostile-PDF resource exhaustion (RFC §6: reply <= 10 000 items)
+    if (annotCount > 10000) {
+        annotCount = 10000;
+    }
+
+    std::vector<AnnotationItem> result;
+    result.reserve(static_cast<size_t>(annotCount));
+
+    for (int i = 0; i < annotCount; ++i) {
+        FPDF_ANNOTATION annot = FPDFPage_GetAnnot(m_page, i);
+        if (!annot) {
+            continue;
+        }
+
+        AnnotationItem item;
+        item.pageIndex = m_pageIndex;
+        item.annotIndex = i;
+
+        FPDF_ANNOTATION_SUBTYPE st = FPDFAnnot_GetSubtype(annot);
+        switch (st) {
+            case FPDF_ANNOT_TEXT: item.subtype = AnnotationSubtype::Text; break;
+            case FPDF_ANNOT_LINK: item.subtype = AnnotationSubtype::Link; break;
+            case FPDF_ANNOT_FREETEXT: item.subtype = AnnotationSubtype::FreeText; break;
+            case FPDF_ANNOT_LINE: item.subtype = AnnotationSubtype::Line; break;
+            case FPDF_ANNOT_SQUARE: item.subtype = AnnotationSubtype::Square; break;
+            case FPDF_ANNOT_CIRCLE: item.subtype = AnnotationSubtype::Circle; break;
+            case FPDF_ANNOT_POLYGON: item.subtype = AnnotationSubtype::Polygon; break;
+            case FPDF_ANNOT_POLYLINE: item.subtype = AnnotationSubtype::Polyline; break;
+            case FPDF_ANNOT_HIGHLIGHT: item.subtype = AnnotationSubtype::Highlight; break;
+            case FPDF_ANNOT_UNDERLINE: item.subtype = AnnotationSubtype::Underline; break;
+            case FPDF_ANNOT_SQUIGGLY: item.subtype = AnnotationSubtype::Squiggly; break;
+            case FPDF_ANNOT_STRIKEOUT: item.subtype = AnnotationSubtype::StrikeOut; break;
+            case FPDF_ANNOT_STAMP: item.subtype = AnnotationSubtype::Stamp; break;
+            case FPDF_ANNOT_CARET: item.subtype = AnnotationSubtype::Caret; break;
+            case FPDF_ANNOT_INK: item.subtype = AnnotationSubtype::Ink; break;
+            case FPDF_ANNOT_POPUP: item.subtype = AnnotationSubtype::Popup; break;
+            case FPDF_ANNOT_FILEATTACHMENT: item.subtype = AnnotationSubtype::FileAttachment; break;
+            case FPDF_ANNOT_SOUND: item.subtype = AnnotationSubtype::Sound; break;
+            case FPDF_ANNOT_MOVIE: item.subtype = AnnotationSubtype::Movie; break;
+            case FPDF_ANNOT_WIDGET: item.subtype = AnnotationSubtype::Widget; break;
+            case FPDF_ANNOT_SCREEN: item.subtype = AnnotationSubtype::Screen; break;
+            case FPDF_ANNOT_PRINTERMARK: item.subtype = AnnotationSubtype::PrinterMark; break;
+            case FPDF_ANNOT_TRAPNET: item.subtype = AnnotationSubtype::TrapNet; break;
+            case FPDF_ANNOT_WATERMARK: item.subtype = AnnotationSubtype::Watermark; break;
+            case FPDF_ANNOT_THREED: item.subtype = AnnotationSubtype::ThreeD; break;
+            case FPDF_ANNOT_RICHMEDIA: item.subtype = AnnotationSubtype::RichMedia; break;
+            case FPDF_ANNOT_XFAWIDGET: item.subtype = AnnotationSubtype::XfaWidget; break;
+            case FPDF_ANNOT_REDACT: item.subtype = AnnotationSubtype::Redact; break;
+            default: item.subtype = AnnotationSubtype::Unknown; break;
+        }
+
+        FS_RECTF rect{};
+        if (FPDFAnnot_GetRect(annot, &rect)) {
+            item.left = rect.left;
+            item.top = rect.top;
+            item.right = rect.right;
+            item.bottom = rect.bottom;
+        }
+
+        item.flags = static_cast<uint32_t>(FPDFAnnot_GetFlags(annot));
+
+        unsigned int r = 0, g = 0, b = 0, a = 0;
+        if (FPDFAnnot_GetColor(annot, FPDFANNOT_COLORTYPE_Color, &r, &g, &b, &a)) {
+            item.hasColor = true;
+            item.colorArgb = (static_cast<uint32_t>(a) << 24) |
+                             (static_cast<uint32_t>(r) << 16) |
+                             (static_cast<uint32_t>(g) << 8) |
+                             (static_cast<uint32_t>(b));
+        }
+
+        auto readStringKey = [&](const char* key) -> QString {
+            unsigned long len = FPDFAnnot_GetStringValue(annot, key, nullptr, 0);
+            if (len <= 2) {
+                return {};
+            }
+            if (len > 64 * 1024 + 2) {
+                len = 64 * 1024 + 2;
+            }
+            std::vector<unsigned char> buf(len, 0);
+            unsigned long actual = FPDFAnnot_GetStringValue(annot, key, reinterpret_cast<FPDF_WCHAR*>(buf.data()), len);
+            if (actual <= 2) {
+                return {};
+            }
+            const char16_t* u16 = reinterpret_cast<const char16_t*>(buf.data());
+            size_t charCount = (actual - 2) / sizeof(char16_t);
+            return QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
+        };
+
+        item.contents = readStringKey("Contents");
+        if (item.contents.size() > 32768) {
+            item.contents.truncate(32768);
+        }
+        item.author = readStringKey("T");
+        if (item.author.size() > 256) {
+            item.author.truncate(256);
+        }
+        item.name = readStringKey("NM");
+        if (item.name.size() > 1024) {
+            item.name.truncate(1024);
+        }
+        item.modificationDate = readStringKey("M");
+        if (item.modificationDate.size() > 256) {
+            item.modificationDate.truncate(256);
+        }
+
+        if (FPDFAnnot_HasAttachmentPoints(annot)) {
+            size_t qCount = FPDFAnnot_CountAttachmentPoints(annot);
+            if (qCount > 4096) qCount = 4096;
+            item.quadPoints.reserve(qCount);
+            for (size_t q = 0; q < qCount; ++q) {
+                FS_QUADPOINTSF quad{};
+                if (FPDFAnnot_GetAttachmentPoints(annot, q, &quad)) {
+                    AnnotationQuad aq{quad.x1, quad.y1, quad.x2, quad.y2, quad.x3, quad.y3, quad.x4, quad.y4};
+                    if (aq.isValid()) {
+                        item.quadPoints.push_back(aq);
+                    }
+                }
+            }
+        }
+
+        if (item.subtype == AnnotationSubtype::Link && m_doc) {
+            FPDF_LINK link = FPDFAnnot_GetLink(annot);
+            if (link) {
+                FPDF_ACTION act = FPDFLink_GetAction(link);
+                if (act && FPDFAction_GetType(act) == PDFACTION_URI) {
+                    unsigned long uriLen = FPDFAction_GetURIPath(m_doc.get(), act, nullptr, 0);
+                    if (uriLen > 1 && uriLen <= 4096) {
+                        std::vector<char> uriBuf(uriLen, 0);
+                        FPDFAction_GetURIPath(m_doc.get(), act, uriBuf.data(), uriLen);
+                        item.uri = QString::fromUtf8(uriBuf.data());
+                    }
+                }
+            }
+        }
+
+        FPDFPage_CloseAnnot(annot);
+
+        if (item.isValid()) {
+            result.push_back(std::move(item));
+        }
+    }
+
+    return result;
+}
+
+bool PdfiumPage::hitTestAnnotation(double xPoints, double yPoints, AnnotationItem& out) {
+    if (!m_page || std::isnan(xPoints) || std::isnan(yPoints) || std::isinf(xPoints) || std::isinf(yPoints)) {
+        return false;
+    }
+
+    // List all annotations on the page
+    const auto annotations = listAnnotations();
+    // Hit-test in reverse order: the topmost annotation (drawn last) wins
+    for (auto it = annotations.rbegin(); it != annotations.rend(); ++it) {
+        if (it->contains(xPoints, yPoints)) {
+            out = *it;
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace pdf

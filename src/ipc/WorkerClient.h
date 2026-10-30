@@ -29,6 +29,10 @@ public:
     void enqueueRequest(TileRenderRequest request);
     void enqueueRequests(std::vector<TileRenderRequest> requests);
     void requestPageText(int64_t documentId, int pageIndex);
+    void requestListAnnotations(int64_t documentId, int pageIndex);
+    void requestHitTestAnnotation(int64_t documentId, int pageIndex, double xPoints, double yPoints);
+    ListAnnotationsResponse listAnnotationsSync(int64_t documentId, int pageIndex, int timeoutMs = 5000);
+    HitTestAnnotationResponse hitTestAnnotationSync(int64_t documentId, int pageIndex, double xPoints, double yPoints, int timeoutMs = 5000);
     std::shared_ptr<const PageText> getPageTextSync(int64_t documentId, int pageIndex);
     void startSearch(int64_t documentId, int64_t searchId, const QString& query,
                      bool matchCase, int totalPages, int startPage = 0);
@@ -75,6 +79,10 @@ Q_SIGNALS:
     void documentOpened(int64_t documentId, pdf::OpenResult result);
     void documentOutlineReady(int64_t documentId, const std::vector<pdf::OutlineItem>& outline);
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
+    void annotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations);
+    void annotationsFailed(int64_t documentId, int pageIndex);
+    void annotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
+    void annotationHitTestFailed(int64_t documentId, int pageIndex);
     void searchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex,
                             const std::vector<pdf::SearchMatch>& matches);
     void searchProgress(int64_t documentId, int64_t searchId, int pagesSearched, int totalPages);

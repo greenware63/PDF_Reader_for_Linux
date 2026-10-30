@@ -1,4 +1,4 @@
-﻿#include "WorkerClient.h"
+#include "WorkerClient.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -47,6 +47,8 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::ExtractPagesFailedResponse:
         case MessageType::RedactDocumentResponse:
         case MessageType::RedactDocumentFailedResponse:
+        case MessageType::ListAnnotationsResponse:
+        case MessageType::HitTestAnnotationResponse:
         case MessageType::WorkerError:
         case MessageType::WorkerControlResponse:
             return true;
@@ -446,6 +448,112 @@ void WorkerClient::enqueueRequests(std::vector<TileRenderRequest> requests) {
     for (auto& request : requests) {
         enqueueRequest(std::move(request));
     }
+}
+
+void WorkerClient::requestListAnnotations(int64_t documentId, int pageIndex) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT annotationsFailed(documentId, pageIndex);
+        return;
+    }
+    sendMessage(MessageType::ListAnnotationsRequest,
+                serialize(ListAnnotationsRequest{documentId, pageIndex}));
+}
+
+void WorkerClient::requestHitTestAnnotation(int64_t documentId, int pageIndex, double xPoints, double yPoints) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT annotationHitTestFailed(documentId, pageIndex);
+        return;
+    }
+    sendMessage(MessageType::HitTestAnnotationRequest,
+                serialize(HitTestAnnotationRequest{documentId, pageIndex, xPoints, yPoints}));
+}
+
+ListAnnotationsResponse WorkerClient::listAnnotationsSync(int64_t documentId, int pageIndex, int timeoutMs) {
+    if (!ensureConnected()) {
+        ListAnnotationsResponse failed;
+        failed.documentId = documentId;
+        failed.pageIndex = pageIndex;
+        failed.success = false;
+        return failed;
+    }
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    ListAnnotationsResponse result;
+    result.documentId = documentId;
+    result.pageIndex = pageIndex;
+    result.success = false;
+
+    const auto readyConn = connect(this, &WorkerClient::annotationsReady, &loop,
+        [&](int64_t docId, int pIdx, const std::vector<pdf::AnnotationItem>& annots) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.success = true;
+                result.annotations = annots;
+                loop.quit();
+            }
+        });
+    const auto failConn = connect(this, &WorkerClient::annotationsFailed, &loop,
+        [&](int64_t docId, int pIdx) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.success = false;
+                loop.quit();
+            }
+        });
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestListAnnotations(documentId, pageIndex);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    return result;
+}
+
+HitTestAnnotationResponse WorkerClient::hitTestAnnotationSync(int64_t documentId, int pageIndex, double xPoints, double yPoints, int timeoutMs) {
+    if (!ensureConnected()) {
+        HitTestAnnotationResponse failed;
+        failed.documentId = documentId;
+        failed.pageIndex = pageIndex;
+        failed.hit = false;
+        return failed;
+    }
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    HitTestAnnotationResponse result;
+    result.documentId = documentId;
+    result.pageIndex = pageIndex;
+    result.hit = false;
+
+    const auto readyConn = connect(this, &WorkerClient::annotationHitTestReady, &loop,
+        [&](int64_t docId, int pIdx, bool hit, const pdf::AnnotationItem& annot) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.hit = hit;
+                result.annotation = annot;
+                loop.quit();
+            }
+        });
+    const auto failConn = connect(this, &WorkerClient::annotationHitTestFailed, &loop,
+        [&](int64_t docId, int pIdx) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.hit = false;
+                loop.quit();
+            }
+        });
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestHitTestAnnotation(documentId, pageIndex, xPoints, yPoints);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    return result;
 }
 
 void WorkerClient::requestPageText(int64_t documentId, int pageIndex) {
@@ -1025,6 +1133,30 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
             }
             break;
         }
+        case MessageType::ListAnnotationsResponse: {
+            ListAnnotationsResponse response;
+            if (deserialize(payload, response)) {
+                if (response.success) {
+                    Q_EMIT annotationsReady(response.documentId, response.pageIndex, response.annotations);
+                } else {
+                    Q_EMIT annotationsFailed(response.documentId, response.pageIndex);
+                }
+            } else {
+                Q_EMIT annotationsFailed(0, 0);
+            }
+            break;
+        }
+
+        case MessageType::HitTestAnnotationResponse: {
+            HitTestAnnotationResponse response;
+            if (deserialize(payload, response)) {
+                Q_EMIT annotationHitTestReady(response.documentId, response.pageIndex, response.hit, response.annotation);
+            } else {
+                Q_EMIT annotationHitTestFailed(0, 0);
+            }
+            break;
+        }
+
         case MessageType::RedactDocumentFailedResponse: {
             RedactDocumentFailedResponse response;
             if (deserialize(payload, response)) {
