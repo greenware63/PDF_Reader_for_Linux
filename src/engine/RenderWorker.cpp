@@ -5,11 +5,13 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDateTime>
+#include <QRandomGenerator>
 #include <algorithm>
 #include <cerrno>
 
 #ifdef _WIN32
 #include <io.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #else
 #include <unistd.h>
@@ -822,6 +824,124 @@ void RenderWorker::requestHitTestAnnotation(int64_t documentId, int pageIndex, d
         AnnotationItem item;
         bool hit = page->hitTestAnnotation(xPoints, yPoints, item);
         Q_EMIT annotationHitTestReady(documentId, pageIndex, hit, item);
+    }});
+    m_cv.notify_one();
+}
+
+void RenderWorker::requestAddAnnotation(int64_t documentId, int pageIndex, const AnnotationItem& item) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        Q_EMIT annotationAddFailed(documentId, pageIndex, QStringLiteral("Worker not running or document mismatch"));
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, pageIndex, item]() {
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT annotationAddFailed(documentId, pageIndex, QStringLiteral("Document is not open"));
+            return;
+        }
+        noteProgress(ipc::WorkerOp::Annotate);
+        struct AnnotGuard {
+            RenderWorker* w;
+            ~AnnotGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (!page) {
+            Q_EMIT annotationAddFailed(documentId, pageIndex, QStringLiteral("Failed to load page"));
+            return;
+        }
+
+        AnnotationItem annotItem = item;
+        if (annotItem.name.isEmpty()) {
+            annotItem.name = QStringLiteral("annot-%1-%2")
+                .arg(QRandomGenerator::global()->generate64(), 0, 16)
+                .arg(pageIndex);
+        }
+
+        bool ok = false;
+        if (annotItem.subtype == AnnotationSubtype::Highlight) {
+            ok = page->addHighlightAnnotation(annotItem);
+        } else {
+            Q_EMIT annotationAddFailed(documentId, pageIndex, QStringLiteral("Unsupported annotation subtype"));
+            return;
+        }
+
+        if (ok) {
+            Q_EMIT annotationAdded(documentId, pageIndex, annotItem.name);
+        } else {
+            Q_EMIT annotationAddFailed(documentId, pageIndex, QStringLiteral("Failed to add annotation"));
+        }
+    }});
+    m_cv.notify_one();
+}
+
+void RenderWorker::requestSaveDocument(int64_t documentId, int writeFd, bool incremental, const QString& tempFilePath) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        if (writeFd >= 0) {
+#ifdef _WIN32
+            ::_close(writeFd);
+#else
+            ::close(writeFd);
+#endif
+        }
+        Q_EMIT documentSaveFailed(documentId, QStringLiteral("Worker not running or document mismatch"));
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, writeFd, incremental, tempFilePath]() {
+        struct FdCleanup {
+            int fd;
+            ~FdCleanup() {
+                if (fd >= 0) {
+#ifdef _WIN32
+                    ::_close(fd);
+#else
+                    ::close(fd);
+#endif
+                }
+            }
+        } fdCleaner{writeFd};
+
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT documentSaveFailed(documentId, QStringLiteral("Document is not open"));
+            return;
+        }
+
+        noteProgress(ipc::WorkerOp::Save);
+        struct SaveGuard {
+            RenderWorker* w;
+            ~SaveGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        int targetFd = writeFd;
+#ifdef _WIN32
+        if (targetFd < 0 && !tempFilePath.isEmpty()) {
+            std::wstring wpath = tempFilePath.toStdWString();
+            targetFd = ::_wopen(wpath.c_str(), _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, _S_IREAD | _S_IWRITE);
+            fdCleaner.fd = targetFd;
+        }
+#endif
+        if (targetFd < 0) {
+            Q_EMIT documentSaveFailed(documentId, QStringLiteral("Invalid save file descriptor"));
+            return;
+        }
+
+        uint64_t bytesWritten = 0;
+        auto heartbeat = [this](uint64_t) {
+            noteProgress(ipc::WorkerOp::Save);
+        };
+
+        bool ok = m_workerDocument->saveAsCopy(targetFd, incremental, bytesWritten, heartbeat);
+        if (ok && bytesWritten > 0) {
+            Q_EMIT documentSaved(documentId, bytesWritten);
+        } else {
+            QString err = (m_workerDocument->signatureCount() > 0 && !incremental)
+                ? QStringLiteral("Full rewrite is forbidden on signed documents")
+                : QStringLiteral("FPDF_SaveAsCopy failed");
+            Q_EMIT documentSaveFailed(documentId, err);
+        }
     }});
     m_cv.notify_one();
 }

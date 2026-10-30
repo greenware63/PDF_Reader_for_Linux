@@ -24,8 +24,11 @@
 #include "engine/RenderWorker.h"
 #include "engine/SearchTypes.h"
 #include "engine/SearchText.h"
+#include "engine/EditLog.h"
+#include "redact/Redaction.h"
 #include <QTemporaryDir>
 #include <QFile>
+#include <sys/stat.h>
 #include <mutex>
 #include "ipc/IpcMessages.h"
 #include <QCoreApplication>
@@ -2585,8 +2588,364 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: rotated non-rectangular quads reject false hits and oversized strings are safely read and capped." << std::endl;
     }
 
+    // Test 29: Create highlight annotation with QuadPoints, /C, /F, /AP and verify listing & rendering
+    std::cout << "[TEST 29] Testing highlight annotation creation with QuadPoints, color, flags, /AP..." << std::endl;
+    {
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] Test 29: Failed to create temp dir" << std::endl;
+            return 1;
+        }
+        const std::string pdfPath = tempDir.filePath("test_highlight.pdf").toStdString();
+        generateTextPdfFixture(pdfPath, "Highlight Test Document Content");
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(pdfPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 29: Failed to load text fixture" << std::endl;
+            return 1;
+        }
+
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 29: Failed to get page 0" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem hl;
+        hl.subtype = pdf::AnnotationSubtype::Highlight;
+        hl.pageIndex = 0;
+        hl.left = 50.0;
+        hl.bottom = 750.0;
+        hl.right = 250.0;
+        hl.top = 780.0;
+        hl.colorArgb = 0xFFFFFF00; // Yellow
+        hl.hasColor = true;
+        hl.flags = 4; // FPDF_ANNOT_FLAG_PRINT
+        hl.contents = QStringLiteral("Sample highlight note");
+        hl.author = QStringLiteral("Tester");
+        hl.name = QStringLiteral("hl-test-29");
+        pdf::AnnotationQuad quad{50.0, 780.0, 250.0, 780.0, 50.0, 750.0, 250.0, 750.0};
+        hl.quadPoints.push_back(quad);
+
+        bool added = page->addHighlightAnnotation(hl);
+        if (!added) {
+            std::cerr << "[FAIL] Test 29: addHighlightAnnotation returned false" << std::endl;
+            return 1;
+        }
+
+        auto annots = page->listAnnotations();
+        if (annots.size() != 1) {
+            std::cerr << "[FAIL] Test 29: Expected 1 annotation listed after adding, got " << annots.size() << std::endl;
+            return 1;
+        }
+        const auto& found = annots[0];
+        if (found.subtype != pdf::AnnotationSubtype::Highlight) {
+            std::cerr << "[FAIL] Test 29: Listed subtype is not Highlight" << std::endl;
+            return 1;
+        }
+        if (found.contents != "Sample highlight note" || found.author != "Tester" || found.name != "hl-test-29") {
+            std::cerr << "[FAIL] Test 29: Listed metadata does not match: " << found.contents.toStdString() << std::endl;
+            return 1;
+        }
+        if (found.quadPoints.size() != 1) {
+            std::cerr << "[FAIL] Test 29: Expected 1 quad point, got " << found.quadPoints.size() << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem hitItem;
+        if (!page->hitTestAnnotation(100.0, 765.0, hitItem)) {
+            std::cerr << "[FAIL] Test 29: Hit test inside highlight quad failed" << std::endl;
+            return 1;
+        }
+        if (page->hitTestAnnotation(10.0, 10.0, hitItem)) {
+            std::cerr << "[FAIL] Test 29: Hit test outside highlight quad returned true" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Highlight annotation created, listed, and hit-tested successfully." << std::endl;
+    }
+
+    // Test 30: Save Pipeline: Incremental byte-prefix preservation vs Full rewrite
+    std::cout << "[TEST 30] Testing save pipeline: incremental byte-prefix match vs full rewrite..." << std::endl;
+    {
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] Test 30: Failed to create temp dir" << std::endl;
+            return 1;
+        }
+        const std::string originalPath = tempDir.filePath("original.pdf").toStdString();
+        generateTextPdfFixture(originalPath, "Save Pipeline Verification Content");
+
+        QFile origFile(QString::fromStdString(originalPath));
+        if (!origFile.open(QIODevice::ReadOnly)) {
+            std::cerr << "[FAIL] Test 30: Cannot read original file" << std::endl;
+            return 1;
+        }
+        QByteArray origBytes = origFile.readAll();
+        origFile.close();
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(originalPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 30: Failed to load original document" << std::endl;
+            return 1;
+        }
+
+        // Add highlight
+        auto page = doc->getPage(0);
+        pdf::AnnotationItem hl;
+        hl.subtype = pdf::AnnotationSubtype::Highlight;
+        hl.pageIndex = 0;
+        hl.left = 50.0;
+        hl.bottom = 750.0;
+        hl.right = 200.0;
+        hl.top = 770.0;
+        hl.colorArgb = 0xFFFFFF00;
+        hl.hasColor = true;
+        hl.flags = 4;
+        hl.contents = QStringLiteral("Saved Highlight");
+        hl.quadPoints.push_back({50.0, 770.0, 200.0, 770.0, 50.0, 750.0, 200.0, 750.0});
+        page->addHighlightAnnotation(hl);
+
+        // 1. Incremental save
+        const std::string incPath = tempDir.filePath("saved_inc.pdf").toStdString();
+#ifdef _WIN32
+        int incFd = ::_open(incPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int incFd = ::open(incPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (incFd < 0) {
+            std::cerr << "[FAIL] Test 30: Failed to open incremental temp file" << std::endl;
+            return 1;
+        }
+        uint64_t bytesWrittenInc = 0;
+        bool incOk = doc->saveAsCopy(incFd, true, bytesWrittenInc, nullptr);
+        if (!incOk || bytesWrittenInc <= static_cast<uint64_t>(origBytes.size())) {
+            std::cerr << "[FAIL] Test 30: Incremental save failed or wrote fewer bytes than original" << std::endl;
+            return 1;
+        }
+
+        // Check byte-prefix: output MUST start with original bytes exactly!
+        QFile incFile(QString::fromStdString(incPath));
+        if (!incFile.open(QIODevice::ReadOnly)) {
+            std::cerr << "[FAIL] Test 30: Failed to read saved incremental file" << std::endl;
+            return 1;
+        }
+        QByteArray incBytes = incFile.readAll();
+        incFile.close();
+
+        if (incBytes.size() <= origBytes.size()) {
+            std::cerr << "[FAIL] Test 30: Incremental file size smaller than or equal to original" << std::endl;
+            return 1;
+        }
+        if (!incBytes.startsWith(origBytes)) {
+            std::cerr << "[FAIL] Test 30: Incremental save violated byte-prefix preservation invariant!" << std::endl;
+            return 1;
+        }
+
+        // Verify incremental output can be loaded and read by a fresh document
+        auto docFresh = pdf::createDocument();
+        if (docFresh->loadFromFile(incPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 30: Fresh document failed to load incremental saved file" << std::endl;
+            return 1;
+        }
+        auto pageFresh = docFresh->getPage(0);
+        auto annotsFresh = pageFresh->listAnnotations();
+        if (annotsFresh.size() != 1 || annotsFresh[0].contents != "Saved Highlight") {
+            std::cerr << "[FAIL] Test 30: Incremental save did not persist annotation correctly" << std::endl;
+            return 1;
+        }
+
+        // 2. Full rewrite save
+        const std::string fullPath = tempDir.filePath("saved_full.pdf").toStdString();
+#ifdef _WIN32
+        int fullFd = ::_open(fullPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int fullFd = ::open(fullPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        uint64_t bytesWrittenFull = 0;
+        bool fullOk = doc->saveAsCopy(fullFd, false, bytesWrittenFull, nullptr);
+        if (!fullOk || bytesWrittenFull == 0) {
+            std::cerr << "[FAIL] Test 30: Full rewrite save failed" << std::endl;
+            return 1;
+        }
+
+        QFile fullFile(QString::fromStdString(fullPath));
+        if (!fullFile.open(QIODevice::ReadOnly)) {
+            std::cerr << "[FAIL] Test 30: Cannot read full rewrite file" << std::endl;
+            return 1;
+        }
+        QByteArray fullBytes = fullFile.readAll();
+        fullFile.close();
+
+        if (!fullBytes.startsWith("%PDF-")) {
+            std::cerr << "[FAIL] Test 30: Full rewrite did not start with PDF magic header" << std::endl;
+            return 1;
+        }
+        if (fullBytes.startsWith(origBytes)) {
+            std::cerr << "[FAIL] Test 30: Full rewrite unexpectedly preserved original byte prefix" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Incremental save preserves byte prefix; full rewrite generates valid clean PDF." << std::endl;
+    }
+
+    // Test 31: Redaction Interplay: redact page containing annotation
+    std::cout << "[TEST 31] Testing redaction interplay: annotations under redacted region..." << std::endl;
+    {
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] Test 31: Failed to create temp dir" << std::endl;
+            return 1;
+        }
+        const std::string redactPdfPath = tempDir.filePath("redact_annot.pdf").toStdString();
+        generateTextPdfFixture(redactPdfPath, "Top Secret Text to Redact");
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(redactPdfPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 31: Failed to load fixture" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+
+        // Add highlight over the secret text
+        pdf::AnnotationItem hl;
+        hl.subtype = pdf::AnnotationSubtype::Highlight;
+        hl.pageIndex = 0;
+        hl.left = 50.0;
+        hl.bottom = 750.0;
+        hl.right = 300.0;
+        hl.top = 800.0;
+        hl.colorArgb = 0xFFFFFF00;
+        hl.hasColor = true;
+        hl.contents = QStringLiteral("Secret Highlight Note");
+        hl.quadPoints.push_back({50.0, 800.0, 300.0, 800.0, 50.0, 750.0, 300.0, 750.0});
+        page->addHighlightAnnotation(hl);
+
+        // Save doc to disk first
+        const std::string annotatedPath = tempDir.filePath("annotated_for_redact.pdf").toStdString();
+#ifdef _WIN32
+        int fd = ::_open(annotatedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int fd = ::open(annotatedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        uint64_t bytesWritten = 0;
+        doc->saveAsCopy(fd, true, bytesWritten, nullptr);
+
+        QFile f(QString::fromStdString(annotatedPath));
+        if (!f.open(QIODevice::ReadOnly)) {
+            std::cerr << "[FAIL] Test 31: Failed to read annotated file" << std::endl;
+            return 1;
+        }
+        QByteArray pdfBytes = f.readAll();
+        f.close();
+
+        std::vector<pdf::redact::PageRedactions> redactions;
+        pdf::redact::PageRedactions pr;
+        pr.pageIndex = 0;
+        pr.rects.push_back(pdf::redact::Rect{50.0, 40.0, 300.0, 100.0});
+        redactions.push_back(pr);
+
+        pdf::redact::Options opts;
+        opts.dpi = 150.0;
+        opts.edgeGrowPx = 1;
+        auto result = pdf::redact::redactDocument(reinterpret_cast<const uint8_t*>(pdfBytes.constData()),
+                                                  static_cast<size_t>(pdfBytes.size()),
+                                                  "", redactions, opts);
+        if (!result.ok()) {
+            std::cerr << "[FAIL] Test 31: redactDocument failed: " << result.message << std::endl;
+            return 1;
+        }
+
+        const std::string outRedactedPath = tempDir.filePath("redacted_out.pdf").toStdString();
+        QFile outFile(QString::fromStdString(outRedactedPath));
+        if (!outFile.open(QIODevice::WriteOnly)) {
+            std::cerr << "[FAIL] Test 31: Failed to write redacted output" << std::endl;
+            return 1;
+        }
+        outFile.write(reinterpret_cast<const char*>(result.pdf.data()), static_cast<qint64>(result.pdf.size()));
+        outFile.close();
+
+        auto docRedacted = pdf::createDocument();
+        if (docRedacted->loadFromFile(outRedactedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 31: Failed to reload redacted document" << std::endl;
+            return 1;
+        }
+        auto pageRedacted = docRedacted->getPage(0);
+        auto remainingAnnots = pageRedacted->listAnnotations();
+        if (!remainingAnnots.empty()) {
+            std::cerr << "[FAIL] Test 31: Redacted document has " << remainingAnnots.size() << " surviving annotations!" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Redaction cleanly eliminates annotations and burns in raster." << std::endl;
+    }
+
+    // Test 32: EditLog Undo/Redo, Dirty tracking, and Monotonic command IDs
+    std::cout << "[TEST 32] Testing EditLog undo/redo, dirty tracking, and monotonic command IDs..." << std::endl;
+    {
+        pdf::EditLog log;
+        if (log.canUndo() || log.canRedo() || log.isDirty()) {
+            std::cerr << "[FAIL] Test 32: New EditLog initial state incorrect" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem hl1;
+        hl1.name = QStringLiteral("annot-1");
+        uint64_t id1 = log.recordAddAnnotation(0, hl1);
+        if (id1 != 1 || !log.canUndo() || log.canRedo() || !log.isDirty()) {
+            std::cerr << "[FAIL] Test 32: State after recordAddAnnotation 1 incorrect" << std::endl;
+            return 1;
+        }
+
+        log.markSaved();
+        if (log.isDirty()) {
+            std::cerr << "[FAIL] Test 32: isDirty() should be false after markSaved()" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem hl2;
+        hl2.name = QStringLiteral("annot-2");
+        uint64_t id2 = log.recordAddAnnotation(0, hl2);
+        if (id2 != 2 || !log.isDirty()) {
+            std::cerr << "[FAIL] Test 32: Second command should have ID 2 and make log dirty" << std::endl;
+            return 1;
+        }
+
+        // Test undo
+        pdf::EditCommand undone;
+        if (!log.undo(undone) || undone.id != 2 || !log.canRedo() || log.isDirty()) {
+            std::cerr << "[FAIL] Test 32: Undo failed or dirty state wrong (should match saved state)" << std::endl;
+            return 1;
+        }
+
+        // Test redo
+        pdf::EditCommand redone;
+        if (!log.redo(redone) || redone.id != 2 || log.canRedo() || !log.isDirty()) {
+            std::cerr << "[FAIL] Test 32: Redo failed or dirty state wrong" << std::endl;
+            return 1;
+        }
+
+        // Truncate redo stack by undoing then adding a new command
+        log.undo(undone);
+        pdf::AnnotationItem hl3;
+        hl3.name = QStringLiteral("annot-3");
+        uint64_t id3 = log.recordAddAnnotation(0, hl3);
+        if (id3 != 3 || log.canRedo() || !log.isDirty()) {
+            std::cerr << "[FAIL] Test 32: New command did not truncate redo stack or set ID 3" << std::endl;
+            return 1;
+        }
+
+        auto active = log.activeCommands();
+        if (active.size() != 2 || active[0].id != 1 || active[1].id != 3) {
+            std::cerr << "[FAIL] Test 32: Active commands list mismatch" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: EditLog undo/redo, dirty tracking, and monotonic IDs verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 28 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 32 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

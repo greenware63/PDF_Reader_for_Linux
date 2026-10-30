@@ -1,4 +1,4 @@
-﻿#include "TestIsolation.h"
+#include "TestIsolation.h"
 #include "ui/PdfViewerWidget.h"
 #include "ui/ImageUtils.h"
 #include "ui/MainWindow.h"
@@ -4403,7 +4403,151 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 45 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // Test 46: Milestone M2 - Highlight selection, EditLog dirty tracking, and Document Save
+    std::cout << "[TEST 46] Testing Highlight selection, EditLog dirty tracking, and Document Save..." << std::endl;
+    {
+        const std::string textPath = "widget_two_page_text.pdf";
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        if (viewer.openDocument(QString::fromStdString(textPath)) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Cannot open " << textPath << " for the highlight & save test." << std::endl;
+            return 1;
+        }
+
+        QElapsedTimer loadTimer;
+        loadTimer.start();
+        while (loadTimer.elapsed() < 3000 && !viewer.isDocumentOpen()) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] Document did not open within timeout for highlight & save test." << std::endl;
+            return 1;
+        }
+
+        // Wait for page text on page 0
+        auto pt = viewer.getPageText(0);
+        QElapsedTimer ptTimer;
+        ptTimer.start();
+        while (ptTimer.elapsed() < 3000 && !pt) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+            pt = viewer.getPageText(0);
+        }
+        if (!pt || pt->charCount() < 5) {
+            std::cerr << "[FAIL] Page text not available for highlight & save test." << std::endl;
+            return 1;
+        }
+
+        // Check initial EditLog state
+        if (viewer.editLog().isDirty() || viewer.editLog().canUndo() || viewer.editLog().canRedo()) {
+            std::cerr << "[FAIL] EditLog should be clean initially." << std::endl;
+            return 1;
+        }
+
+        // Establish selection on first 5 characters
+        const auto& pl = viewer.layout().getPageLayout(0);
+        const double dpr = viewer.effectiveDpr();
+        const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+        const auto& b0 = pt->chars[0];
+        double c0X = (b0.left + b0.right) * 0.5;
+        double c0Y = (b0.top + b0.bottom) * 0.5;
+        int64_t doc0X = pl.leftPixel + static_cast<int64_t>(std::round(c0X * effScale));
+        int64_t doc0Y = pl.topPixel + static_cast<int64_t>(std::round(c0Y * effScale));
+        double vp0X = static_cast<double>(doc0X - viewer.currentDocScrollX()) / dpr;
+        double vp0Y = static_cast<double>(doc0Y - viewer.currentDocScrollY()) / dpr;
+
+        const auto& b4 = pt->chars[4];
+        double c4X = (b4.left + b4.right) * 0.5;
+        double c4Y = (b4.top + b4.bottom) * 0.5;
+        int64_t doc4X = pl.leftPixel + static_cast<int64_t>(std::round(c4X * effScale));
+        int64_t doc4Y = pl.topPixel + static_cast<int64_t>(std::round(c4Y * effScale));
+        double vp4X = static_cast<double>(doc4X - viewer.currentDocScrollX()) / dpr;
+        double vp4Y = static_cast<double>(doc4Y - viewer.currentDocScrollY()) / dpr;
+
+        QMouseEvent press(QEvent::MouseButtonPress, QPointF(vp0X, vp0Y), QPointF(vp0X, vp0Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        QMouseEvent move(QEvent::MouseMove, QPointF(vp4X, vp4Y), QPointF(vp4X, vp4Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move);
+        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(vp4X, vp4Y), QPointF(vp4X, vp4Y), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release);
+
+        if (!viewer.hasSelection()) {
+            std::cerr << "[FAIL] Failed to establish selection for highlight test." << std::endl;
+            return 1;
+        }
+
+        // Apply highlight annotation
+        if (!viewer.highlightSelection(0xFFFFFF00)) {
+            std::cerr << "[FAIL] highlightSelection returned false." << std::endl;
+            return 1;
+        }
+
+        // Selection should be cleared after highlighting
+        if (viewer.hasSelection()) {
+            std::cerr << "[FAIL] Selection was not cleared after highlightSelection." << std::endl;
+            return 1;
+        }
+
+        // EditLog should now be dirty and allow undo
+        if (!viewer.editLog().isDirty() || !viewer.editLog().canUndo() || viewer.editLog().canRedo()) {
+            std::cerr << "[FAIL] EditLog should be dirty with canUndo=true after adding highlight." << std::endl;
+            return 1;
+        }
+
+        // Save to a new file
+        QString savedPath = QStringLiteral("widget_test_saved.pdf");
+        QFile::remove(savedPath);
+        if (!viewer.saveDocument(savedPath)) {
+            std::cerr << "[FAIL] saveDocument failed." << std::endl;
+            return 1;
+        }
+
+        // EditLog should now be clean
+        if (viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] EditLog should not be dirty after save." << std::endl;
+            return 1;
+        }
+
+        // Verify saved file on disk
+        QFile savedFile(savedPath);
+        if (!savedFile.open(QIODevice::ReadOnly) || savedFile.size() == 0) {
+            std::cerr << "[FAIL] Saved file does not exist or is empty." << std::endl;
+            return 1;
+        }
+        QByteArray savedBytes = savedFile.readAll();
+        savedFile.close();
+        if (!savedBytes.startsWith("%PDF-") || !savedBytes.contains("%%EOF")) {
+            std::cerr << "[FAIL] Saved file header or EOF marker invalid." << std::endl;
+            return 1;
+        }
+
+        // Test Undo & Redo dirty tracking
+        pdf::EditCommand cmd;
+        if (!viewer.editLog().undo(cmd)) {
+            std::cerr << "[FAIL] EditLog::undo failed." << std::endl;
+            return 1;
+        }
+        if (!viewer.editLog().isDirty() || !viewer.editLog().canRedo()) {
+            std::cerr << "[FAIL] EditLog should be dirty after undoing save point." << std::endl;
+            return 1;
+        }
+
+        if (!viewer.editLog().redo(cmd)) {
+            std::cerr << "[FAIL] EditLog::redo failed." << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().isDirty() || viewer.editLog().canRedo()) {
+            std::cerr << "[FAIL] EditLog should return to clean state when redoing back to save point." << std::endl;
+            return 1;
+        }
+
+        QFile::remove(savedPath);
+        std::cout << "  -> Passed: highlightSelection, EditLog dirty/undo/redo tracking, and saveDocument verified." << std::endl;
+    }
+    std::cout << " ALL 46 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

@@ -161,6 +161,18 @@ public:
     void requestHitTestAnnotation(int64_t documentId, int pageIndex, double xPoints, double yPoints);
 
     /**
+     * @brief Creates a highlight annotation on the specified page asynchronously.
+     * Delivered via annotationAdded() or annotationAddFailed().
+     */
+    void requestAddAnnotation(int64_t documentId, int pageIndex, const AnnotationItem& item);
+
+    /**
+     * @brief Saves the active document into a file descriptor asynchronously.
+     * Delivered via documentSaved() or documentSaveFailed().
+     */
+    void requestSaveDocument(int64_t documentId, int writeFd, bool incremental, const QString& tempFilePath = "");
+
+    /**
      * @brief Synchronously extracts text for a page on the worker thread (blocks caller).
      */
     std::shared_ptr<const PageText> getPageTextSync(int64_t documentId, int pageIndex);
@@ -292,6 +304,12 @@ Q_SIGNALS:
     /// Emitted when annotation hit-testing completes on the worker thread.
     void annotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
     void annotationHitTestFailed(int64_t documentId, int pageIndex);
+    /// Emitted when an annotation is added on the worker thread.
+    void annotationAdded(int64_t documentId, int pageIndex, const QString& annotationName);
+    void annotationAddFailed(int64_t documentId, int pageIndex, const QString& errorMessage);
+    /// Emitted when document save completes on the worker thread.
+    void documentSaved(int64_t documentId, uint64_t bytesWritten);
+    void documentSaveFailed(int64_t documentId, const QString& errorMessage);
     /// Emitted when search finds matches on a page.
     void searchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
     /// Emitted as search progresses page-by-page.

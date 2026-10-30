@@ -1222,4 +1222,85 @@ QDataStream& operator>>(QDataStream& in, HitTestAnnotationResponse& res) {
     return in;
 }
 
+// AddAnnotationRequest
+QDataStream& operator<<(QDataStream& out, const AddAnnotationRequest& req) {
+    out << static_cast<qint64>(req.documentId)
+        << static_cast<qint32>(req.pageIndex)
+        << req.annotation;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, AddAnnotationRequest& req) {
+    qint64 docId = 0;
+    qint32 pageIdx = 0;
+    in >> docId >> pageIdx >> req.annotation;
+    req.documentId = docId;
+    req.pageIndex = pageIdx;
+    if (pageIdx < 0 || !req.annotation.isValid()) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
+// AddAnnotationResponse
+QDataStream& operator<<(QDataStream& out, const AddAnnotationResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << static_cast<qint32>(res.pageIndex)
+        << res.success
+        << res.annotationName
+        << res.errorMessage;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, AddAnnotationResponse& res) {
+    qint64 docId = 0;
+    qint32 pageIdx = 0;
+    in >> docId >> pageIdx >> res.success >> res.annotationName >> res.errorMessage;
+    res.documentId = docId;
+    res.pageIndex = pageIdx;
+    if (res.annotationName.size() > 1024 || res.errorMessage.size() > 4096) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
+// SaveDocumentRequest
+QDataStream& operator<<(QDataStream& out, const SaveDocumentRequest& req) {
+    out << static_cast<qint64>(req.documentId)
+        << req.tempFilePath
+        << req.incremental;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, SaveDocumentRequest& req) {
+    qint64 docId = 0;
+    in >> docId >> req.tempFilePath >> req.incremental;
+    req.documentId = docId;
+    if (req.tempFilePath.size() > 4096) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
+// SaveDocumentResponse
+QDataStream& operator<<(QDataStream& out, const SaveDocumentResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << res.success
+        << static_cast<quint64>(res.bytesWritten)
+        << res.errorMessage;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, SaveDocumentResponse& res) {
+    qint64 docId = 0;
+    quint64 bytes = 0;
+    in >> docId >> res.success >> bytes >> res.errorMessage;
+    res.documentId = docId;
+    res.bytesWritten = bytes;
+    if (res.errorMessage.size() > 4096) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
 } // namespace pdf::ipc

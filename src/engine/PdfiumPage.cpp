@@ -616,4 +616,120 @@ bool PdfiumPage::hitTestAnnotation(double xPoints, double yPoints, AnnotationIte
     return false;
 }
 
+bool PdfiumPage::addHighlightAnnotation(const AnnotationItem& item) {
+    if (!m_page || !item.isValid()) {
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    // 1. Create the annotation in PDFium
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, FPDF_ANNOT_HIGHLIGHT);
+    if (!annot) {
+        return false;
+    }
+
+    // 2. Set /Rect (Rule 1: FPDFAnnot_SetAP returns false unless /Rect is already set)
+    FS_RECTF rect{};
+    rect.left = static_cast<float>(item.left);
+    rect.top = static_cast<float>(item.top);
+    rect.right = static_cast<float>(item.right);
+    rect.bottom = static_cast<float>(item.bottom);
+    if (!FPDFAnnot_SetRect(annot, &rect)) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    // 3. Set QuadPoints (Rule 3: Poppler requires quadpoints for Highlight)
+    if (!item.quadPoints.empty()) {
+        for (const auto& q : item.quadPoints) {
+            FS_QUADPOINTSF qp{};
+            qp.x1 = static_cast<float>(q.x1);
+            qp.y1 = static_cast<float>(q.y1);
+            qp.x2 = static_cast<float>(q.x2);
+            qp.y2 = static_cast<float>(q.y2);
+            qp.x3 = static_cast<float>(q.x3);
+            qp.y3 = static_cast<float>(q.y3);
+            qp.x4 = static_cast<float>(q.x4);
+            qp.y4 = static_cast<float>(q.y4);
+            FPDFAnnot_AppendAttachmentPoints(annot, &qp);
+        }
+    } else {
+        FS_QUADPOINTSF qp{};
+        qp.x1 = rect.left;  qp.y1 = rect.top;
+        qp.x2 = rect.right; qp.y2 = rect.top;
+        qp.x3 = rect.left;  qp.y3 = rect.bottom;
+        qp.x4 = rect.right; qp.y4 = rect.bottom;
+        FPDFAnnot_AppendAttachmentPoints(annot, &qp);
+    }
+
+    // 4. Set Color (/C) (Rule 3: Highlight additionally requires /C)
+    uint32_t a = (item.colorArgb >> 24) & 0xFF;
+    uint32_t r = (item.colorArgb >> 16) & 0xFF;
+    uint32_t g = (item.colorArgb >> 8) & 0xFF;
+    uint32_t b = item.colorArgb & 0xFF;
+    if (a == 0 && item.colorArgb == 0) {
+        r = 255; g = 255; b = 0; a = 255;
+    }
+    FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, a);
+
+    // 5. Set Flags (/F)
+    uint32_t flags = item.flags ? item.flags : FPDF_ANNOT_FLAG_PRINT;
+    FPDFAnnot_SetFlags(annot, flags);
+
+    // 6. Set /NM (unique identifier string)
+    if (!item.name.isEmpty()) {
+        const std::u16string u16 = item.name.toStdU16String();
+        FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()));
+    }
+
+    // 7. Set /Contents
+    if (!item.contents.isEmpty()) {
+        const std::u16string u16 = item.contents.toStdU16String();
+        FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()));
+    }
+
+    // 8. Set /T (Author)
+    if (!item.author.isEmpty()) {
+        const std::u16string u16 = item.author.toStdU16String();
+        FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()));
+    }
+
+    // 9. Generate Appearance Stream (/AP) in page coordinates (Rule 2 from M0)
+    std::string apStream;
+    float rf = static_cast<float>(r) / 255.0f;
+    float gf = static_cast<float>(g) / 255.0f;
+    float bf = static_cast<float>(b) / 255.0f;
+    char colBuf[128];
+    std::snprintf(colBuf, sizeof(colBuf), "%.3f %.3f %.3f rg ", rf, gf, bf);
+    apStream += colBuf;
+
+    if (!item.quadPoints.empty()) {
+        for (const auto& q : item.quadPoints) {
+            float minX = static_cast<float>(std::min({q.x1, q.x2, q.x3, q.x4}));
+            float maxX = static_cast<float>(std::max({q.x1, q.x2, q.x3, q.x4}));
+            float minY = static_cast<float>(std::min({q.y1, q.y2, q.y3, q.y4}));
+            float maxY = static_cast<float>(std::max({q.y1, q.y2, q.y3, q.y4}));
+            char rectBuf[128];
+            std::snprintf(rectBuf, sizeof(rectBuf), "%.2f %.2f %.2f %.2f re f ", minX, minY, maxX - minX, maxY - minY);
+            apStream += rectBuf;
+        }
+    } else {
+        float x = rect.left;
+        float y = rect.bottom;
+        float w = rect.right - rect.left;
+        float h = rect.top - rect.bottom;
+        char rectBuf[128];
+        std::snprintf(rectBuf, sizeof(rectBuf), "%.2f %.2f %.2f %.2f re f ", x, y, w, h);
+        apStream += rectBuf;
+    }
+
+    QString qap = QString::fromStdString(apStream);
+    const std::u16string apU16 = qap.toStdU16String();
+    FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, reinterpret_cast<FPDF_WIDESTRING>(apU16.c_str()));
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
+}
+
 } // namespace pdf

@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.24)
 project(pdf-reader LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -161,6 +161,8 @@ add_library(pdf_ipc STATIC
     src/ipc/IpcMessages.cpp
     src/ipc/WorkerClient.h
     src/ipc/WorkerClient.cpp
+    include/engine/EditLog.h
+    src/engine/EditLog.cpp
 )
 
 target_include_directories(pdf_ipc PUBLIC

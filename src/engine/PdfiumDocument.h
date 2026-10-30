@@ -8,6 +8,7 @@
 #include <vector>
 #include <atomic>
 #include <cstddef>
+#include <functional>
 
 namespace pdf {
 
@@ -34,6 +35,9 @@ public:
     std::vector<std::string> getPageLabels() const override;
     PixelBuffer renderThumbnail(int pageIndex, int targetWidth) override;
     bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const override;
+    bool saveAsCopy(int writeFd, bool incremental, uint64_t& outBytesWritten,
+                    std::function<void(uint64_t)> progressCallback = nullptr) override;
+    int signatureCount() const override;
     void close() override;
     bool isOpen() const override { return m_doc != nullptr; }
     DocumentError lastError() const override { return m_lastError; }
