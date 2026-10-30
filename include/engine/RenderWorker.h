@@ -18,6 +18,7 @@
 #include <utility>
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
+#include "engine/AnnotationTypes.h"
 #include "engine/PixelBuffer.h"
 #include "engine/PageText.h"
 #include "engine/SearchTypes.h"
@@ -148,6 +149,18 @@ public:
     void requestPageText(int64_t documentId, int pageIndex);
 
     /**
+     * @brief Requests listing of annotations for a page asynchronously.
+     * Delivered via annotationsReady() or annotationsFailed().
+     */
+    void requestListAnnotations(int64_t documentId, int pageIndex);
+
+    /**
+     * @brief Requests hit-testing an annotation at the given coordinates on a page asynchronously.
+     * Delivered via annotationHitTestReady() or annotationHitTestFailed().
+     */
+    void requestHitTestAnnotation(int64_t documentId, int pageIndex, double xPoints, double yPoints);
+
+    /**
      * @brief Synchronously extracts text for a page on the worker thread (blocks caller).
      */
     std::shared_ptr<const PageText> getPageTextSync(int64_t documentId, int pageIndex);
@@ -273,6 +286,12 @@ Q_SIGNALS:
     void redactDocumentFailed(int64_t documentId, const QString& errorMessage);
     /// Emitted when text extraction for a page completes on the worker thread.
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
+    /// Emitted when annotation listing completes on the worker thread.
+    void annotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations);
+    void annotationsFailed(int64_t documentId, int pageIndex);
+    /// Emitted when annotation hit-testing completes on the worker thread.
+    void annotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
+    void annotationHitTestFailed(int64_t documentId, int pageIndex);
     /// Emitted when search finds matches on a page.
     void searchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
     /// Emitted as search progresses page-by-page.

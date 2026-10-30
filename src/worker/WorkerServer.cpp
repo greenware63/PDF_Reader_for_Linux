@@ -38,6 +38,8 @@ bool isRequestType(uint32_t type) {
         case ipc::MessageType::RenderPageRequest:
         case ipc::MessageType::ExtractPagesRequest:
         case ipc::MessageType::RedactDocumentRequest:
+        case ipc::MessageType::ListAnnotationsRequest:
+        case ipc::MessageType::HitTestAnnotationRequest:
         case ipc::MessageType::SharedMemoryAck:
         case ipc::MessageType::WorkerControlRequest:
             return true;
@@ -84,6 +86,14 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
             this, &WorkerServer::onRedactDocumentReady, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::redactDocumentFailed,
             this, &WorkerServer::onRedactDocumentFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::annotationsReady,
+            this, &WorkerServer::onAnnotationsReady, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::annotationsFailed,
+            this, &WorkerServer::onAnnotationsFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::annotationHitTestReady,
+            this, &WorkerServer::onAnnotationHitTestReady, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::annotationHitTestFailed,
+            this, &WorkerServer::onAnnotationHitTestFailed, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::idle,
             this, &WorkerServer::onIdle, Qt::QueuedConnection);
 }
@@ -513,6 +523,26 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             break;
         }
 
+        case ipc::MessageType::ListAnnotationsRequest: {
+            ipc::ListAnnotationsRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestListAnnotations(req.documentId, req.pageIndex);
+            } else {
+                onAnnotationsFailed(req.documentId, req.pageIndex);
+            }
+            break;
+        }
+
+        case ipc::MessageType::HitTestAnnotationRequest: {
+            ipc::HitTestAnnotationRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestHitTestAnnotation(req.documentId, req.pageIndex, req.xPoints, req.yPoints);
+            } else {
+                onAnnotationHitTestFailed(req.documentId, req.pageIndex);
+            }
+            break;
+        }
+
         case ipc::MessageType::RedactDocumentRequest: {
             ipc::RedactDocumentRequest req;
             if (ipc::deserialize(payload, req)) {
@@ -783,6 +813,41 @@ void WorkerServer::onRedactDocumentReady(int64_t documentId, const ipc::RedactDo
 void WorkerServer::onRedactDocumentFailed(int64_t documentId, const QString& errorMessage) {
     sendPacket(ipc::MessageType::RedactDocumentFailedResponse,
                ipc::serialize(ipc::RedactDocumentFailedResponse{documentId, errorMessage}));
+}
+
+
+void WorkerServer::onAnnotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations) {
+    ipc::ListAnnotationsResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.success = true;
+    res.annotations = annotations;
+    sendPacket(ipc::MessageType::ListAnnotationsResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onAnnotationsFailed(int64_t documentId, int pageIndex) {
+    ipc::ListAnnotationsResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.success = false;
+    sendPacket(ipc::MessageType::ListAnnotationsResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onAnnotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation) {
+    ipc::HitTestAnnotationResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.hit = hit;
+    res.annotation = annotation;
+    sendPacket(ipc::MessageType::HitTestAnnotationResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onAnnotationHitTestFailed(int64_t documentId, int pageIndex) {
+    ipc::HitTestAnnotationResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.hit = false;
+    sendPacket(ipc::MessageType::HitTestAnnotationResponse, ipc::serialize(res));
 }
 
 } // namespace pdf::worker

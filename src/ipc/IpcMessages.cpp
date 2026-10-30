@@ -328,6 +328,92 @@ QDataStream& operator>>(QDataStream& in, SearchMatch& match) {
     return in;
 }
 
+
+// AnnotationQuad
+QDataStream& operator<<(QDataStream& out, const AnnotationQuad& q) {
+    out << q.x1 << q.y1 << q.x2 << q.y2 << q.x3 << q.y3 << q.x4 << q.y4;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, AnnotationQuad& q) {
+    in >> q.x1 >> q.y1 >> q.x2 >> q.y2 >> q.x3 >> q.y3 >> q.x4 >> q.y4;
+    if (!q.isValid()) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
+// AnnotationItem
+QDataStream& operator<<(QDataStream& out, const AnnotationItem& item) {
+    out << static_cast<qint32>(item.pageIndex)
+        << static_cast<qint32>(item.annotIndex)
+        << static_cast<quint32>(item.subtype)
+        << item.left << item.top << item.right << item.bottom
+        << item.contents << item.author << item.name << item.modificationDate
+        << static_cast<quint32>(item.flags)
+        << static_cast<quint32>(item.colorArgb)
+        << item.hasColor
+        << static_cast<quint32>(item.quadPoints.size());
+    for (const auto& q : item.quadPoints) {
+        out << q;
+    }
+    out << item.uri;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, AnnotationItem& item) {
+    qint32 pageIdx = 0, annotIdx = 0;
+    quint32 subtypeVal = 0;
+    in >> pageIdx >> annotIdx >> subtypeVal;
+    item.pageIndex = pageIdx;
+    item.annotIndex = annotIdx;
+    item.subtype = (subtypeVal <= static_cast<quint32>(AnnotationSubtype::Redact))
+                   ? static_cast<AnnotationSubtype>(subtypeVal)
+                   : AnnotationSubtype::Unknown;
+
+    in >> item.left >> item.top >> item.right >> item.bottom;
+    if (!item.isValid()) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+
+    in >> item.contents >> item.author >> item.name >> item.modificationDate;
+    if (item.contents.size() > 32768 || item.author.size() > 256 ||
+        item.name.size() > 1024 || item.modificationDate.size() > 256) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+
+    quint32 flags = 0, colorArgb = 0;
+    in >> flags >> colorArgb >> item.hasColor;
+    item.flags = flags;
+    item.colorArgb = colorArgb;
+
+    quint32 qCount = 0;
+    in >> qCount;
+    if (!validateCollection(in, qCount, 4096, 64)) {
+        return in;
+    }
+    item.quadPoints.clear();
+    item.quadPoints.reserve(qCount);
+    for (quint32 i = 0; i < qCount; ++i) {
+        AnnotationQuad q;
+        in >> q;
+        if (!q.isValid()) {
+            in.setStatus(QDataStream::ReadCorruptData);
+            return in;
+        }
+        item.quadPoints.push_back(q);
+    }
+
+    in >> item.uri;
+    if (item.uri.size() > 4096) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    return in;
+}
+
 } // namespace pdf
 
 namespace pdf::ipc {
@@ -1028,6 +1114,104 @@ QDataStream& operator>>(QDataStream& in, RedactDocumentFailedResponse& res) {
     qint64 docId = 0;
     in >> docId >> res.errorMessage;
     res.documentId = docId;
+    return in;
+}
+
+
+using pdf::validateCollection;
+
+// ListAnnotationsRequest
+QDataStream& operator<<(QDataStream& out, const ListAnnotationsRequest& req) {
+    out << static_cast<qint64>(req.documentId) << static_cast<qint32>(req.pageIndex);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, ListAnnotationsRequest& req) {
+    qint64 docId = 0;
+    qint32 pageIdx = 0;
+    in >> docId >> pageIdx;
+    req.documentId = docId;
+    req.pageIndex = pageIdx;
+    if (pageIdx < 0) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
+// ListAnnotationsResponse
+QDataStream& operator<<(QDataStream& out, const ListAnnotationsResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << static_cast<qint32>(res.pageIndex)
+        << res.success
+        << static_cast<quint32>(res.annotations.size());
+    for (const auto& a : res.annotations) {
+        out << a;
+    }
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, ListAnnotationsResponse& res) {
+    qint64 docId = 0;
+    qint32 pageIdx = 0;
+    in >> docId >> pageIdx >> res.success;
+    res.documentId = docId;
+    res.pageIndex = pageIdx;
+
+    quint32 count = 0;
+    in >> count;
+    if (!validateCollection(in, count, 10000, 32)) {
+        return in;
+    }
+    res.annotations.clear();
+    res.annotations.reserve(count);
+    for (quint32 i = 0; i < count; ++i) {
+        AnnotationItem item;
+        in >> item;
+        if (in.status() != QDataStream::Ok) {
+            return in;
+        }
+        res.annotations.push_back(std::move(item));
+    }
+    return in;
+}
+
+// HitTestAnnotationRequest
+QDataStream& operator<<(QDataStream& out, const HitTestAnnotationRequest& req) {
+    out << static_cast<qint64>(req.documentId)
+        << static_cast<qint32>(req.pageIndex)
+        << req.xPoints
+        << req.yPoints;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, HitTestAnnotationRequest& req) {
+    qint64 docId = 0;
+    qint32 pageIdx = 0;
+    in >> docId >> pageIdx >> req.xPoints >> req.yPoints;
+    req.documentId = docId;
+    req.pageIndex = pageIdx;
+    if (pageIdx < 0 || std::isnan(req.xPoints) || std::isnan(req.yPoints) ||
+        std::isinf(req.xPoints) || std::isinf(req.yPoints)) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
+// HitTestAnnotationResponse
+QDataStream& operator<<(QDataStream& out, const HitTestAnnotationResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << static_cast<qint32>(res.pageIndex)
+        << res.hit
+        << res.annotation;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, HitTestAnnotationResponse& res) {
+    qint64 docId = 0;
+    qint32 pageIdx = 0;
+    in >> docId >> pageIdx >> res.hit >> res.annotation;
+    res.documentId = docId;
+    res.pageIndex = pageIdx;
     return in;
 }
 

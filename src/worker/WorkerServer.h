@@ -56,6 +56,10 @@ private Q_SLOTS:
     void onExtractPagesFailed(int64_t documentId, int firstPage, int lastPage);
     void onRedactDocumentReady(int64_t documentId, const pdf::ipc::RedactDocumentResponse& response);
     void onRedactDocumentFailed(int64_t documentId, const QString& errorMessage);
+    void onAnnotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations);
+    void onAnnotationsFailed(int64_t documentId, int pageIndex);
+    void onAnnotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
+    void onAnnotationHitTestFailed(int64_t documentId, int pageIndex);
 
 private:
     void dispatchMessage(ipc::MessageType type, const QByteArray& payload, std::vector<int> fds);

@@ -153,6 +153,22 @@ void testPayloadWithAllTypes(const uint8_t* data, size_t size) {
         RedactDocumentFailedResponse msg;
         deserialize(payload, msg);
     }
+    {
+        ListAnnotationsRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        ListAnnotationsResponse msg;
+        deserialize(payload, msg);
+    }
+    {
+        HitTestAnnotationRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        HitTestAnnotationResponse msg;
+        deserialize(payload, msg);
+    }
 }
 
 } // namespace
@@ -232,6 +248,58 @@ int main(int argc, char* argv[]) {
         res.pageCount = 1;
         res.warnings.push_back(QStringLiteral("Signatures invalidated"));
         res.verification.push_back(QStringLiteral("Checks passed"));
+        QByteArray b = serialize(res);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        ListAnnotationsRequest req{42, 3};
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        ListAnnotationsResponse res;
+        res.documentId = 42;
+        res.pageIndex = 0;
+        res.success = true;
+        pdf::AnnotationItem item;
+        item.pageIndex = 0;
+        item.annotIndex = 0;
+        item.subtype = pdf::AnnotationSubtype::Highlight;
+        item.left = 72.0; item.top = 700.0; item.right = 200.0; item.bottom = 680.0;
+        item.contents = QStringLiteral("Sample highlight note");
+        item.author = QStringLiteral("Reviewer");
+        item.name = QStringLiteral("annot-1");
+        item.hasColor = true;
+        item.colorArgb = 0xFFFFFF00;
+        item.quadPoints.push_back(pdf::AnnotationQuad{72.0, 700.0, 200.0, 700.0, 72.0, 680.0, 200.0, 680.0});
+        res.annotations.push_back(item);
+
+        pdf::AnnotationItem link;
+        link.pageIndex = 0;
+        link.annotIndex = 1;
+        link.subtype = pdf::AnnotationSubtype::Link;
+        link.left = 72.0; link.top = 200.0; link.right = 250.0; link.bottom = 180.0;
+        link.uri = QStringLiteral("https://example.org");
+        res.annotations.push_back(link);
+
+        QByteArray b = serialize(res);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        HitTestAnnotationRequest req{42, 0, 100.5, 690.0};
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        HitTestAnnotationResponse res;
+        res.documentId = 42;
+        res.pageIndex = 0;
+        res.hit = true;
+        res.annotation.pageIndex = 0;
+        res.annotation.subtype = pdf::AnnotationSubtype::Text;
+        res.annotation.left = 50.0; res.annotation.top = 100.0;
+        res.annotation.right = 70.0; res.annotation.bottom = 80.0;
+        res.annotation.contents = QStringLiteral("Note contents");
         QByteArray b = serialize(res);
         corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
     }

@@ -765,6 +765,66 @@ void RenderWorker::enqueueRequests(std::vector<TileRenderRequest> requests) {
     m_cv.notify_one();
 }
 
+
+void RenderWorker::requestListAnnotations(int64_t documentId, int pageIndex) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        Q_EMIT annotationsFailed(documentId, pageIndex);
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, pageIndex]() {
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT annotationsFailed(documentId, pageIndex);
+            return;
+        }
+        noteProgress(ipc::WorkerOp::Annotate);
+        struct AnnotGuard {
+            RenderWorker* w;
+            ~AnnotGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (!page) {
+            Q_EMIT annotationsFailed(documentId, pageIndex);
+            return;
+        }
+        auto annots = page->listAnnotations();
+        Q_EMIT annotationsReady(documentId, pageIndex, annots);
+    }});
+    m_cv.notify_one();
+}
+
+void RenderWorker::requestHitTestAnnotation(int64_t documentId, int pageIndex, double xPoints, double yPoints) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        Q_EMIT annotationHitTestFailed(documentId, pageIndex);
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, pageIndex, xPoints, yPoints]() {
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT annotationHitTestFailed(documentId, pageIndex);
+            return;
+        }
+        noteProgress(ipc::WorkerOp::Annotate);
+        struct AnnotGuard {
+            RenderWorker* w;
+            ~AnnotGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (!page) {
+            Q_EMIT annotationHitTestFailed(documentId, pageIndex);
+            return;
+        }
+        AnnotationItem item;
+        bool hit = page->hitTestAnnotation(xPoints, yPoints, item);
+        Q_EMIT annotationHitTestReady(documentId, pageIndex, hit, item);
+    }});
+    m_cv.notify_one();
+}
+
 void RenderWorker::requestPageText(int64_t documentId, int pageIndex) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_running.load() || documentId != m_activeDocumentId.load()) {

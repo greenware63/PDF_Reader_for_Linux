@@ -2244,8 +2244,262 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: loadFromDescriptor correctly handled invalid fd, buffered load, and pread streaming." << std::endl;
     }
 
+
+    // Test 25: Annotation listing and hit-testing on annots_forms.pdf
+    std::cout << "[TEST 25] Testing annotation listing and hit-testing (FreeText, Square, Text, Popup, Link, Widgets)..." << std::endl;
+    {
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        const std::string formPath = root + "/tests/fixtures/redaction/annots_forms.pdf";
+
+        auto doc = pdf::createDocument();
+        if (!doc || doc->loadFromFile(formPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 25: Cannot open form fixture " << formPath << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 25: Page 0 is null" << std::endl;
+            return 1;
+        }
+
+        auto annots = page->listAnnotations();
+        if (annots.size() < 6) {
+            std::cerr << "[FAIL] Test 25: Expected at least 6 annotations, found " << annots.size() << std::endl;
+            return 1;
+        }
+
+        bool foundFreeText = false;
+        bool foundSquare = false;
+        bool foundTextNote = false;
+        bool foundPopup = false;
+        bool foundLink = false;
+        bool foundWidget = false;
+
+        for (const auto& a : annots) {
+            if (a.subtype == pdf::AnnotationSubtype::FreeText && a.contents.contains("CANARY-ANNOT-CONTENTS")) {
+                foundFreeText = true;
+                if (a.author != "CANARY-AUTHOR") {
+                    std::cerr << "[FAIL] Test 25: FreeText author mismatch: " << a.author.toStdString() << std::endl;
+                    return 1;
+                }
+            } else if (a.subtype == pdf::AnnotationSubtype::Square && a.contents.contains("visible blue box")) {
+                foundSquare = true;
+            } else if (a.subtype == pdf::AnnotationSubtype::Text && a.contents.contains("CANARY-NOTE")) {
+                foundTextNote = true;
+                if (a.author != "CANARY-NOTE-AUTHOR") {
+                    std::cerr << "[FAIL] Test 25: Note author mismatch: " << a.author.toStdString() << std::endl;
+                    return 1;
+                }
+            } else if (a.subtype == pdf::AnnotationSubtype::Popup && a.contents.contains("CANARY-POPUP")) {
+                foundPopup = true;
+            } else if (a.subtype == pdf::AnnotationSubtype::Link && a.uri == "https://canary-uri.example/CANARY-URI") {
+                foundLink = true;
+            } else if (a.subtype == pdf::AnnotationSubtype::Widget) {
+                foundWidget = true;
+            }
+        }
+
+        if (!foundFreeText || !foundSquare || !foundTextNote || !foundPopup || !foundLink || !foundWidget) {
+            std::cerr << "[FAIL] Test 25: Missing annotation subtype! free=" << foundFreeText
+                      << " sq=" << foundSquare << " note=" << foundTextNote
+                      << " popup=" << foundPopup << " link=" << foundLink
+                      << " widget=" << foundWidget << std::endl;
+            return 1;
+        }
+
+        // Test hit-testing
+        pdf::AnnotationItem hitItem;
+        if (!page->hitTestAnnotation(100.0, 615.0, hitItem)) {
+            std::cerr << "[FAIL] Test 25: Hit test at (100, 615) inside FreeText missed" << std::endl;
+            return 1;
+        }
+        if (hitItem.subtype != pdf::AnnotationSubtype::FreeText) {
+            std::cerr << "[FAIL] Test 25: Hit item subtype is not FreeText: " << static_cast<int>(hitItem.subtype) << std::endl;
+            return 1;
+        }
+
+        if (!page->hitTestAnnotation(100.0, 210.0, hitItem)) {
+            std::cerr << "[FAIL] Test 25: Hit test at (100, 210) inside Link missed" << std::endl;
+            return 1;
+        }
+        if (hitItem.subtype != pdf::AnnotationSubtype::Link || hitItem.uri != "https://canary-uri.example/CANARY-URI") {
+            std::cerr << "[FAIL] Test 25: Hit link URI mismatch: " << hitItem.uri.toStdString() << std::endl;
+            return 1;
+        }
+
+        if (page->hitTestAnnotation(10.0, 10.0, hitItem)) {
+            std::cerr << "[FAIL] Test 25: Hit test at (10, 10) unexpectedly succeeded on subtype "
+                      << static_cast<int>(hitItem.subtype) << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: annotation listing and hit-testing correctly extracted all subtypes and links." << std::endl;
+    }
+
+    // Test 26: Widget double-draw check
+    std::cout << "[TEST 26] Testing widget double-draw invariant (FPDF_ANNOT does not double-render with drawFormFields)..." << std::endl;
+    {
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        const std::string formPath = root + "/tests/fixtures/redaction/annots_forms.pdf";
+
+        auto doc = pdf::createDocument();
+        if (!doc || doc->loadFromFile(formPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 26: Cannot open form fixture " << formPath << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 26: Page 0 is null" << std::endl;
+            return 1;
+        }
+
+        // Form field box: [72, 275, 210, 291]
+        const int fx0 = 72, fy0 = 275, fx1 = 210, fy1 = 291;
+
+        auto whole = page->renderWholePage(1.0, 1.0, 0);
+        if (!whole.isValid()) {
+            std::cerr << "[FAIL] Test 26: Whole page render failed" << std::endl;
+            return 1;
+        }
+
+        auto countDark = [](const pdf::PixelBuffer& b, int x0, int y0, int x1, int y1) {
+            int n = 0;
+            for (int y = std::max(0, y0); y < std::min(b.height(), y1); ++y) {
+                const uint8_t* row = b.data() + static_cast<size_t>(y) * b.stride();
+                for (int x = std::max(0, x0); x < std::min(b.width(), x1); ++x) {
+                    const uint8_t* px = row + x * 4;
+                    if ((px[0] + px[1] + px[2]) / 3 < 128) ++n;
+                }
+            }
+            return n;
+        };
+
+        const int wholeInk = countDark(whole, fx0, fy0, fx1, fy1);
+        // Single-pass rendering of "CANARY-FORM-VALUE" produces ~363 dark pixels
+        if (wholeInk < 300 || wholeInk > 420) {
+            std::cerr << "[FAIL] Test 26: Form field ink count " << wholeInk
+                      << " indicates missing or double-rendered widget appearance" << std::endl;
+            return 1;
+        }
+
+        // Now render through the tile pipeline covering the form field
+        auto tile = page->renderTile({0, 256, 300, 64}, 1.0, 1.0, 0);
+        if (!tile.isValid()) {
+            std::cerr << "[FAIL] Test 26: Tile render failed" << std::endl;
+            return 1;
+        }
+
+        const int tileInk = countDark(tile, fx0, fy0 - 256, fx1, fy1 - 256);
+        // Tile ink should match whole page ink within font rasterizer subpixel anti-aliasing delta (< 5%)
+        const int delta = std::abs(tileInk - wholeInk);
+        if (delta > 20) {
+            std::cerr << "[FAIL] Test 26: Tile vs whole-page widget ink mismatch: tile=" << tileInk
+                      << " whole=" << wholeInk << " delta=" << delta << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: widget appearances render cleanly in a single pass without double-draw artifacts." << std::endl;
+    }
+
+    // Test 27: Multi-line text markup annotations with quad-points and sub-quad hit testing
+    std::cout << "[TEST 27] Testing multi-line text markup annotations with quad-points and sub-quad hit testing..." << std::endl;
+    {
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] Test 27: Cannot create temp dir" << std::endl;
+            return 1;
+        }
+        const std::string markupPdfPath = tempDir.filePath("markup_quads.pdf").toStdString();
+
+        {
+            std::string pdf;
+            pdf += "%PDF-1.4\n";
+            std::vector<size_t> offsets;
+            auto addObj = [&](int num, const std::string& c) {
+                offsets.push_back(pdf.size());
+                pdf += std::to_string(num) + " 0 obj\n" + c + "\nendobj\n";
+            };
+            addObj(1, "<< /Type /Catalog /Pages 2 0 R >>");
+            addObj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+            addObj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>");
+            addObj(4, "<< /Type /Annot /Subtype /Highlight /Rect [100 650 300 720] "
+                      "/Contents (Multi-line highlight text) /T (Reviewer) /NM (highlight-001) "
+                      "/C [1 1 0] "
+                      "/QuadPoints [100 720 300 720 100 700 300 700  100 670 250 670 100 650 250 650] >>");
+            size_t xref = pdf.size();
+            pdf += "xref\n0 5\n0000000000 65535 f \n";
+            for (int i = 1; i <= 4; ++i) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", offsets[i - 1]);
+                pdf += buf;
+            }
+            pdf += "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%%%EOF\n";
+
+            std::ofstream out(markupPdfPath, std::ios::binary);
+            out.write(pdf.data(), pdf.size());
+            out.close();
+        }
+
+        auto doc = pdf::createDocument();
+        if (!doc || doc->loadFromFile(markupPdfPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 27: Failed to load synthetic markup fixture" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 27: Page 0 is null" << std::endl;
+            return 1;
+        }
+
+        auto annots = page->listAnnotations();
+        if (annots.size() != 1) {
+            std::cerr << "[FAIL] Test 27: Expected 1 annotation, got " << annots.size() << std::endl;
+            return 1;
+        }
+        const auto& item = annots[0];
+        if (item.subtype != pdf::AnnotationSubtype::Highlight) {
+            std::cerr << "[FAIL] Test 27: Expected Highlight subtype, got " << static_cast<int>(item.subtype) << std::endl;
+            return 1;
+        }
+        if (item.quadPoints.size() != 2) {
+            std::cerr << "[FAIL] Test 27: Expected 2 quads, got " << item.quadPoints.size() << std::endl;
+            return 1;
+        }
+        if (item.contents != "Multi-line highlight text" || item.author != "Reviewer" || item.name != "highlight-001") {
+            std::cerr << "[FAIL] Test 27: Metadata mismatch: " << item.contents.toStdString() << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem hit;
+        if (!page->hitTestAnnotation(150.0, 710.0, hit)) {
+            std::cerr << "[FAIL] Test 27: Point inside Quad 1 missed" << std::endl;
+            return 1;
+        }
+
+        if (!page->hitTestAnnotation(150.0, 660.0, hit)) {
+            std::cerr << "[FAIL] Test 27: Point inside Quad 2 missed" << std::endl;
+            return 1;
+        }
+
+        if (page->hitTestAnnotation(150.0, 685.0, hit)) {
+            std::cerr << "[FAIL] Test 27: Point in gap between quads should NOT hit markup" << std::endl;
+            return 1;
+        }
+
+        if (page->hitTestAnnotation(50.0, 710.0, hit)) {
+            std::cerr << "[FAIL] Test 27: Point outside rect should miss" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: QuadPoints correctly parsed and precise sub-quad hit testing verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 24 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 27 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
