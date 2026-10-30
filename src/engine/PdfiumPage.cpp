@@ -513,40 +513,33 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations() {
                              (static_cast<uint32_t>(b));
         }
 
-        auto readStringKey = [&](const char* key) -> QString {
-            unsigned long len = FPDFAnnot_GetStringValue(annot, key, nullptr, 0);
-            if (len <= 2) {
+        auto readStringKey = [&](const char* key, size_t maxChars) -> QString {
+            unsigned long reqLen = FPDFAnnot_GetStringValue(annot, key, nullptr, 0);
+            if (reqLen <= 2) {
                 return {};
             }
-            if (len > 64 * 1024 + 2) {
-                len = 64 * 1024 + 2;
+            // Defense against unbounded hostile allocations (cap at 1 MiB)
+            if (reqLen > 1024 * 1024) {
+                return {};
             }
-            std::vector<unsigned char> buf(len, 0);
-            unsigned long actual = FPDFAnnot_GetStringValue(annot, key, reinterpret_cast<FPDF_WCHAR*>(buf.data()), len);
-            if (actual <= 2) {
+            std::vector<unsigned char> buf(reqLen, 0);
+            unsigned long actual = FPDFAnnot_GetStringValue(annot, key, reinterpret_cast<FPDF_WCHAR*>(buf.data()), reqLen);
+            if (actual != reqLen || actual <= 2 || actual > buf.size()) {
                 return {};
             }
             const char16_t* u16 = reinterpret_cast<const char16_t*>(buf.data());
             size_t charCount = (actual - 2) / sizeof(char16_t);
-            return QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
+            QString str = QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
+            if (static_cast<size_t>(str.size()) > maxChars) {
+                str.truncate(static_cast<qsizetype>(maxChars));
+            }
+            return str;
         };
 
-        item.contents = readStringKey("Contents");
-        if (item.contents.size() > 32768) {
-            item.contents.truncate(32768);
-        }
-        item.author = readStringKey("T");
-        if (item.author.size() > 256) {
-            item.author.truncate(256);
-        }
-        item.name = readStringKey("NM");
-        if (item.name.size() > 1024) {
-            item.name.truncate(1024);
-        }
-        item.modificationDate = readStringKey("M");
-        if (item.modificationDate.size() > 256) {
-            item.modificationDate.truncate(256);
-        }
+        item.contents = readStringKey("Contents", 32768);
+        item.author = readStringKey("T", 256);
+        item.name = readStringKey("NM", 1024);
+        item.modificationDate = readStringKey("M", 256);
 
         if (FPDFAnnot_HasAttachmentPoints(annot)) {
             size_t qCount = FPDFAnnot_CountAttachmentPoints(annot);
@@ -571,8 +564,10 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations() {
                     unsigned long uriLen = FPDFAction_GetURIPath(m_doc.get(), act, nullptr, 0);
                     if (uriLen > 1 && uriLen <= 4096) {
                         std::vector<char> uriBuf(uriLen, 0);
-                        FPDFAction_GetURIPath(m_doc.get(), act, uriBuf.data(), uriLen);
-                        item.uri = QString::fromUtf8(uriBuf.data());
+                        unsigned long actualUri = FPDFAction_GetURIPath(m_doc.get(), act, uriBuf.data(), uriLen);
+                        if (actualUri > 0 && actualUri <= uriBuf.size()) {
+                            item.uri = QString::fromUtf8(uriBuf.data(), static_cast<qsizetype>(std::min<size_t>(actualUri, uriBuf.size()) - 1));
+                        }
                     }
                 }
             }

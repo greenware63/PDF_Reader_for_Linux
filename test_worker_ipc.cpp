@@ -2131,12 +2131,16 @@ int main(int argc, char* argv[]) {
         }
 
         QLocalSocket sock;
-        for (int i = 0; i < 50; ++i) {
-            sock.connectToServer(sName);
-            if (sock.waitForConnected(100)) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-        if (sock.state() != QLocalSocket::ConnectedState) {
+#ifdef Q_OS_LINUX
+        sock.setSocketOptions(QLocalSocket::AbstractNamespaceOption);
+#endif
+        bool connected = waitFor([&]() {
+            if (sock.state() != QLocalSocket::ConnectedState && sock.state() != QLocalSocket::ConnectingState) {
+                sock.connectToServer(sName);
+            }
+            return sock.state() == QLocalSocket::ConnectedState;
+        }, 5000);
+        if (!connected) {
             std::cerr << "[FAIL] 23: Failed to connect raw socket to worker" << std::endl;
             worker.kill();
             return 1;
