@@ -118,7 +118,7 @@ Descriptor policy change (must be updated in `threat_model.md` and tests togethe
 | `AddAnnotation` | UI→worker | id, page, subtype, rect, quad points, colour, opacity, border, text, author | quads ≤ 4096; text ≤ 64 KiB UTF-16; author ≤ 256 chars |
 | `AddInkAnnotation` | UI→worker | id, page, strokes, colour, width | strokes ≤ 256; total points ≤ 100 000 |
 | `ModifyAnnotation` / `DeleteAnnotation` | UI→worker | id (+ changed fields) | same field limits |
-| `ListAnnotations` / `HitTest` | UI→worker | page (+ point) | reply ≤ 10 000 items, text clipped |
+| `ListAnnotations` / `HitTest` | UI→worker | page (+ point) | reply ≤ 10 000 items, text clipped (≤ 32,768 UTF-16 chars / 64 KiB), total per-page reply ≤ 16 MiB (truncated flag) |
 | `SaveRequest` (+1 fd) / `SaveProgress` / `SaveResult` | both | mode, revision / progress / result | one fd; `bytesWritten` verified by the UI |
 
 Rules carried over from existing messages: every collection length is validated before allocation; reject NaN/inf/out-of-page geometry; reject unknown subtypes; the worker answers with failure messages, never crashes the connection. The existing `IpcFuzzTestSuite` gains one mutated-deserialisation corpus per new message; M1 also adds hostile-PDF corpus items (huge or cyclic `/Annots`, absurd quad counts, deep popup parent chains).
@@ -151,8 +151,8 @@ Manual, per release that changes annotations (checklist in the PR): open our out
 
 | # | Content | Exit criteria |
 |---|---|---|
-| M0 | Spike with the **pinned** PDFium: create/set AP/save both ways for each target subtype; record results here | §2 records chromium/8100 results and the popup-link API constraint; CI `qpdf --check` and pixel-comparison validation still need to run |
-| M1 | **Read-only**: list, render, hit-test existing annotations; hostile-PDF fuzz corpus; no writes anywhere | Tests incl. double-draw check for widgets; fuzz additions |
+| M0 | Spike with the **pinned** PDFium: create/set AP/save both ways for each target subtype; record results here | Completed: §2 & §2.1 record chromium/8100 results, `qpdf --check`, and Linux Poppler pixel verification |
+| M1 | **Read-only**: list, render, hit-test existing annotations; hostile-PDF fuzz corpus; no writes anywhere | Completed in PR #32: bounds checking, exact ray-casting quad hit-testing, 16 MiB per-page IPC response budget, hostile fixtures, full CI green |
 | M2 | Save pipeline + **one** type (highlight) end to end: edit log, undo/redo, save descriptor, validation, atomic commit, crash replay (in-memory log replay; disk persistence journal deferred post-M2); warning dialog on unsaved edits; tests for each failure branch | Tests for each failure branch (bad prefix, truncated output, worker killed mid-save); threat model updated; redaction-interplay test |
 | M3 | Underline, strikeout, squiggly, text note (+popup), ink, square, circle, freetext | Per-type round-trip tests in the matrix |
 | M4 | Stamps (images) and file attachments | Separate threat review; image size/dimension limits |
