@@ -1066,6 +1066,27 @@ int main(int argc, char* argv[]) {
         QCoreApplication::processEvents();
         return iterations;
     };
+    // Like pumpUntilIdle, but also measures how long the event loop went without turning: `maxGapMs` is the longest
+    // time between two consecutive loop turns, `elapsedMs` the whole load. A UI thread that blocks during the load
+    // shows up as one gap that covers (almost) the entire load; a loaded machine only stretches all gaps.
+    struct TimedPump { int iterations; qint64 elapsedMs; qint64 maxGapMs; };
+    auto pumpUntilIdleTimed = [&](int timeoutMs) {
+        QElapsedTimer total;
+        total.start();
+        qint64 maxGap = 0;
+        qint64 lastTurn = 0;
+        int iterations = 0;
+        while (viewer.isLoading() && total.elapsed() < timeoutMs) {
+            QThread::msleep(10);
+            QCoreApplication::processEvents();
+            const qint64 now = total.elapsed();
+            maxGap = std::max(maxGap, now - lastTurn);
+            lastTurn = now;
+            ++iterations;
+        }
+        QCoreApplication::processEvents();
+        return TimedPump{iterations, total.elapsed(), maxGap};
+    };
     // Helper: render the viewport once, drain the worker, and report whether the first tile of the open document is cached
     auto firstTileRenders = [&]() {
         const int64_t docId = viewer.currentDocumentId();
@@ -1097,7 +1118,8 @@ int main(int argc, char* argv[]) {
         QMetaObject::Connection c2 = QObject::connect(&viewer, &ui::PdfViewerWidget::loadingChanged, &viewer,
                                                       [&](bool l, const QString&) { (l ? loadingTrue : loadingFalse)++; });
 
-        viewer.renderWorker().setOpenDelayForTesting(std::chrono::milliseconds(300));
+        constexpr int kOpenDelayMs = 1000;
+        viewer.renderWorker().setOpenDelayForTesting(std::chrono::milliseconds(kOpenDelayMs));
         const int64_t idBefore = viewer.currentDocumentId();
 
         QElapsedTimer callTimer;
@@ -1118,17 +1140,31 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // The event loop must keep spinning while the worker loads (a blocked UI would give ~1 iteration)
-        const int iterations = pumpUntilIdle(5000);
+        // The event loop must keep turning while the worker loads. Counting loop iterations is NOT a valid check: on
+        // a CPU-starved runner each turn is slow, so a healthy load can complete in as few as 4 iterations (it
+        // did, in CI). Measure the longest stall between loop turns relative to the whole load instead: a blocked UI
+        // thread produces one gap of ~100% of the load, a merely slow machine stretches every gap evenly.
+        const TimedPump pump = pumpUntilIdleTimed(10000);
         viewer.renderWorker().setOpenDelayForTesting(std::chrono::milliseconds(0));
+        std::cout << "     load took " << pump.elapsedMs << " ms, " << pump.iterations << " loop turns, longest gap "
+                  << pump.maxGapMs << " ms" << std::endl;
 #ifdef PDF_WORKER_TEST_HOOKS
-        if (iterations < 5) {
-            std::cerr << "[FAIL] UI thread was not responsive during load (iterations=" << iterations << ")" << std::endl;
+        // The injected delay must really have been applied (otherwise the load was not asynchronous at all) ...
+        if (pump.elapsedMs < kOpenDelayMs * 8 / 10) {
+            std::cerr << "[FAIL] async open finished in " << pump.elapsedMs << " ms despite a " << kOpenDelayMs
+                      << " ms injected delay" << std::endl;
+            return 1;
+        }
+        // ... and the UI thread must not have been blocked for (most of) it.
+        if (pump.maxGapMs * 4 > pump.elapsedMs * 3) {
+            std::cerr << "[FAIL] UI thread was not responsive during load (longest gap between event-loop turns "
+                      << pump.maxGapMs << " ms of a " << pump.elapsedMs << " ms load, " << pump.iterations
+                      << " turns)" << std::endl;
             return 1;
         }
 #else
-        if (iterations < 1) {
-            std::cerr << "[FAIL] UI thread was not responsive during load (iterations=" << iterations << ")" << std::endl;
+        if (pump.iterations < 1) {
+            std::cerr << "[FAIL] UI thread was not responsive during load (iterations=" << pump.iterations << ")" << std::endl;
             return 1;
         }
 #endif
@@ -1147,7 +1183,7 @@ int main(int argc, char* argv[]) {
         }
         QObject::disconnect(c1);
         QObject::disconnect(c2);
-        std::cout << "  -> Passed: call returned in " << callMs << " ms, UI pumped " << iterations
+        std::cout << "  -> Passed: call returned in " << callMs << " ms, UI pumped " << pump.iterations
                   << " iterations during the load, new document renders." << std::endl;
     }
 

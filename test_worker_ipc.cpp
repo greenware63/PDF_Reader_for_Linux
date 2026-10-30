@@ -2007,7 +2007,17 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 if (failed) return 1;
-                std::cout << "  -> 21 passed: " << checked << " font root(s) reported by fontconfig were probed; none under /run/host is blocked." << std::endl;
+                int hostFontRoots = 0;
+                for (auto it = rootToFile.cbegin(); it != rootToFile.cend(); ++it) {
+                    if (it.key().startsWith("/run/host/")) ++hostFontRoots;
+                }
+                std::cout << "  -> 21 passed: " << checked << " probe(s) of font roots reported by fontconfig; every root under /run/host that"
+                             " was present is readable (" << hostFontRoots << " such font root(s))." << std::endl;
+                if (hostFontRoots == 0) {
+                    // Passing with nothing to probe says nothing about host fonts: say so explicitly.
+                    std::cout << "  -> 21b SKIPPED: fontconfig reported no font root under /run/host/, so Flatpak host-font exposure "
+                                 "was NOT verified here (not running under Flatpak, or the sandbox maps no host fonts)." << std::endl;
+                }
             }
         }
 #else

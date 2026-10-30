@@ -268,19 +268,62 @@ if command -v flatpak-builder >/dev/null 2>&1; then
         flatpak-builder --disable-rofiles-fuse --state-dir="${STATE_DIR}" --force-clean --user --repo="${REPO_DIR}" "${BUILD_DIR}" "${SELFTEST_MANIFEST}"
         pass "flatpak-builder build (self-test variant) completed successfully"
 
+        # Run through an INSTALLED build with `flatpak run`, not `flatpak-builder --run`: only a real `flatpak run`
+        # sets up the sandbox the way users get it (host fonts under /run/host, the app's finish-args, portals).
+        # The installed app is the self-test variant (test binary + hooks), so it is always removed again on exit.
+        APP_ID="org.greenware.PDFReader"
+        SELFTEST_REMOTE="pdf-reader-selftest-local"
+        # The self-test build has the SAME app id as the real app. Never replace (and later uninstall) a real install.
+        if flatpak info "${APP_ID}" >/dev/null 2>&1; then
+            fail "${APP_ID} is already installed; refusing to overwrite it with the self-test build. Uninstall it first (flatpak uninstall ${APP_ID}) and rerun."
+            exit 1
+        fi
+        cleanup_selftest_install() {
+            flatpak --user uninstall -y "${APP_ID}" >/dev/null 2>&1 || true
+            flatpak --user remote-delete --force "${SELFTEST_REMOTE}" >/dev/null 2>&1 || true
+        }
+        trap cleanup_selftest_install EXIT   # only armed here, i.e. only after we know we are the one installing it
+        if flatpak --user remote-add --if-not-exists --no-gpg-verify "${SELFTEST_REMOTE}" "${REPO_DIR}" \
+           && flatpak --user install -y --noninteractive "${SELFTEST_REMOTE}" "${APP_ID}"; then
+            pass "self-test build installed locally for 'flatpak run' (removed again when this script exits)"
+        else
+            fail "could not install the self-test build from ${REPO_DIR}; 'flatpak run' based checks cannot run"
+            exit 1
+        fi
+
         # Smoke only: --help returns before the worker applies any sandbox, so this proves nothing about confinement.
-        if (cd "${BUILD_DIR}" && flatpak-builder --run "${BUILD_DIR}" "${SELFTEST_MANIFEST}" pdf_worker --help) >/dev/null 2>&1; then
+        if flatpak run --command=pdf_worker "${APP_ID}" --help >/dev/null 2>&1; then
             pass "pdf_worker starts inside the Flatpak sandbox (smoke test only, no confinement is checked here)"
         else
             fail "pdf_worker failed to start inside the Flatpak sandbox"
         fi
 
+        # Diagnostics: what does THIS sandbox actually expose? (Host fonts are believed to be mapped under /run/host.)
+        DIAG_LOG="${REPO_ROOT}/.flatpak-diagnostics.log"
+        flatpak run --command=sh "${APP_ID}" -c '
+            echo "--- ls -la /run/host"; ls -la /run/host 2>&1 | head -40
+            echo "--- ls /run/host/fonts (first 15)"; ls /run/host/fonts 2>&1 | head -15
+            echo "--- ls /run/host/user-fonts (first 15)"; ls /run/host/user-fonts 2>&1 | head -15
+            echo "--- ls /run/host/local-fonts (first 15)"; ls /run/host/local-fonts 2>&1 | head -15
+            echo "--- /run/host/font-dirs.xml"; cat /run/host/font-dirs.xml 2>&1 | head -40
+            echo "--- fontconfig directories (fc-list roots, 4 path components)"
+            fc-list : file 2>&1 | sed "s/:\$//" | cut -d/ -f1-4 | sort | uniq -c | sort -rn | head -20
+            echo "--- fontconfig sources mentioning /run/host"; grep -rn "run/host" /etc/fonts 2>&1 | head -10
+        ' >"${DIAG_LOG}" 2>&1 || true
+        echo "  Sandbox diagnostics (full log: ${DIAG_LOG}):"
+        sed 's/^/        /' "${DIAG_LOG}"
+        if flatpak run --command=sh "${APP_ID}" -c 'ls /run/host/fonts /run/host/user-fonts /run/host/local-fonts >/dev/null 2>&1'; then
+            pass "sandbox exposes at least one host font directory under /run/host"
+        else
+            skip "sandbox exposes NO host font directory under /run/host (see diagnostics above); host-font checks cannot apply here"
+        fi
+
         # The real check: run the worker IPC suite against /app/bin/pdf_worker INSIDE the sandbox. This covers
         # Landlock read/write confinement (Test 8/16), fail-closed startup, descriptor passing and lifecycle
-        # (Tests 15-19) and non-Latin text rendering incl. the system-font fallback (Test 20).
+        # (Tests 15-19), non-Latin text rendering incl. the system-font fallback (Test 20) and font-root
+        # readability (Test 21).
         SELFTEST_LOG="${REPO_ROOT}/.flatpak-selftest.log"
-        if (cd "${BUILD_DIR}" && flatpak-builder --run "${BUILD_DIR}" "${SELFTEST_MANIFEST}" \
-               /app/bin/test_worker_ipc /app/bin/pdf_worker /app/share/pdf-reader/selftest/sample.pdf) \
+        if flatpak run --command=/app/bin/test_worker_ipc "${APP_ID}" /app/bin/pdf_worker /app/share/pdf-reader/selftest/sample.pdf \
                >"${SELFTEST_LOG}" 2>&1; then
             pass "test_worker_ipc passed inside the Flatpak sandbox (log: ${SELFTEST_LOG})"
         else
@@ -303,6 +346,11 @@ if command -v flatpak-builder >/dev/null 2>&1; then
         else
             fail "sandbox log has neither 21 passed nor 21 SKIPPED"
         fi
+        if grep -q "21b SKIPPED" "${SELFTEST_LOG}"; then
+            skip "Test 21b skipped: no font root under /run/host was reported by fontconfig inside the sandbox, so host-font exposure was NOT verified (see diagnostics above)"
+        elif grep -q "21 passed" "${SELFTEST_LOG}"; then
+            pass "host font roots under /run/host were present and readable by the confined worker (Test 21b)"
+        fi
         if grep -q "20b passed" "${SELFTEST_LOG}"; then
             pass "system-font fallback renders non-embedded CJK text inside the sandbox (Test 20b)"
         elif grep -q "20b SKIPPED" "${SELFTEST_LOG}"; then
@@ -311,7 +359,7 @@ if command -v flatpak-builder >/dev/null 2>&1; then
             fail "sandbox log has neither 20b passed nor 20b SKIPPED"
         fi
         # 20b is reported above; do not count its SKIPPED line a second time.
-        if grep -v "20b\|21 SKIPPED" "${SELFTEST_LOG}" | grep -q "SKIPPED\|Skipped"; then
+        if grep -v "20b\|21 SKIPPED\|21b" "${SELFTEST_LOG}" | grep -q "SKIPPED\|Skipped"; then
             skip "other sub-tests reported Skipped inside the sandbox (see log)"
         fi
     else
