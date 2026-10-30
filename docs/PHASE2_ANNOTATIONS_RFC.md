@@ -1,6 +1,6 @@
 # RFC: Phase 2 — Annotations, the save pipeline, and (later) interactive forms
 
-Status: **PROPOSED ARCHITECTURE (Decisions recorded). Pinned M0 feasibility results recorded; automated qpdf and pixel-comparison validation remains pending.**
+Status: **PROPOSED ARCHITECTURE (Decisions recorded). Pinned M0 feasibility results recorded, including `qpdf --check` and a Poppler pixel check on Linux.**
 Scope: standard PDF annotations first; AcroForm filling reuses the same edit and save machinery afterwards.
 Out of scope (unchanged standing rules): digital *signing*, signature *validation* (a separate sandboxed verifier later), JavaScript, XFA, replacing PDFium, any change to the MIT licence, and anything that overwrites the user's original file without an explicit, confirmed action.
 
@@ -35,7 +35,28 @@ Facts from the **pinned** PDFium headers and runtime bundled with the project (c
 
 The pinned public API has `FPDFAnnot_GetLinkedAnnot()` for reading linked annotation entries but no public setter for `/Popup` or `/Parent`. The initial implementation can keep popup presentation in UI overlays and store note text in the associated annotation's standard `/Contents` string using `FPDFAnnot_SetStringValue()`. It will not synthesize standalone popup dictionaries unless a supported low-level API is deliberately introduced and reviewed. This keeps the UI-owned edit log as the source of popup presentation.
 
-The scratch run completed **26/26 save/reopen checks** (13 subtypes × 2 save modes). The output PDFs were rendered by Poppler. `qpdf --check` and pixel-comparison validation remain pending for the CI spike; the local Windows environment had no `qpdf` executable. The CI workflow installs both `qpdf` and `poppler-utils`, so those checks can run there.
+The scratch run completed **26/26 save/reopen checks** (13 subtypes × 2 save modes). The output PDFs were rendered by Poppler. `qpdf --check` and the Poppler pixel check were run separately on Linux (section 2.1).
+
+### 2.1 Linux verification of the spike (`qpdf` and Poppler pixel check)
+
+Re-run on Linux against the SHA256-pinned `pdfium-linux-x64.tgz` (chromium/8100, PDFium 157.0.8100.0) with `tests/spikes/m0_annotation_spike.py`: 13 subtypes x {incremental, full} = 26 outputs from `sample.pdf`, each with a red `/AP` filling the annotation rectangle.
+
+| Check | Result |
+|---|---|
+| `FPDF_SaveAsCopy` succeeds | 26/26 |
+| `qpdf --check` reports no syntax or stream errors | 26/26 |
+| Incremental output begins with the exact original bytes | 13/13 |
+| Full-rewrite output begins with the exact original bytes | 0/13 |
+| `/AP` present in the saved annotation | 26/26 |
+| Poppler (`pdftoppm`, 72 dpi) paints our red `/AP` inside the rectangle | 12/13 subtypes, both modes (see below) |
+
+Findings that change the implementation rules (all three were first hit as failures in this spike):
+
+1. **`FPDFAnnot_SetAP` returns false unless the annotation already has a valid `/Rect`.** Set the rectangle first and check the return value. Note that `FS_RECTF` is ordered left, **top**, right, bottom.
+2. **PDFium sets the appearance `/BBox` equal to the annotation `/Rect`, so the stream content must use page coordinates.** Content drawn at 0,0 is clipped away: output passed `qpdf` and PDFium accepted it, yet Poppler painted nothing. `qpdf` validity does not prove visibility, which is why the pixel check is a required test.
+3. **Poppler regenerates or skips markup annotations that lack data.** Highlight/Underline/Squiggly/StrikeOut painted only after `FPDFAnnot_AppendAttachmentPoints` (QuadPoints), and Highlight additionally needed `FPDFAnnot_SetColor` (`/C`). FileAttachment painted nothing without an `/FS` file specification, which stays out of scope until M4.
+
+Not yet checked: Okular, Foxit, Acrobat (see section 9), pixel comparison against an expected image rather than a colour-presence count, and rendering of text-bearing annotations (FreeText with a font).
 
 These are feasibility results only; they do not implement annotation editing or move file attachments into the product scope. The save pipeline must still treat worker output as untrusted, check the byte prefix for incremental saves, reopen the output, and avoid claiming that signatures are valid.
 
