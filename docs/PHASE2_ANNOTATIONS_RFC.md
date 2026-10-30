@@ -1,6 +1,6 @@
 # RFC: Phase 2 — Annotations, the save pipeline, and (later) interactive forms
 
-Status: **PROPOSED ARCHITECTURE (Decisions recorded). Ready for Milestone M0 spike.**
+Status: **PROPOSED ARCHITECTURE (Decisions recorded). Pinned M0 feasibility results recorded; automated qpdf and pixel-comparison validation remains pending.**
 Scope: standard PDF annotations first; AcroForm filling reuses the same edit and save machinery afterwards.
 Out of scope (unchanged standing rules): digital *signing*, signature *validation* (a separate sandboxed verifier later), JavaScript, XFA, replacing PDFium, any change to the MIT licence, and anything that overwrites the user's original file without an explicit, confirmed action.
 
@@ -14,26 +14,30 @@ Everything shipped so far reads documents. Annotations are the first feature tha
 | The UI never parses PDF | The UI links no PDFium (zero PDFium linkage) | Annotation geometry, hit testing and appearance all live in PDFium |
 | Hostile worker output is untrusted | Bounded, typed, fuzzed IPC (T6) | Every new command and result is new attack surface |
 
-## 2. What was measured before writing this (feasibility)
+## 2. Pinned PDFium feasibility and Milestone M0 spike
 
-Facts from the **pinned** PDFium headers (chromium/8100, `fpdf_annot.h`, `fpdf_save.h`):
+Facts from the **pinned** PDFium headers and runtime bundled with the project (chromium/8100; PDFium version 157.0.8100.0):
 
-* `FPDFPage_CreateAnnot` supports creating: circle, fileattachment, freetext, highlight, ink, link, popup, square, squiggly, stamp, strikeout, text, underline.
-* `FPDF_SaveAsCopy` accepts `FPDF_INCREMENTAL` and `FPDF_NO_INCREMENTAL` (mutually exclusive); there is `FPDFAnnot_SetAP` for explicit appearance streams.
-* The existing redaction path already saves with `FPDF_NO_INCREMENTAL` and a progress heartbeat (`Redaction.cpp`); the existing page export returns bytes over IPC.
+* `FPDFPage_CreateAnnot` supports all 13 target subtypes listed below. `FPDF_SaveAsCopy` accepts `FPDF_INCREMENTAL` and `FPDF_NO_INCREMENTAL`; `FPDFAnnot_SetAP` writes an explicit normal appearance stream.
+* A scratch spike on `sample.pdf` created each subtype, set a rectangle and custom red `/AP`, saved in both modes, reopened the output in PDFium, and checked the stored appearance and rendered pixels.
+* In this run, **all 13 incremental outputs began with the exact original bytes**; none of the full-rewrite outputs did. This is evidence for the byte-prefix check in the save pipeline. It preserves the signed revision's bytes but does not establish signature validity under every validator or certification policy; the application does not validate signatures.
+* PDFium rendered the custom appearance for 12 subtypes. Popup produced no standalone page-bitmap appearance, consistent with its role as a popup associated with another annotation. Poppler's `pdftoppm` successfully rendered all 26 output PDFs; this was a successful-render check, not a pixel-by-pixel comparison against the expected appearance.
+* The spike exercised the following subtype-specific public APIs:
 
-A quick experiment on `sample.pdf` with **another** PDFium build (pypdfium2 5.13.0, PDFium 153.0.7999.0 — *not* the pinned binary): create a Highlight, set rect, quad points, colour; save both ways.
-
-| Observation | Incremental | Full rewrite |
+| Subtype(s) | API/data exercised | Result |
 |---|---|---|
-| Save succeeds | yes | yes |
-| Output starts with the exact original bytes | **yes** | no |
-| `qpdf --check` | no errors | no errors |
-| Highlight present in output | yes | yes |
-| Size (original 12.5 KB) | 25.8 KB (re-emits page objects) | 13.4 KB |
-| `/AP` appearance stream written for the new Highlight | **no** (annotation has `/C`, `/CA`, `/QuadPoints`, `/Rect` only) | not checked |
+| Highlight, Underline, Squiggly, StrikeOut | `FPDFAnnot_AppendAttachmentPoints`; count checked with `FPDFAnnot_CountAttachmentPoints` | Set and counted |
+| Ink | `FPDFAnnot_AddInkStroke` | Stroke accepted |
+| Link | `FPDFAnnot_SetURI` | URI action accepted |
+| FileAttachment | `FPDFAnnot_AddFileAttachment` + `FPDFAttachment_SetFile` | Embedded payload accepted |
+| Text, FreeText, Square, Circle, Stamp | Rectangle and custom `/AP` | Saved and reopened |
+| Popup | Rectangle and custom `/AP`; parent-child link not created | Public API limitation below |
 
-Consequences that shape the design: (a) incremental save really does preserve the original bytes as a prefix, which is the property that keeps existing signatures byte-range intact, so the UI can **verify** it instead of trusting the worker; (b) PDFium does not generate appearance streams for the annotations it creates, so interoperability with Acrobat/Foxit/Preview needs **our own `/AP`** (via `FPDFAnnot_SetAP`); (c) **milestone M0 must repeat this with the pinned binary** before any code depends on it.
+The pinned public API has `FPDFAnnot_GetLinkedAnnot()` for reading linked annotation entries but no public setter for `/Popup` or `/Parent`. The initial implementation can keep popup presentation in UI overlays and store note text in the associated annotation's standard `/Contents` string using `FPDFAnnot_SetStringValue()`. It will not synthesize standalone popup dictionaries unless a supported low-level API is deliberately introduced and reviewed. This keeps the UI-owned edit log as the source of popup presentation.
+
+The scratch run completed **26/26 save/reopen checks** (13 subtypes × 2 save modes). The output PDFs were rendered by Poppler. `qpdf --check` and pixel-comparison validation remain pending for the CI spike; the local Windows environment had no `qpdf` executable. The CI workflow installs both `qpdf` and `poppler-utils`, so those checks can run there.
+
+These are feasibility results only; they do not implement annotation editing or move file attachments into the product scope. The save pipeline must still treat worker output as untrusted, check the byte prefix for incremental saves, reopen the output, and avoid claiming that signatures are valid.
 
 ## 3. Architecture
 
@@ -126,7 +130,7 @@ Manual, per release that changes annotations (checklist in the PR): open our out
 
 | # | Content | Exit criteria |
 |---|---|---|
-| M0 | Spike with the **pinned** PDFium: create/set AP/save both ways for each target subtype; record results here | Table in §2 repeated for chromium/8100 and for every subtype; decide the `/AP` generation approach |
+| M0 | Spike with the **pinned** PDFium: create/set AP/save both ways for each target subtype; record results here | §2 records chromium/8100 results and the popup-link API constraint; CI `qpdf --check` and pixel-comparison validation still need to run |
 | M1 | **Read-only**: list, render, hit-test existing annotations; hostile-PDF fuzz corpus; no writes anywhere | Tests incl. double-draw check for widgets; fuzz additions |
 | M2 | Save pipeline + **one** type (highlight) end to end: edit log, undo/redo, save descriptor, validation, atomic commit, crash replay (in-memory log replay; disk persistence journal deferred post-M2); warning dialog on unsaved edits; tests for each failure branch | Tests for each failure branch (bad prefix, truncated output, worker killed mid-save); threat model updated; redaction-interplay test |
 | M3 | Underline, strikeout, squiggly, text note (+popup), ink, square, circle, freetext | Per-type round-trip tests in the matrix |
