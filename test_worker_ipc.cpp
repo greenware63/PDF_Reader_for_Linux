@@ -1281,6 +1281,21 @@ int main(int argc, char* argv[]) {
         item.rects.push_back(pdf::ipc::RedactRect{50.0, 50.0, 300.0, 120.0});
         redactions.push_back(item);
 
+        // Host snapshot for diagnosing a (so far unreproduced) one-off stall at the start of this test: it has
+        // only ever been seen on a freshly built tree in one sandbox VM, never in CI. Printed on failure only.
+        auto hostSnapshot = []() {
+            QString out;
+            QFile la(QStringLiteral("/proc/loadavg"));
+            if (la.open(QIODevice::ReadOnly)) out += QStringLiteral("loadavg=") + QString::fromLatin1(la.readAll()).trimmed();
+            QFile st(QStringLiteral("/proc/stat"));
+            if (st.open(QIODevice::ReadOnly)) {
+                const QList<QByteArray> f = st.readLine().simplified().split(' ');
+                if (f.size() > 8) out += QStringLiteral(" cpu(user,sys,idle,iowait,steal jiffies)=") + QString::fromLatin1(f[1]) + ","
+                    + QString::fromLatin1(f[3]) + "," + QString::fromLatin1(f[4]) + "," + QString::fromLatin1(f[5]) + "," + QString::fromLatin1(f[8]);
+            }
+            return out;
+        };
+        const QString hostBefore = hostSnapshot();
         QElapsedTimer clock;
         clock.start();
         const auto r = client.redactDocumentSync(1, redactions, 150.0, 1, kSilenceMs);
@@ -1289,6 +1304,8 @@ int main(int argc, char* argv[]) {
         if (workerDied || !r.success) {
             std::cerr << "[FAIL] Long redaction did not complete (success=" << r.success << ", workerDied=" << workerDied
                       << ", after " << elapsedMs << " ms): " << r.errorMessage.toStdString() << std::endl;
+            std::cerr << "       host before: " << hostBefore.toStdString() << std::endl;
+            std::cerr << "       host after:  " << hostSnapshot().toStdString() << std::endl;
             return 1;
         }
         if (r.pageCount != kHeartbeatTestPages || !r.pdfBytes.startsWith("%PDF-")) {
