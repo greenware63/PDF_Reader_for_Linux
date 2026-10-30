@@ -1,6 +1,6 @@
 # RFC: Phase 2 — Annotations, the save pipeline, and (later) interactive forms
 
-Status: **DRAFT for review. No implementation code in this PR.**
+Status: **PROPOSED ARCHITECTURE (Decisions recorded). Ready for Milestone M0 spike.**
 Scope: standard PDF annotations first; AcroForm filling reuses the same edit and save machinery afterwards.
 Out of scope (unchanged standing rules): digital *signing*, signature *validation* (a separate sandboxed verifier later), JavaScript, XFA, replacing PDFium, any change to the MIT licence, and anything that overwrites the user's original file without an explicit, confirmed action.
 
@@ -44,6 +44,7 @@ The **UI process owns the authoritative edit log**: an ordered list of semantic 
 * Undo/redo is a cursor in the log; it lives where the keyboard handling lives and needs no PDFium.
 * A worker crash or watchdog kill loses nothing: the UI starts a new worker, reopens the document through a fresh descriptor and **replays the log**.
 * The worker's PDFium document is a derived, disposable view.
+* Annotation author is **blank by default** for user privacy (no automatic leakage of local `$USER` or hostname); a user-configurable author name will be provided in application settings.
 
 Annotations created by us carry a standard `/NM` (annotation name) entry holding the id, so ids survive save/reload and map to PDFium objects without relying on array indices (which shift on delete).
 
@@ -73,7 +74,11 @@ Why this holds up: Landlock restricts *opening*, not writing to an already-open 
 
 Descriptor policy change (must be updated in `threat_model.md` and tests together): today only `OpenDocumentRequest` may carry a descriptor. After this RFC: `OpenDocumentRequest` (read-only descriptor) and `SaveRequest` (write-only descriptor), each exactly one, everything else still closed and dropped. Test 19's table-driven cases extend to `SaveRequest`.
 
-**Defaults.** The default action is *Save As* to a new file. *Save* in place requires an explicit confirmation naming the file, is atomic, and is refused if the destination changed on disk since open (size/mtime/inode check). The standing rule that a redaction output never overwrites its source stays as is.
+**Defaults.**
+* The default action is **Save As** to a new file.
+* *Save* in place requires an explicit confirmation naming the file, is atomic, and is refused if the destination changed on disk since open (size/mtime/inode check).
+* Under Flatpak, saves operate strictly via the **XDG Desktop File Chooser Portal** (`org.freedesktop.portal.FileChooser`), requiring no extra filesystem write permissions in the sandbox manifest.
+* The standing rule that a redaction output never overwrites its source stays as is.
 
 ## 5. Incremental vs full save, and signatures
 
@@ -115,7 +120,7 @@ Automated (CI already installs `qpdf` and `poppler-utils`):
 * Render the saved file with `pdftoppm` and compare the annotation region to our own render (tolerance-based pixel check) — this is the check that catches missing `/AP`.
 * `pdftotext`/`qpdf --json` confirm annotation count, subtype, `/Contents`, `/NM` after a round trip; re-open in our reader and compare the list.
 
-Manual, per release that changes annotations (checklist in the PR): open our output in Acrobat Reader, Okular, Foxit and a browser PDF viewer; edit/delete an annotation there; re-open in ours. We need volunteers or access for Acrobat and Foxit; until then they are **stated as untested**, not assumed.
+Manual, per release that changes annotations (checklist in the PR): open our output in Acrobat Reader, Okular, Foxit and a browser PDF viewer; edit/delete an annotation there; re-open in ours. Acrobat and Foxit are **stated as untested / unverified** until external platform verification can be arranged.
 
 ## 10. Milestones (each a small PR with its own tests)
 
@@ -123,15 +128,15 @@ Manual, per release that changes annotations (checklist in the PR): open our out
 |---|---|---|
 | M0 | Spike with the **pinned** PDFium: create/set AP/save both ways for each target subtype; record results here | Table in §2 repeated for chromium/8100 and for every subtype; decide the `/AP` generation approach |
 | M1 | **Read-only**: list, render, hit-test existing annotations; hostile-PDF fuzz corpus; no writes anywhere | Tests incl. double-draw check for widgets; fuzz additions |
-| M2 | Save pipeline + **one** type (highlight) end to end: edit log, undo/redo, save descriptor, validation, atomic commit, crash replay | Tests for each failure branch (bad prefix, truncated output, worker killed mid-save); threat model updated; redaction-interplay test |
+| M2 | Save pipeline + **one** type (highlight) end to end: edit log, undo/redo, save descriptor, validation, atomic commit, crash replay (in-memory log replay; disk persistence journal deferred post-M2); warning dialog on unsaved edits; tests for each failure branch | Tests for each failure branch (bad prefix, truncated output, worker killed mid-save); threat model updated; redaction-interplay test |
 | M3 | Underline, strikeout, squiggly, text note (+popup), ink, square, circle, freetext | Per-type round-trip tests in the matrix |
 | M4 | Stamps (images) and file attachments | Separate threat review; image size/dimension limits |
 | M5 | Interactive AcroForm filling on the same log and pipeline | Event dispatch into the form-fill environment, incremental save of values |
 
-## 11. Questions for the project owner
+## 11. Decisions recorded by project owner
 
-1. Default save behaviour: *Save As* by default with confirmed in-place Save (this RFC's proposal), or in-place by default?
-2. Annotation author: OS account name, a settings field, or blank by default (privacy)?
-3. Crash-recovery journal (persist the edit log to the app data directory) in M2 or later?
-4. Is a Flatpak-only `--filesystem` change acceptable for saving next to the original, or must saves always go through the file-chooser portal (the current manifest only grants `xdg-documents:ro`)?
-5. Who can test Acrobat and Foxit interoperability?
+1. **Default save behaviour**: **Save As** by default to protect existing user files from accidental overwrites. In-place *Save* is supported only upon explicit user confirmation, executes atomically via temp-file commit, and aborts if file modification time or size changed externally.
+2. **Annotation author**: **Blank by default** to preserve privacy and avoid leaking system usernames or environment details. An optional author name field will be available in user settings.
+3. **Crash-recovery journal**: Defer persistent disk journaling to post-M2. Milestone M2 implements in-memory edit log crash replay (surviving background worker process terminations) and clear UI warnings before closing windows with unsaved changes.
+4. **Flatpak permissions**: No filesystem write permissions will be added to the Flatpak manifest. All file saves in Flatpak will operate strictly through the **XDG Desktop File Chooser Portal** (`org.freedesktop.portal.FileChooser`).
+5. **Acrobat & Foxit testing**: Compatibility with Acrobat and Foxit will be documented as **untested / unverified** until manual verification on Windows/macOS is performed. Automated CI tests rely on `qpdf`, `pdftoppm` render comparisons, and `poppler-utils`.
