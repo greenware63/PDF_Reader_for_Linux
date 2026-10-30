@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include <vector>
 #include <fstream>
 #include <cmath>
@@ -2498,8 +2498,88 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: QuadPoints correctly parsed and precise sub-quad hit testing verified." << std::endl;
     }
 
+    // Test 28: Rotated non-rectangular quad hit-testing and oversized annotation text memory-safety
+    std::cout << "[TEST 28] Testing rotated non-rectangular quad hit-testing and oversized annotation safety..." << std::endl;
+    {
+        // 1. Direct geometric unit tests on rotated quad (diamond rotated 45 degrees)
+        // Vertices: Top (100, 200), Right (150, 150), Bottom (100, 100), Left (50, 150)
+        // PDF Quad order: p1=(100, 200) TL, p2=(150, 150) TR, p3=(50, 150) BL, p4=(100, 100) BR
+        pdf::AnnotationQuad diamond{100.0, 200.0, 150.0, 150.0, 50.0, 150.0, 100.0, 100.0};
+        if (!diamond.isValid()) {
+            std::cerr << "[FAIL] Test 28: Rotated quad should be valid" << std::endl;
+            return 1;
+        }
+
+        // Center (100, 150) is strictly inside
+        if (!diamond.contains(100.0, 150.0)) {
+            std::cerr << "[FAIL] Test 28: Center of rotated quad missed" << std::endl;
+            return 1;
+        }
+
+        // Corner of the axis-aligned bounding box (55, 195) is inside bbox [50..150, 100..200]
+        // but strictly OUTSIDE the rotated diamond!
+        // Previous AABB check returned true (false hit). Precise polygon test MUST return false.
+        if (diamond.contains(55.0, 195.0)) {
+            std::cerr << "[FAIL] Test 28: Bounding-box corner falsely reported as hit for rotated quad" << std::endl;
+            return 1;
+        }
+
+        if (diamond.contains(145.0, 195.0) || diamond.contains(55.0, 105.0) || diamond.contains(145.0, 105.0)) {
+            std::cerr << "[FAIL] Test 28: Other bbox corners falsely reported as hit for rotated quad" << std::endl;
+            return 1;
+        }
+
+        // 2. Synthetic PDF with oversized annotation string (100 KiB)
+        QTemporaryDir tempDir;
+        if (tempDir.isValid()) {
+            const std::string longAnnotPdf = tempDir.filePath("oversized_annot.pdf").toStdString();
+            std::string bigString(100 * 1024, 'X');
+            std::string pdf;
+            pdf += "%PDF-1.4\n";
+            std::vector<size_t> offsets;
+            auto addObj = [&](int num, const std::string& c) {
+                offsets.push_back(pdf.size());
+                pdf += std::to_string(num) + " 0 obj\n" + c + "\nendobj\n";
+            };
+            addObj(1, "<< /Type /Catalog /Pages 2 0 R >>");
+            addObj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+            addObj(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [4 0 R] >>");
+            addObj(4, "<< /Type /Annot /Subtype /Text /Rect [100 650 200 750] /Contents (" + bigString + ") >>");
+            size_t xref = pdf.size();
+            pdf += "xref\n0 5\n0000000000 65535 f \n";
+            for (int i = 1; i <= 4; ++i) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", offsets[i - 1]);
+                pdf += buf;
+            }
+            pdf += "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
+
+            std::ofstream out(longAnnotPdf, std::ios::binary);
+            out.write(pdf.data(), pdf.size());
+            out.close();
+
+            auto doc = pdf::createDocument();
+            if (doc && doc->loadFromFile(longAnnotPdf) == pdf::DocumentError::None) {
+                auto page = doc->getPage(0);
+                if (page) {
+                    auto annots = page->listAnnotations();
+                    if (annots.size() == 1) {
+                        // The string must be safely capped and not crash
+                        if (annots[0].contents.size() != 32768) {
+                            std::cerr << "[FAIL] Test 28: Expected oversized contents capped at 32768 chars, got "
+                                      << annots[0].contents.size() << std::endl;
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        std::cout << "  -> Passed: rotated non-rectangular quads reject false hits and oversized strings are safely read and capped." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 27 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 28 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
