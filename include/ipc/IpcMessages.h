@@ -303,6 +303,7 @@ struct ListAnnotationsResponse {
     int64_t documentId{0};
     int pageIndex{0};
     bool success{false};
+    bool truncated{false};   // list is incomplete (caps or response budget reached)
     std::vector<pdf::AnnotationItem> annotations;
 };
 

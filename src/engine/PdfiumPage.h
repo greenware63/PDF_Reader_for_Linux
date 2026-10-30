@@ -36,7 +36,7 @@ public:
     PixelBuffer renderWholePage(double scale, double devicePixelRatio, int rotation = 0) override;
     PixelBuffer renderThumbnail(int targetWidth, int rotation = 0) override;
     PageText extractText() override;
-    std::vector<AnnotationItem> listAnnotations() override;
+    std::vector<AnnotationItem> listAnnotations(bool* truncated = nullptr) override;
     bool hitTestAnnotation(double xPoints, double yPoints, AnnotationItem& out) override;
 
     static void setSimulateGetTextFailureForTesting(bool simulate) noexcept;

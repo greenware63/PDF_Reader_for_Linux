@@ -816,12 +816,13 @@ void WorkerServer::onRedactDocumentFailed(int64_t documentId, const QString& err
 }
 
 
-void WorkerServer::onAnnotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations) {
+void WorkerServer::onAnnotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations, bool truncated) {
     ipc::ListAnnotationsResponse res;
     res.documentId = documentId;
     res.pageIndex = pageIndex;
     res.success = true;
     res.annotations = annotations;
+    res.truncated = truncated;
     sendPacket(ipc::MessageType::ListAnnotationsResponse, ipc::serialize(res));
 }
 

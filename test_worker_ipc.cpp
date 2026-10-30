@@ -2190,6 +2190,86 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: malformed annotation request was cleanly rejected without hang." << std::endl;
     }
 
+    // --- TEST 24: A hostile page cannot make the annotation list exceed the IPC frame (document session survives) ---
+    std::cout << "[TEST 24] Testing the annotation list response budget (hostile fixtures + deserializer)..." << std::endl;
+    {
+        // 24a: the deserializer enforces the same total budget as the engine, so a hostile worker cannot make the
+        // UI buffer an oversized list even if each item is individually within its caps.
+        pdf::ipc::ListAnnotationsResponse big;
+        big.success = true;
+        for (int i = 0; i < 600; ++i) {   // 600 x 32 768 chars x 2 bytes = ~39 MB > 16 MiB budget
+            pdf::AnnotationItem it;
+            it.annotIndex = i;
+            it.right = 10.0;
+            it.bottom = 10.0;
+            it.contents = QString(32768, QLatin1Char('A'));
+            big.annotations.push_back(std::move(it));
+        }
+        pdf::ipc::ListAnnotationsResponse back;
+        if (pdf::ipc::deserialize(pdf::ipc::serialize(big), back)) {
+            std::cerr << "[FAIL] 24a: deserializer accepted an annotation list over the response budget" << std::endl;
+            return 1;
+        }
+        pdf::ipc::ListAnnotationsResponse small;
+        small.success = true;
+        small.truncated = true;
+        pdf::AnnotationItem one;
+        one.right = 10.0;
+        one.bottom = 10.0;
+        one.contents = QStringLiteral("hello");
+        small.annotations.push_back(one);
+        pdf::ipc::ListAnnotationsResponse smallBack;
+        if (!pdf::ipc::deserialize(pdf::ipc::serialize(small), smallBack) || !smallBack.truncated ||
+            smallBack.annotations.size() != 1) {
+            std::cerr << "[FAIL] 24a: truncated flag did not round-trip" << std::endl;
+            return 1;
+        }
+
+        // 24b: real hostile PDFs through the real worker.
+        const char* fixtures[] = {"hostile_annot_big_contents.pdf", "hostile_annot_many_quads.pdf"};
+        int64_t docId = 240;
+        for (const char* name : fixtures) {
+            QString path = QFileInfo(samplePdf).dir().filePath(QStringLiteral("tests/fixtures/") + QString::fromLatin1(name));
+            if (!QFileInfo::exists(path)) {
+                path = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../tests/fixtures/") + QString::fromLatin1(name));
+            }
+            path = QFileInfo(path).canonicalFilePath();
+            pdf::ipc::WorkerClient client;
+            auto opened = client.openDocumentSync(++docId, path.toStdString());
+            if (opened.error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 24b: could not open " << name << " (fixture missing?)" << std::endl;
+                return 1;
+            }
+            auto r = client.listAnnotationsSync(docId, 0, 30000);
+            if (!r.success || !r.truncated || r.annotations.empty()) {
+                std::cerr << "[FAIL] 24b: " << name << ": expected a truncated, non-empty list (success=" << r.success
+                          << " truncated=" << r.truncated << " items=" << r.annotations.size() << ")" << std::endl;
+                return 1;
+            }
+            uint64_t cost = 0;
+            for (const auto& a : r.annotations) {
+                cost += pdf::annotationBudgetCost(a);
+            }
+            if (cost > pdf::kMaxAnnotationListBytes) {
+                std::cerr << "[FAIL] 24b: " << name << ": list cost " << cost << " exceeds the budget" << std::endl;
+                return 1;
+            }
+            // The decisive check: the connection and the document must still work afterwards.
+            if (!client.getPageTextSync(docId, 0)) {
+                std::cerr << "[FAIL] 24b: " << name << ": document session was lost after listing annotations" << std::endl;
+                return 1;
+            }
+            auto again = client.listAnnotationsSync(docId, 0, 30000);
+            if (!again.success) {
+                std::cerr << "[FAIL] 24b: " << name << ": second listing failed" << std::endl;
+                return 1;
+            }
+            client.closeDocumentSync();
+            client.stop();
+        }
+        std::cout << "  -> Passed: oversized lists are truncated (flagged), within budget, and the session survives." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;
