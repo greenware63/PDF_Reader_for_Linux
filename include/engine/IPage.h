@@ -107,6 +107,18 @@ public:
     }
 
     /**
+     * @brief Creates a Text (Sticky Note) annotation (/Text) on this page.
+     * Generates standard bounding box, icon (/Name), color (/C), flags, /NM identifier,
+     * contents (/Contents), author (/T), and normal appearance stream (/AP).
+     * @param item Annotation properties.
+     * @return true if successfully created, false otherwise.
+     */
+    virtual bool addTextAnnotation(const AnnotationItem& item) {
+        (void)item;
+        return false;
+    }
+
+    /**
      * @brief Removes every annotation on this page whose /NM equals `name` (undo of an added annotation).
      * @return the number removed (0 if none matched or the name is empty).
      */

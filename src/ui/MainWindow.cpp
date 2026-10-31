@@ -14,6 +14,7 @@
 #include <QFileDialog>
 #include <QApplication>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QSaveFile>
 #include <QStatusBar>
 #include <QMenuBar>
@@ -482,6 +483,7 @@ void MainWindow::connectViewer(PdfViewerWidget* viewer) {
         if (m_underlineAction) m_underlineAction->setEnabled(canMarkup);
         if (m_strikeOutAction) m_strikeOutAction->setEnabled(canMarkup);
         if (m_squigglyAction) m_squigglyAction->setEnabled(canMarkup);
+        if (m_addNoteAction) m_addNoteAction->setEnabled(v && v->isDocumentOpen());
     });
 }
 
@@ -545,6 +547,10 @@ void MainWindow::setupActions() {
 
     m_squigglyAction = editMenu->addAction(tr("S&quiggly Selection"), this, &MainWindow::squigglySelection);
     m_squigglyAction->setEnabled(false);
+
+    m_addNoteAction = editMenu->addAction(tr("Add &Sticky Note..."), this, &MainWindow::addStickyNote);
+    m_addNoteAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N));
+    m_addNoteAction->setEnabled(false);
 
     editMenu->addSeparator();
     QAction* copyAction = editMenu->addAction(tr("&Copy"), this, [this]() {
@@ -1775,6 +1781,21 @@ void MainWindow::squigglySelection() {
     if (v && v->hasSelection()) {
         v->squigglySelection();
     }
+}
+
+void MainWindow::addStickyNote() {
+    auto* v = currentViewer();
+    if (!v || !v->isDocumentOpen()) return;
+    bool ok = false;
+    const QString text = QInputDialog::getMultiLineText(
+        this, tr("Add Sticky Note"), tr("Note text:"), QString(), &ok);
+    if (!ok || text.trimmed().isEmpty()) return;
+
+    const int page = v->currentPage();
+    const auto& pl = v->layout().getPageLayout(page);
+    const double userX = 72.0;
+    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
+    v->addTextAnnotation(page, userX, userY, text);
 }
 
 void MainWindow::undoEdit() {

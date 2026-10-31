@@ -114,6 +114,7 @@ public Q_SLOTS:
     void underlineSelection();
     void strikeOutSelection();
     void squigglySelection();
+    void addStickyNote();
     void undoEdit();
     void redoEdit();
 
@@ -186,6 +187,7 @@ private:
     QAction* m_underlineAction{nullptr};
     QAction* m_strikeOutAction{nullptr};
     QAction* m_squigglyAction{nullptr};
+    QAction* m_addNoteAction{nullptr};
 };
 
 } // namespace ui
