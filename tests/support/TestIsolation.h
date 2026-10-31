@@ -24,6 +24,9 @@ public:
             std::fprintf(stderr, "[FAIL] cannot create an isolated settings directory\n");
             std::abort();
         }
+        // On Windows, NativeFormat uses the registry and ignores the redirected filesystem path.
+        // Force INI settings so UI tests stay isolated and writable on every platform.
+        QSettings::setDefaultFormat(QSettings::IniFormat);
         for (const auto format : {QSettings::NativeFormat, QSettings::IniFormat}) {
             for (const auto scope : {QSettings::UserScope, QSettings::SystemScope}) {
                 QSettings::setPath(format, scope, m_dir.path());

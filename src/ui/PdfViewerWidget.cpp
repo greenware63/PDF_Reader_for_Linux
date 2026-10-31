@@ -437,6 +437,10 @@ void PdfViewerWidget::restoreReadingPosition(int pageIndex, double zoom, int64_t
     // Saved scroll offsets are in continuous-layout coordinates; other modes restore by page.
     if ((scrollY > 0 || scrollX > 0) && m_layout.viewMode() == layout::ViewMode::Continuous) {
         setDocScrollPosition(scrollX, scrollY);
+        if (pageIndex >= 0 && pageIndex < pageCount() && m_currentPage != pageIndex) {
+            m_currentPage = pageIndex;
+            Q_EMIT pageChanged(m_currentPage + 1, pageCount());
+        }
         viewport()->update();
     } else if (pageIndex >= 0 && pageIndex < pageCount()) {
         goToPage(pageIndex);
@@ -463,10 +467,18 @@ void PdfViewerWidget::restoreReadingPosition(int pageIndex, double zoom, double 
                 targetX = fallbackScrollX;
             }
             setDocScrollPosition(targetX, targetY);
+            if (pageIndex >= 0 && pageIndex < pageCount() && m_currentPage != pageIndex) {
+                m_currentPage = pageIndex;
+                Q_EMIT pageChanged(m_currentPage + 1, pageCount());
+            }
             viewport()->update();
             return;
         } else if (fallbackScrollY > 0 || fallbackScrollX > 0) {
             setDocScrollPosition(fallbackScrollX, fallbackScrollY);
+            if (pageIndex >= 0 && pageIndex < pageCount() && m_currentPage != pageIndex) {
+                m_currentPage = pageIndex;
+                Q_EMIT pageChanged(m_currentPage + 1, pageCount());
+            }
             viewport()->update();
             return;
         }
@@ -1037,6 +1049,14 @@ void PdfViewerWidget::setDocScrollPosition(int64_t docX, int64_t docY) {
             if (bestPage >= 0 && bestPage != m_currentPage) {
                 m_currentPage = bestPage;
                 Q_EMIT pageChanged(m_currentPage + 1, pageCount());
+            }
+        } else if (vpH <= 0 && m_layout.pageCount() > 0) {
+            auto anchor = m_layout.createAnchor(m_docScrollX, m_docScrollY);
+            if (anchor.isValid() && anchor.pageIndex >= 0 && anchor.pageIndex < m_layout.pageCount()) {
+                if (anchor.pageIndex != m_currentPage) {
+                    m_currentPage = anchor.pageIndex;
+                    Q_EMIT pageChanged(m_currentPage + 1, pageCount());
+                }
             }
         }
     }

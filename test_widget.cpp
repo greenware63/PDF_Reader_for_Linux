@@ -3058,6 +3058,11 @@ int main(int argc, char* argv[]) {
     // Test 39: Reading Position Memory persistence across documents/sessions in QSettings
     std::cout << "[TEST 39] Testing Reading Position Memory persistence across documents/sessions in QSettings..." << std::endl;
     {
+        QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+        std::cout << "[TEST ENV] Qt platform plugin: " << QGuiApplication::platformName().toStdString() << std::endl;
+        std::cout << "[TEST ENV] QSettings file: " << settings.fileName().toStdString() << std::endl;
+    }
+    {
         ui::MainWindow window;
         window.resize(1024, 768);
         window.show();
