@@ -43,6 +43,21 @@ namespace ui {
 
 namespace {
 
+bool sameDestinationFile(const QString& first, const QString& second) {
+    const QFileInfo a(first), b(second);
+    const QString ac = a.canonicalFilePath();
+    const QString bc = b.canonicalFilePath();
+    if (!ac.isEmpty() && !bc.isEmpty()) return ac == bc;
+    return a.absoluteFilePath() == b.absoluteFilePath();
+}
+
+bool confirmInPlaceSave(QWidget* parent, const QString& path) {
+    const QString name = QFileInfo(path).fileName();
+    return QMessageBox::question(parent, QObject::tr("Overwrite Original PDF"),
+                                 QObject::tr("Save changes to \"%1\" in place? This overwrites the existing PDF.").arg(name),
+                                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
+}
+
 class PasswordDialog final : public QDialog {
 public:
     using QDialog::QDialog;
@@ -1670,6 +1685,7 @@ void MainWindow::saveDocument() {
         saveDocumentAs();
         return;
     }
+    if (v->editLog().isDirty() && !confirmInPlaceSave(this, v->currentFilePath())) return;
     if (!v->saveDocument()) {
         QMessageBox::warning(this, tr("Save Error"), tr("Failed to save document."));
     }
@@ -1681,6 +1697,8 @@ void MainWindow::saveDocumentAs() {
     QString filter = tr("PDF Documents (*.pdf)");
     QString path = QFileDialog::getSaveFileName(this, tr("Save PDF As"), v->currentFilePath(), filter);
     if (path.isEmpty()) return;
+    if (sameDestinationFile(path, v->currentFilePath()) && v->editLog().isDirty() &&
+        !confirmInPlaceSave(this, v->currentFilePath())) return;
     if (!v->saveDocument(path)) {
         QMessageBox::warning(this, tr("Save Error"), tr("Failed to save document as %1.").arg(path));
     }
