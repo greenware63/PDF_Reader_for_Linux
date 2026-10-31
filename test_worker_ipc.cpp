@@ -2671,6 +2671,71 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Underline, StrikeOut, Squiggly add, list, hit-test, and remove over IPC verified." << std::endl;
     }
 
+    // Test 30: Milestone M3: Text Note Annotations (/Text, sticky note) over IPC
+    std::cout << "[TEST 30] Testing Text Note annotations (/Text, sticky note) over IPC..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto openResp = client.openDocumentSync(30, samplePdf.toStdString());
+        if (openResp.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 30: openDocumentSync failed" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem note;
+        note.subtype = pdf::AnnotationSubtype::Text;
+        note.pageIndex = 0;
+        note.left = 120.0; note.bottom = 680.0; note.right = 144.0; note.top = 704.0;
+        note.colorArgb = 0xFFFFD700;
+        note.hasColor = true;
+        note.flags = 4;
+        note.contents = QStringLiteral("Sticky Note over IPC");
+        note.author = QStringLiteral("IpcTester");
+        note.name = QStringLiteral("note-ipc-30");
+
+        auto resp = client.addAnnotationSync(30, 0, note);
+        if (!resp.success || resp.annotationName != "note-ipc-30") {
+            std::cerr << "[FAIL] 30: addAnnotationSync failed for Text Note" << std::endl;
+            return 1;
+        }
+
+        // List annotations
+        auto listResp = client.listAnnotationsSync(30, 0);
+        if (!listResp.success || listResp.annotations.size() != 1) {
+            std::cerr << "[FAIL] 30: listAnnotationsSync failed, expected 1, got " << listResp.annotations.size() << std::endl;
+            return 1;
+        }
+        if (listResp.annotations[0].subtype != pdf::AnnotationSubtype::Text ||
+            listResp.annotations[0].name != "note-ipc-30" ||
+            listResp.annotations[0].contents != "Sticky Note over IPC") {
+            std::cerr << "[FAIL] 30: Listed annotation properties mismatch" << std::endl;
+            return 1;
+        }
+
+        // Hit testing
+        auto hit = client.hitTestAnnotationSync(30, 0, 132.0, 692.0);
+        if (!hit.hit || hit.annotation.subtype != pdf::AnnotationSubtype::Text || hit.annotation.name != "note-ipc-30") {
+            std::cerr << "[FAIL] 30: Hit test inside note rect failed" << std::endl;
+            return 1;
+        }
+
+        // Remove annotation
+        auto rem = client.removeAnnotationSync(30, 0, "note-ipc-30");
+        if (!rem.success || rem.removedCount != 1) {
+            std::cerr << "[FAIL] 30: removeAnnotationSync failed" << std::endl;
+            return 1;
+        }
+
+        auto listAfter = client.listAnnotationsSync(30, 0);
+        if (!listAfter.success || !listAfter.annotations.empty()) {
+            std::cerr << "[FAIL] 30: Annotation still present after removal" << std::endl;
+            return 1;
+        }
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: Text Note (/Text) add, list, hit-test, and remove over IPC verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

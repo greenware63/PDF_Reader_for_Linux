@@ -57,6 +57,9 @@ void rotateRectPointsForDisplay(const pdf::PageCharBox& r, double pageW, double 
 #include <QGuiApplication>
 #include <QClipboard>
 #include <QScopedValueRollback>
+#include <QToolTip>
+#include <QInputDialog>
+#include <QHelpEvent>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -2438,22 +2441,247 @@ bool PdfViewerWidget::squigglySelection(uint32_t colorArgb) {
     return markupSelection(pdf::AnnotationSubtype::Squiggly, colorArgb);
 }
 
+bool PdfViewerWidget::addTextAnnotation(int pageIndex, double userX, double userY, const QString& contents, uint32_t colorArgb) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (pageIndex < 0 || pageIndex >= m_pageCount) {
+        return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    if (colorArgb == 0) {
+        colorArgb = 0xFFFFD700; // Gold / Yellow
+    }
+
+    constexpr double kIconSize = 24.0;
+    pdf::AnnotationItem note;
+    note.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    note.subtype = pdf::AnnotationSubtype::Text;
+    note.pageIndex = pageIndex;
+    note.left = userX;
+    note.bottom = userY - kIconSize;
+    note.right = userX + kIconSize;
+    note.top = userY;
+    note.contents = contents;
+    note.colorArgb = colorArgb;
+    note.hasColor = true;
+    note.flags = 4; // FPDF_ANNOT_FLAG_PRINT
+
+    const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, note);
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not add sticky note: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordAddAnnotation(pageIndex, note);
+    refreshAfterEdit();
+    return true;
+}
+
+bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (item.name.isEmpty() || pageIndex < 0 || pageIndex >= m_pageCount) {
+        return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, pageIndex, item.name);
+    if (!response.success || response.removedCount == 0) {
+        Q_EMIT loadError(tr("Could not delete annotation: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordDeleteAnnotation(pageIndex, item);
+    refreshAfterEdit();
+    return true;
+}
+
+bool PdfViewerWidget::deleteAnnotationByName(int pageIndex, const QString& annotationName) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (annotationName.isEmpty() || pageIndex < 0 || pageIndex >= m_pageCount) {
+        return false;
+    }
+
+    pdf::AnnotationItem item;
+    for (const auto& cmd : m_editLog.activeCommands()) {
+        if (cmd.pageIndex == pageIndex) {
+            if (cmd.type == pdf::EditCommandType::AddAnnotation && cmd.after.name == annotationName) {
+                item = cmd.after;
+                break;
+            } else if (cmd.type == pdf::EditCommandType::ModifyAnnotation && cmd.after.name == annotationName) {
+                item = cmd.after;
+                break;
+            }
+        }
+    }
+    if (item.name.isEmpty()) {
+        const auto list = m_renderWorker.listAnnotationsSync(m_currentDocumentId, pageIndex);
+        for (const auto& a : list.annotations) {
+            if (a.name == annotationName) {
+                item = a;
+                break;
+            }
+        }
+    }
+    if (item.name.isEmpty()) {
+        item.name = annotationName;
+        item.pageIndex = pageIndex;
+    }
+
+    return deleteAnnotation(pageIndex, item);
+}
+
+bool PdfViewerWidget::modifyTextAnnotation(int pageIndex, const pdf::AnnotationItem& before, const QString& newContents) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (pageIndex < 0 || pageIndex >= m_pageCount || before.name.isEmpty()) {
+        return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    pdf::AnnotationItem after = before;
+    after.contents = newContents;
+    after.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+    const auto remResp = m_renderWorker.removeAnnotationSync(m_currentDocumentId, pageIndex, before.name);
+    if (!remResp.success || remResp.removedCount == 0) {
+        Q_EMIT loadError(tr("Could not update note: %1").arg(remResp.errorMessage));
+        return false;
+    }
+
+    const auto addResp = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, after);
+    if (!addResp.success) {
+        m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, before);
+        Q_EMIT loadError(tr("Could not add updated note: %1").arg(addResp.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordModifyAnnotation(pageIndex, before, after);
+    refreshAfterEdit();
+    return true;
+}
+
 void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
-    if (!isDocumentOpen() || !hasSelection()) {
+    if (!isDocumentOpen()) {
         QAbstractScrollArea::contextMenuEvent(event);
         return;
     }
 
-    QMenu menu(this);
-    QAction* copyAct = menu.addAction(tr("&Copy"), this, &PdfViewerWidget::copySelection);
-    copyAct->setShortcut(QKeySequence::Copy);
-    menu.addSeparator();
-    menu.addAction(tr("&Highlight"), this, [this]() { highlightSelection(); });
-    menu.addAction(tr("&Underline"), this, [this]() { underlineSelection(); });
-    menu.addAction(tr("&Strikeout"), this, [this]() { strikeOutSelection(); });
-    menu.addAction(tr("S&quiggly"), this, [this]() { squigglySelection(); });
+    const double dpr = effectiveDpr();
+    const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(event->pos().x() * dpr));
+    const int64_t docY = m_docScrollY + static_cast<int64_t>(std::round(event->pos().y() * dpr));
+    const int clickPage = m_layout.getPageAt(docX, docY);
 
-    menu.exec(event->globalPos());
+    QMenu menu(this);
+    if (hasSelection()) {
+        QAction* copyAct = menu.addAction(tr("&Copy"), this, &PdfViewerWidget::copySelection);
+        copyAct->setShortcut(QKeySequence::Copy);
+        menu.addSeparator();
+        menu.addAction(tr("&Highlight"), this, [this]() { highlightSelection(); });
+        menu.addAction(tr("&Underline"), this, [this]() { underlineSelection(); });
+        menu.addAction(tr("&Strikeout"), this, [this]() { strikeOutSelection(); });
+        menu.addAction(tr("S&quiggly"), this, [this]() { squigglySelection(); });
+        menu.addSeparator();
+    }
+
+    if (clickPage >= 0) {
+        double ax = 0.0, ay = 0.0;
+        if (m_layout.documentToPagePoints(clickPage, docX, docY, ax, ay)) {
+            const auto& pl = m_layout.getPageLayout(clickPage);
+            const double userX = ax;
+            const double userY = pl.heightPoints - ay;
+
+            auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY);
+            if (hit.hit && !hit.annotation.name.isEmpty()) {
+                const auto hitItem = hit.annotation;
+                menu.addAction(tr("&Delete Annotation"), this, [this, clickPage, hitItem]() {
+                    deleteAnnotation(clickPage, hitItem);
+                });
+                menu.addSeparator();
+            }
+
+            menu.addAction(tr("&Add Sticky Note Here"), this, [this, clickPage, userX, userY]() {
+                bool ok = false;
+                const QString text = QInputDialog::getMultiLineText(
+                    this, tr("Add Sticky Note"), tr("Note text:"), QString(), &ok);
+                if (ok && !text.trimmed().isEmpty()) {
+                    addTextAnnotation(clickPage, userX, userY, text);
+                }
+            });
+        }
+    }
+
+    if (!menu.isEmpty()) {
+        menu.exec(event->globalPos());
+    }
+}
+
+void PdfViewerWidget::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton && isDocumentOpen()) {
+        const double dpr = effectiveDpr();
+        const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(event->position().x() * dpr));
+        const int64_t docY = m_docScrollY + static_cast<int64_t>(std::round(event->position().y() * dpr));
+        const int clickPage = m_layout.getPageAt(docX, docY);
+        if (clickPage >= 0) {
+            double ax = 0.0, ay = 0.0;
+            if (m_layout.documentToPagePoints(clickPage, docX, docY, ax, ay)) {
+                const auto& pl = m_layout.getPageLayout(clickPage);
+                const double userX = ax;
+                const double userY = pl.heightPoints - ay;
+
+                auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY);
+                if (hit.hit && hit.annotation.subtype == pdf::AnnotationSubtype::Text) {
+                    bool ok = false;
+                    const QString title = hit.annotation.author.isEmpty() ? tr("Sticky Note") : tr("Sticky Note - %1").arg(hit.annotation.author);
+                    const QString newText = QInputDialog::getMultiLineText(
+                        this, title, tr("Note Content:"), hit.annotation.contents, &ok);
+                    if (ok && newText != hit.annotation.contents) {
+                        modifyTextAnnotation(clickPage, hit.annotation, newText);
+                    }
+                    event->accept();
+                    return;
+                }
+            }
+        }
+    }
+    QAbstractScrollArea::mouseDoubleClickEvent(event);
+}
+
+bool PdfViewerWidget::viewportEvent(QEvent* event) {
+    if (event->type() == QEvent::ToolTip && isDocumentOpen()) {
+        auto* helpEvent = static_cast<QHelpEvent*>(event);
+        const double dpr = effectiveDpr();
+        const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(helpEvent->pos().x() * dpr));
+        const int64_t docY = m_docScrollY + static_cast<int64_t>(std::round(helpEvent->pos().y() * dpr));
+        const int page = m_layout.getPageAt(docX, docY);
+        if (page >= 0) {
+            double ax = 0.0, ay = 0.0;
+            if (m_layout.documentToPagePoints(page, docX, docY, ax, ay)) {
+                const auto& pl = m_layout.getPageLayout(page);
+                const double userX = ax;
+                const double userY = pl.heightPoints - ay;
+                auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, page, userX, userY);
+                if (hit.hit && !hit.annotation.contents.isEmpty()) {
+                    QString tip = hit.annotation.contents;
+                    if (!hit.annotation.author.isEmpty()) {
+                        tip = QString::fromLatin1("[%1]\n%2").arg(hit.annotation.author, tip);
+                    }
+                    QToolTip::showText(helpEvent->globalPos(), tip, viewport());
+                    return true;
+                }
+            }
+        }
+        QToolTip::hideText();
+        event->ignore();
+        return true;
+    }
+    return QAbstractScrollArea::viewportEvent(event);
 }
 
 void PdfViewerWidget::refreshAfterEdit() {
@@ -2481,6 +2709,23 @@ bool PdfViewerWidget::undoEdit() {
             Q_EMIT loadError(tr("Could not undo the annotation: %1").arg(response.errorMessage));
             return false;
         }
+    } else if (cmd.type == pdf::EditCommandType::DeleteAnnotation) {
+        const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.before);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.redo(restored);
+            Q_EMIT loadError(tr("Could not undo deletion: %1").arg(response.errorMessage));
+            return false;
+        }
+    } else if (cmd.type == pdf::EditCommandType::ModifyAnnotation) {
+        m_renderWorker.removeAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.after.name);
+        const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.before);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.redo(restored);
+            Q_EMIT loadError(tr("Could not undo modification: %1").arg(response.errorMessage));
+            return false;
+        }
     }
     refreshAfterEdit();
     return true;
@@ -2501,6 +2746,23 @@ bool PdfViewerWidget::redoEdit() {
             pdf::EditCommand restored;
             m_editLog.undo(restored);
             Q_EMIT loadError(tr("Could not redo the annotation: %1").arg(response.errorMessage));
+            return false;
+        }
+    } else if (cmd.type == pdf::EditCommandType::DeleteAnnotation) {
+        const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.before.name);
+        if (!response.success || response.removedCount == 0) {
+            pdf::EditCommand restored;
+            m_editLog.undo(restored);
+            Q_EMIT loadError(tr("Could not redo deletion: %1").arg(response.errorMessage));
+            return false;
+        }
+    } else if (cmd.type == pdf::EditCommandType::ModifyAnnotation) {
+        m_renderWorker.removeAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.before.name);
+        const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.after);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.undo(restored);
+            Q_EMIT loadError(tr("Could not redo modification: %1").arg(response.errorMessage));
             return false;
         }
     }
@@ -2532,9 +2794,9 @@ void PdfViewerWidget::recoverAfterWorkerFailure() {
     for (const auto& op : m_editLog.opsSinceSave()) {
         bool done = false;
         if (op.add) {
-            done = m_renderWorker.addAnnotationSync(m_currentDocumentId, op.command.pageIndex, op.command.after).success;
+            done = m_renderWorker.addAnnotationSync(m_currentDocumentId, op.pageIndex, op.item).success;
         } else {
-            const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, op.command.pageIndex, op.command.after.name);
+            const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, op.pageIndex, op.name);
             done = response.success && response.removedCount > 0;
         }
         if (!done) {

@@ -166,6 +166,10 @@ public:
     bool underlineSelection(uint32_t colorArgb = 0xFF00AA00);
     bool strikeOutSelection(uint32_t colorArgb = 0xFFFF0000);
     bool squigglySelection(uint32_t colorArgb = 0xFFFF0000);
+    bool addTextAnnotation(int pageIndex, double userX, double userY, const QString& contents, uint32_t colorArgb = 0xFFFFD700);
+    bool deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item);
+    bool deleteAnnotationByName(int pageIndex, const QString& annotationName);
+    bool modifyTextAnnotation(int pageIndex, const pdf::AnnotationItem& before, const QString& newContents);
     bool saveDocument(const QString& targetPath = QString());
     bool saveDocumentAs(const QString& targetPath) { return saveDocument(targetPath); }
 
@@ -252,6 +256,8 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    bool viewportEvent(QEvent* event) override;
 
 private Q_SLOTS:
     void onScrollValueChanged();
