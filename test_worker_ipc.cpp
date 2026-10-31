@@ -2485,6 +2485,75 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Malformed Add/Save requests rejected safely." << std::endl;
     }
 
+    // --- TEST 28: RemoveAnnotation (undo) over IPC ---
+    std::cout << "[TEST 28] Testing RemoveAnnotation by /NM over IPC (undo reaches the document)..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        if (client.openDocumentSync(28, samplePdf.toStdString()).error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 28: cannot open document" << std::endl;
+            return 1;
+        }
+        auto countHl = [&](const QString& name) {
+            int n = 0;
+            for (const auto& a : client.listAnnotationsSync(28, 0).annotations) {
+                if (a.subtype == pdf::AnnotationSubtype::Highlight && (name.isEmpty() || a.name == name)) {
+                    ++n;
+                }
+            }
+            return n;
+        };
+        auto makeHl = [](const QString& name, double x) {
+            pdf::AnnotationItem hl;
+            hl.name = name;
+            hl.subtype = pdf::AnnotationSubtype::Highlight;
+            hl.left = x; hl.bottom = 700.0; hl.right = x + 100.0; hl.top = 720.0;
+            hl.colorArgb = 0xFFFFFF00;
+            hl.hasColor = true;
+            hl.flags = 4;
+            hl.quadPoints.push_back({x, 720.0, x + 100.0, 720.0, x, 700.0, x + 100.0, 700.0});
+            return hl;
+        };
+        const int before = countHl(QString());
+        if (!client.addAnnotationSync(28, 0, makeHl(QStringLiteral("test-a"), 50.0)).success ||
+            !client.addAnnotationSync(28, 0, makeHl(QStringLiteral("test-b"), 200.0)).success) {
+            std::cerr << "[FAIL] 28: add failed" << std::endl;
+            return 1;
+        }
+        if (countHl(QString()) != before + 2) {
+            std::cerr << "[FAIL] 28: expected two new highlights" << std::endl;
+            return 1;
+        }
+        auto rm = client.removeAnnotationSync(28, 0, QStringLiteral("test-a"));
+        if (!rm.success || rm.removedCount != 1 || countHl(QStringLiteral("test-a")) != 0 ||
+            countHl(QStringLiteral("test-b")) != 1) {
+            std::cerr << "[FAIL] 28: removing test-a must remove exactly that annotation (success=" << rm.success
+                      << " removed=" << rm.removedCount << ")" << std::endl;
+            return 1;
+        }
+        if (client.removeAnnotationSync(28, 0, QStringLiteral("test-a")).success ||
+            client.removeAnnotationSync(28, 0, QStringLiteral("no-such-name")).success ||
+            client.removeAnnotationSync(28, 9999, QStringLiteral("test-b")).success) {
+            std::cerr << "[FAIL] 28: removing a missing annotation or a bad page must fail" << std::endl;
+            return 1;
+        }
+        // Wire-level validation: empty and oversized names are rejected by the deserializer.
+        pdf::ipc::RemoveAnnotationRequest bad;
+        bad.annotationName = QString();
+        pdf::ipc::RemoveAnnotationRequest back;
+        if (pdf::ipc::deserialize(pdf::ipc::serialize(bad), back)) {
+            std::cerr << "[FAIL] 28: empty annotation name was accepted" << std::endl;
+            return 1;
+        }
+        bad.annotationName = QString(300, QLatin1Char('x'));
+        if (pdf::ipc::deserialize(pdf::ipc::serialize(bad), back)) {
+            std::cerr << "[FAIL] 28: oversized annotation name was accepted" << std::endl;
+            return 1;
+        }
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: RemoveAnnotation removes only the named annotation; missing/bad requests fail; names are validated." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

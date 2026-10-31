@@ -61,6 +61,8 @@ private Q_SLOTS:
     void onAnnotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
     void onAnnotationHitTestFailed(int64_t documentId, int pageIndex);
     void onAnnotationAdded(int64_t documentId, int pageIndex, const QString& annotationName);
+    void onAnnotationRemoved(int64_t documentId, int pageIndex, int removedCount);
+    void onAnnotationRemoveFailed(int64_t documentId, int pageIndex, const QString& errorMessage);
     void onAnnotationAddFailed(int64_t documentId, int pageIndex, const QString& errorMessage);
     void onDocumentSaved(int64_t documentId, uint64_t bytesWritten);
     void onDocumentSaveFailed(int64_t documentId, const QString& errorMessage);

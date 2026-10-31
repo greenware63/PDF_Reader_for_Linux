@@ -1695,21 +1695,15 @@ void MainWindow::highlightSelection() {
 
 void MainWindow::undoEdit() {
     auto* v = currentViewer();
-    if (v && v->editLog().canUndo()) {
-        pdf::EditCommand cmd;
-        v->editLog().undo(cmd);
-        v->cache().clear();
-        v->viewport()->update();
+    if (v) {
+        v->undoEdit();
     }
 }
 
 void MainWindow::redoEdit() {
     auto* v = currentViewer();
-    if (v && v->editLog().canRedo()) {
-        pdf::EditCommand cmd;
-        v->editLog().redo(cmd);
-        v->cache().clear();
-        v->viewport()->update();
+    if (v) {
+        v->redoEdit();
     }
 }
 

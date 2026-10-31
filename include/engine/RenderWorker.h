@@ -167,6 +167,12 @@ public:
     void requestAddAnnotation(int64_t documentId, int pageIndex, const AnnotationItem& item);
 
     /**
+     * @brief Removes the annotation(s) with the given /NM from a page asynchronously (undo of an add).
+     * Delivered via annotationRemoved() or annotationRemoveFailed().
+     */
+    void requestRemoveAnnotation(int64_t documentId, int pageIndex, const QString& annotationName);
+
+    /**
      * @brief Saves the active document into a file descriptor asynchronously.
      * Delivered via documentSaved() or documentSaveFailed().
      */
@@ -307,6 +313,8 @@ Q_SIGNALS:
     /// Emitted when an annotation is added on the worker thread.
     void annotationAdded(int64_t documentId, int pageIndex, const QString& annotationName);
     void annotationAddFailed(int64_t documentId, int pageIndex, const QString& errorMessage);
+    void annotationRemoved(int64_t documentId, int pageIndex, int removedCount);
+    void annotationRemoveFailed(int64_t documentId, int pageIndex, const QString& errorMessage);
     /// Emitted when document save completes on the worker thread.
     void documentSaved(int64_t documentId, uint64_t bytesWritten);
     void documentSaveFailed(int64_t documentId, const QString& errorMessage);

@@ -52,6 +52,7 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::ListAnnotationsResponse:
         case MessageType::HitTestAnnotationResponse:
         case MessageType::AddAnnotationResponse:
+        case MessageType::RemoveAnnotationResponse:
         case MessageType::SaveDocumentResponse:
         case MessageType::WorkerError:
         case MessageType::WorkerControlResponse:
@@ -860,6 +861,60 @@ RedactDocumentResponse WorkerClient::redactDocumentSync(int64_t documentId,
     return result;
 }
 
+void WorkerClient::requestRemoveAnnotation(int64_t documentId, int pageIndex, const QString& annotationName) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT annotationRemoveFailed(documentId, pageIndex, tr("Worker is stopped or failed."));
+        return;
+    }
+    sendMessage(MessageType::RemoveAnnotationRequest,
+                serialize(RemoveAnnotationRequest{documentId, pageIndex, annotationName}));
+}
+
+RemoveAnnotationResponse WorkerClient::removeAnnotationSync(int64_t documentId, int pageIndex,
+                                                            const QString& annotationName, int timeoutMs) {
+    RemoveAnnotationResponse result;
+    result.documentId = documentId;
+    result.pageIndex = pageIndex;
+    if (!ensureConnected()) {
+        result.errorMessage = tr("Worker connection unavailable.");
+        return result;
+    }
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    const auto okConn = connect(this, &WorkerClient::annotationRemoved, &loop,
+        [&](int64_t docId, int pIdx, int removed) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.success = true;
+                result.removedCount = removed;
+                loop.quit();
+            }
+        });
+    const auto failConn = connect(this, &WorkerClient::annotationRemoveFailed, &loop,
+        [&](int64_t docId, int pIdx, const QString& error) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.success = false;
+                result.errorMessage = error;
+                loop.quit();
+            }
+        });
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop,
+        [&](const QString& error) { result.errorMessage = error; loop.quit(); });
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestRemoveAnnotation(documentId, pageIndex, annotationName);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(okConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    if (!result.success && result.errorMessage.isEmpty()) {
+        result.errorMessage = tr("Timed out waiting for removeAnnotation response from worker.");
+    }
+    return result;
+}
+
 void WorkerClient::requestAddAnnotation(int64_t documentId, int pageIndex, const pdf::AnnotationItem& annotation) {
     if (m_stopping || m_failureReported) {
         Q_EMIT annotationAddFailed(documentId, pageIndex, tr("Worker is stopped or failed."));
@@ -1352,6 +1407,20 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
                 }
             } else {
                 Q_EMIT annotationAddFailed(0, 0, tr("Failed to deserialize AddAnnotationResponse."));
+            }
+            break;
+        }
+
+        case MessageType::RemoveAnnotationResponse: {
+            RemoveAnnotationResponse response;
+            if (deserialize(payload, response)) {
+                if (response.success) {
+                    Q_EMIT annotationRemoved(response.documentId, response.pageIndex, response.removedCount);
+                } else {
+                    Q_EMIT annotationRemoveFailed(response.documentId, response.pageIndex, response.errorMessage);
+                }
+            } else {
+                Q_EMIT annotationRemoveFailed(0, 0, tr("Failed to deserialize RemoveAnnotationResponse."));
             }
             break;
         }

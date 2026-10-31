@@ -876,6 +876,39 @@ void RenderWorker::requestAddAnnotation(int64_t documentId, int pageIndex, const
     m_cv.notify_one();
 }
 
+void RenderWorker::requestRemoveAnnotation(int64_t documentId, int pageIndex, const QString& annotationName) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        Q_EMIT annotationRemoveFailed(documentId, pageIndex, QStringLiteral("Worker not running or document mismatch"));
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, pageIndex, annotationName]() {
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT annotationRemoveFailed(documentId, pageIndex, QStringLiteral("Document is not open"));
+            return;
+        }
+        noteProgress(ipc::WorkerOp::Annotate);
+        struct AnnotGuard {
+            RenderWorker* w;
+            ~AnnotGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (!page) {
+            Q_EMIT annotationRemoveFailed(documentId, pageIndex, QStringLiteral("Failed to load page"));
+            return;
+        }
+        const int removed = page->removeAnnotationByName(annotationName);
+        if (removed > 0) {
+            Q_EMIT annotationRemoved(documentId, pageIndex, removed);
+        } else {
+            Q_EMIT annotationRemoveFailed(documentId, pageIndex, QStringLiteral("No annotation with that name"));
+        }
+    }});
+    m_cv.notify_one();
+}
+
 void RenderWorker::requestSaveDocument(int64_t documentId, int writeFd, bool incremental, const QString& tempFilePath) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_running.load() || documentId != m_activeDocumentId.load()) {

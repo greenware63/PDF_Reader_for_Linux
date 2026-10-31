@@ -39,6 +39,7 @@ public:
     std::vector<AnnotationItem> listAnnotations(bool* truncated = nullptr) override;
     bool hitTestAnnotation(double xPoints, double yPoints, AnnotationItem& out) override;
     bool addHighlightAnnotation(const AnnotationItem& item) override;
+    int removeAnnotationByName(const QString& name) override;
 
     static void setSimulateGetTextFailureForTesting(bool simulate) noexcept;
 

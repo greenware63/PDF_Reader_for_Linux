@@ -3,6 +3,7 @@
 #include <QAbstractScrollArea>
 #include <QString>
 #include <memory>
+#include <functional>
 #include <optional>
 #include <vector>
 #include <map>
@@ -160,6 +161,18 @@ public:
     bool saveDocument(const QString& targetPath = QString());
     bool saveDocumentAs(const QString& targetPath) { return saveDocument(targetPath); }
 
+    /// Undo / redo the last annotation edit. The worker document is changed too (the annotation is removed /
+    /// re-added), so what is saved always matches what the edit log says.
+    bool undoEdit();
+    bool redoEdit();
+
+#ifdef PDF_WORKER_TEST_HOOKS
+    /// Kills the worker process as a crash would (recovery is exercised by tests).
+    void simulateWorkerCrashForTesting() { m_renderWorker.killWorkerForTesting(); }
+    /// Called with the worker-written temp file's path after validation and before the destination is written.
+    void setBeforeCommitHookForTesting(std::function<void(const QString&)> hook) { m_beforeCommitHook = std::move(hook); }
+#endif
+
     // Text selection & copy APIs
     bool hasSelection() const noexcept;
     QString selectedText() const;
@@ -198,6 +211,8 @@ public:
 
 
 Q_SIGNALS:
+    /// Emitted after a worker crash was recovered by reopening the file and re-applying unsaved edits.
+    void editsRecovered(int appliedOperations);
     void documentLoaded(const QString& title, int pages);
     void pageLabelsReady(const std::vector<QString>& labels);
     void thumbnailReady(int pageIndex, const QImage& image);
@@ -357,6 +372,15 @@ private:
     QPointF m_redactCurrentDocPos;
 
     pdf::EditLog m_editLog;
+
+    void refreshAfterEdit();
+    void recoverAfterWorkerFailure();
+    QString m_recoveryPath;
+    bool m_recovering{false};
+    bool m_preserveEditLogOnOpen{false};
+#ifdef PDF_WORKER_TEST_HOOKS
+    std::function<void(const QString&)> m_beforeCommitHook;
+#endif
 };
 
 } // namespace ui
