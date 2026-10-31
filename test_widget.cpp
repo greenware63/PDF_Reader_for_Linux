@@ -23,6 +23,10 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QAction>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QTimer>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -34,7 +38,11 @@
 #include <cstring>
 #include <QSettings>
 #include <QTemporaryDir>
+#include <QTemporaryFile>
 #include <QDir>
+#ifdef Q_OS_LINUX
+#include <unistd.h>
+#endif
 
 static void generateOutlinePdfFixture(const std::string& path, bool cyclicSibling = false,
                                       bool cyclicChildToParent = false) {
@@ -4632,12 +4640,88 @@ int main(int argc, char* argv[]) {
             QApplication::sendEvent(v.viewport(), &move);
             QMouseEvent release(QEvent::MouseButtonRelease, p1, p1, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
             QApplication::sendEvent(v.viewport(), &release);
-            return v.hasSelection() && v.highlightSelection(0xFFFFFF00);
+            return v.hasSelection() && v.highlightSelection();
         };
         auto fail = [](const char* what) {
             std::cerr << "[FAIL] 47: " << what << std::endl;
             return 1;
         };
+
+        // 47u: replacing a dirty document and closing a dirty tab require explicit confirmation.
+        {
+            const QString doc = tmp.filePath(QStringLiteral("ui-confirmation.pdf"));
+            if (!QFile::copy(QString::fromStdString(textPath), doc)) return fail("47u cannot copy fixture");
+            ui::MainWindow window;
+            window.resize(900, 700);
+            window.show();
+            if (!window.openFile(doc)) return fail("47u cannot open document");
+            auto* viewer = window.currentViewer();
+            QElapsedTimer timer;
+            timer.start();
+            while (timer.elapsed() < 5000 && (!viewer->isDocumentOpen() || viewer->isLoading())) pumpMs(10);
+            if (!viewer->isDocumentOpen() || !highlightChars(*viewer, 0, 4)) return fail("47u cannot prepare edit");
+            if (viewer->openDocument(QString::fromStdString(textPath)) == pdf::DocumentError::None ||
+                !viewer->editLog().isDirty() || viewer->currentFilePath() != doc) {
+                return fail("47u direct open replaced a dirty document");
+            }
+            QAction* saveAction = nullptr;
+            for (auto* action : window.findChildren<QAction*>()) {
+                if (action->shortcut() == QKeySequence::Save) { saveAction = action; break; }
+            }
+            if (!saveAction || !saveAction->isEnabled()) return fail("47u dirty tab did not enable Save");
+            window.addNewTab();
+            if (saveAction->isEnabled()) return fail("47u clean tab kept Save enabled");
+            window.documentTabs()->setCurrentIndex(0);
+            if (!saveAction->isEnabled()) return fail("47u dirty tab did not restore Save state");
+
+            bool nestedCloseBlocked = false;
+            bool attemptNestedClose = true;
+            QObject::connect(&viewer->editLog(), &pdf::EditLog::dirtyChanged, &window, [&](bool dirty) {
+                if (!dirty && attemptNestedClose) {
+                    attemptNestedClose = false;
+                    window.closeCurrentTab();
+                    nestedCloseBlocked = window.tabCount() == 2;
+                }
+            });
+            if (!viewer->undoEdit() || !nestedCloseBlocked || !viewer->redoEdit()) {
+                return fail("47u tab closed during a synchronous annotation edit");
+            }
+
+            bool replacementPrompt = false;
+            QTimer::singleShot(0, [&] {
+                if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                    replacementPrompt = box->button(QMessageBox::Cancel) != nullptr;
+                    if (replacementPrompt) box->button(QMessageBox::Cancel)->click();
+                }
+            });
+            if (window.openFile(QString::fromStdString(textPath)) || !replacementPrompt ||
+                !viewer->editLog().isDirty() || viewer->currentFilePath() != doc) {
+                return fail("47u canceling document replacement lost edits");
+            }
+
+            bool overwritePrompt = false;
+            QTimer::singleShot(0, [&] {
+                if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                    QTimer::singleShot(0, [&] {
+                        if (auto* confirmation = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                            overwritePrompt = confirmation->windowTitle() == QStringLiteral("Overwrite Original PDF");
+                            if (confirmation->button(QMessageBox::No)) confirmation->button(QMessageBox::No)->click();
+                        }
+                    });
+                    if (box->button(QMessageBox::Save)) box->button(QMessageBox::Save)->click();
+                }
+            });
+            window.closeCurrentTab();
+            if (!overwritePrompt || window.tabCount() != 2 || !viewer->editLog().isDirty()) {
+                return fail("47u refusing overwrite did not keep the dirty tab open");
+            }
+            QTimer::singleShot(0, [] {
+                if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+                    if (box->button(QMessageBox::Discard)) box->button(QMessageBox::Discard)->click();
+                }
+            });
+            window.closeCurrentTab();
+        }
 
         // 47a: undo removes the annotation from the document that gets saved; redo puts it back.
         {
@@ -4653,6 +4737,35 @@ int main(int argc, char* argv[]) {
             const QString redone = tmp.filePath(QStringLiteral("redone.pdf"));
             if (!v.saveDocument(redone)) return fail("47a save after redo failed");
             if (countHighlights(redone) != 1) return fail("47a redone highlight is missing from the saved file");
+        }
+
+        // 47s: Save As on a structurally signed document must be incremental.
+        if (argc > 2) {
+            const QString signedPath = QString::fromLocal8Bit(argv[2]);
+            QFile source(signedPath);
+            if (!source.open(QIODevice::ReadOnly)) return fail("47s cannot read signed fixture");
+            const QByteArray original = source.readAll();
+            source.close();
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, signedPath)) return fail("47s cannot open signed fixture");
+            QTemporaryFile rewritten(tmp.filePath(QStringLiteral("signed-rewrite-XXXXXX.pdf")));
+            if (!rewritten.open()) return fail("47s cannot create temporary output");
+            int fd = -1;
+#ifdef Q_OS_LINUX
+            fd = ::dup(rewritten.handle());
+            if (fd < 0) return fail("47s cannot duplicate output descriptor");
+#else
+            rewritten.close();
+#endif
+            if (v.renderWorker().saveDocumentSync(v.currentDocumentId(), fd, false, rewritten.fileName()).success) {
+                return fail("47s signed fixture unexpectedly accepted a full rewrite");
+            }
+            const QString dest = tmp.filePath(QStringLiteral("signed-copy.pdf"));
+            if (!v.saveDocument(dest)) return fail("47s incremental Save As failed");
+            QFile copy(dest);
+            if (!copy.open(QIODevice::ReadOnly) || !copy.readAll().startsWith(original)) {
+                return fail("47s signed copy did not preserve the source bytes");
+            }
         }
 
         // 47b0: in-place save refuses to overwrite a source changed by another process since open.
@@ -4717,26 +4830,155 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> 47b symlink subtest SKIPPED on Windows (POSIX symlink semantics require Linux/UNIX)." << std::endl;
 #endif
 
+        // 47b2: the worker must be rebased after an in-place save so a second append starts
+        // from the newly committed revision rather than the document as originally opened.
+        {
+            const QString doc = tmp.filePath(QStringLiteral("twice_saved.pdf"));
+            QFile::remove(doc);
+            if (!QFile::copy(QString::fromStdString(textPath), doc)) return fail("47b2 cannot copy fixture");
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, doc)) return fail("47b2 cannot open document");
+            if (!highlightChars(v, 0, 4)) return fail("47b2 first highlight failed");
+            const double originalZoom = v.currentZoom();
+            v.setZoom(originalZoom * 1.2);
+            const double savedZoom = v.currentZoom();
+            if (!v.saveDocument()) return fail("47b2 first in-place save failed");
+            if (std::abs(v.currentZoom() - savedZoom) > 0.001) return fail("47b2 save changed the viewer zoom");
+            v.setZoom(originalZoom);
+            if (!highlightChars(v, 6, 10) || !v.saveDocument()) return fail("47b2 second in-place save failed");
+            if (countHighlights(doc) != 2) return fail("47b2 consecutive saves did not preserve both highlights");
+        }
+
 #ifdef PDF_WORKER_TEST_HOOKS
-        // 47c0: reject a same-size output with a PDF envelope but invalid contents before it reaches the destination.
+        // 47b3: a source replacement during validation must be detected immediately before commit.
+        {
+            const QString doc = tmp.filePath(QStringLiteral("changed_during_validation.pdf"));
+            QFile::remove(doc);
+            if (!QFile::copy(QString::fromStdString(textPath), doc)) return fail("47b3 cannot copy fixture");
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, doc) || !highlightChars(v, 0, 4)) return fail("47b3 cannot prepare edit");
+            const QByteArray externalBytes("external replacement while validating");
+            v.setBeforeCommitHookForTesting([&](const QString&) {
+                QFile source(doc);
+                if (source.open(QIODevice::WriteOnly | QIODevice::Truncate)) source.write(externalBytes);
+            });
+            if (v.saveDocument()) return fail("47b3 committed over a source changed during validation");
+            QFile source(doc);
+            if (!source.open(QIODevice::ReadOnly) || source.readAll() != externalBytes) {
+                return fail("47b3 overwrote bytes written by the external process");
+            }
+        }
+#endif
+
+        // 47b4: annotation coordinates remain in PDF user space on cropped and rotated pages.
+        {
+            const QString doc = tmp.filePath(QStringLiteral("rotated_crop_highlight.pdf"));
+            generateTextPdf(doc.toStdString(), "/CropBox [20 60 580 740] /Rotate 270");
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, doc)) return fail("47b4 cannot open cropped/rotated page");
+            const QImage before = v.renderPageForPrint(0, 1.0, 2.0);
+            if (!highlightChars(v, 0, 4)) return fail("47b4 cannot highlight cropped/rotated page");
+            const QImage after = v.renderPageForPrint(0, 1.0, 2.0);
+            const auto text = v.getPageText(0);
+            const QString savedPath = tmp.filePath(QStringLiteral("rotated_crop_saved.pdf"));
+            if (!v.saveDocument(savedPath)) return fail("47b4 cannot save highlighted document");
+            ui::PdfViewerWidget immediate;
+            const QString immediatePath = tmp.filePath(QStringLiteral("rotated_crop_immediate.pdf"));
+            if (!openViewer(immediate, doc) || !highlightChars(immediate, 0, 4) || !immediate.saveDocument(immediatePath)) {
+                return fail("47b4 immediate save failed");
+            }
+            QFile immediateFile(immediatePath);
+            if (!immediateFile.open(QIODevice::ReadOnly) || !immediateFile.readAll().contains("/AP")) {
+                return fail("47b4 immediately saved highlight has no appearance stream");
+            }
+            const QImage saved = v.renderPageForPrint(0, 1.0, 2.0);
+            const auto annotations = v.renderWorker().listAnnotationsSync(v.currentDocumentId(), 0, 15000);
+            if (!text || text->chars.empty() || !text->chars[0].hasUserSpaceBox ||
+                !annotations.success || annotations.annotations.empty() || annotations.annotations[0].quadPoints.empty()) {
+                return fail("47b4 missing glyph or annotation geometry");
+            }
+            const auto& glyph = text->chars[0];
+            const auto& quad = annotations.annotations[0].quadPoints[0];
+            if (std::abs(quad.x1 - glyph.userSpaceLeft) > 1.0 ||
+                std::abs(quad.y1 - glyph.userSpaceTop) > 1.0) {
+                return fail("47b4 annotation coordinates were transformed from display space incorrectly");
+            }
+            if (before.isNull() || after.size() != before.size() || saved.size() != before.size() || text->chars.size() < 5) {
+                return fail("47b4 cannot render highlight appearance");
+            }
+            double left = text->chars[0].left, right = text->chars[0].right;
+            double top = text->chars[0].top, bottom = text->chars[0].bottom;
+            for (int i = 1; i < 5; ++i) {
+                const auto& box = text->chars[static_cast<size_t>(i)];
+                left = std::min(left, box.left); right = std::max(right, box.right);
+                top = std::min(top, box.top); bottom = std::max(bottom, box.bottom);
+            }
+            int darkBefore = 0, darkAfter = 0, darkSaved = 0, yellowBackground = 0, yellowSaved = 0;
+            for (int y = std::max(0, static_cast<int>(std::floor(top * 2))); y < std::min(before.height(), static_cast<int>(std::ceil(bottom * 2))); ++y) {
+                for (int x = std::max(0, static_cast<int>(std::floor(left * 2))); x < std::min(before.width(), static_cast<int>(std::ceil(right * 2))); ++x) {
+                    const QColor oldPixel = before.pixelColor(x, y);
+                    const QColor newPixel = after.pixelColor(x, y);
+                    const QColor savedPixel = saved.pixelColor(x, y);
+                    if (oldPixel.red() < 70 && oldPixel.green() < 70 && oldPixel.blue() < 70) {
+                        ++darkBefore;
+                        if (newPixel.red() < 200 && newPixel.green() < 200 && newPixel.blue() < 100) ++darkAfter;
+                        if (savedPixel.red() < 200 && savedPixel.green() < 200 && savedPixel.blue() < 100) ++darkSaved;
+                    }
+                    if (oldPixel.red() > 230 && oldPixel.green() > 230 && oldPixel.blue() > 230 &&
+                        newPixel.red() > 200 && newPixel.green() > 200 && newPixel.blue() < 220) ++yellowBackground;
+                    if (oldPixel.red() > 230 && oldPixel.green() > 230 && oldPixel.blue() > 230 &&
+                        savedPixel.red() > 200 && savedPixel.green() > 200 && savedPixel.blue() < 220) ++yellowSaved;
+                }
+            }
+            if (darkBefore < 5 || darkAfter * 2 < darkBefore || darkSaved * 2 < darkBefore || yellowBackground < 5 || yellowSaved < 5) {
+                std::cerr << "  appearance pixels: dark before=" << darkBefore << ", dark after=" << darkAfter
+                          << ", dark saved=" << darkSaved << ", yellow background=" << yellowBackground
+                          << ", yellow saved=" << yellowSaved << std::endl;
+                return fail("47b4 highlight appearance obscured text or failed to render");
+            }
+        }
+
+#ifdef PDF_WORKER_TEST_HOOKS
+        // 47c0: reject a same-size output that retains the source prefix but loses the annotation update.
         {
             ui::PdfViewerWidget v;
             if (!openViewer(v, QString::fromStdString(textPath))) return fail("47c0 cannot open document");
+            if (!highlightChars(v, 0, 4)) return fail("47c0 highlight failed");
             const QString dest = tmp.filePath(QStringLiteral("invalid-save.pdf"));
             QFile::remove(dest);
-            v.setBeforeValidationHookForTesting([](const QString& tempPath) {
+            v.setBeforeValidationHookForTesting([&textPath](const QString& tempPath) {
                 QFile f(tempPath);
                 if (!f.open(QIODevice::ReadWrite)) return;
                 const qint64 size = f.size();
                 if (size < 32) return;
+                QFile source(QString::fromStdString(textPath));
+                if (!source.open(QIODevice::ReadOnly)) return;
+                const QByteArray original = source.readAll();
+                if (original.size() >= size) return;
                 QByteArray malformed(static_cast<int>(size), 'x');
-                malformed.replace(0, 5, "%PDF-");
+                malformed.replace(0, original.size(), original);
                 malformed.replace(malformed.size() - 6, 5, "%%EOF");
                 f.resize(0);
                 f.write(malformed);
             });
-            if (v.saveDocument(dest)) return fail("47c0 accepted unparsable PDF bytes");
+            if (v.saveDocument(dest)) return fail("47c0 accepted output that lost the worker's annotation");
             if (QFileInfo::exists(dest)) return fail("47c0 committed an invalid PDF");
+        }
+
+        // 47c1: nested event processing during validation must not allow an edit into the log
+        // after the worker has already serialized the output snapshot.
+        {
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, QString::fromStdString(textPath))) return fail("47c1 cannot open document");
+            if (!highlightChars(v, 0, 4)) return fail("47c1 initial highlight failed");
+            bool nestedUndoWasRejected = false;
+            v.setBeforeValidationHookForTesting([&](const QString&) {
+                nestedUndoWasRejected = !v.undoEdit();
+            });
+            const QString dest = tmp.filePath(QStringLiteral("reentrant-save.pdf"));
+            if (!v.saveDocument(dest)) return fail("47c1 save failed after rejected nested edit");
+            if (!nestedUndoWasRejected) return fail("47c1 nested edit was not blocked during save");
+            if (v.editLog().isDirty() || countHighlights(dest) != 1) return fail("47c1 saved file and edit log diverged");
         }
 
         // 47c: bytes written by the worker AFTER validation must not reach the destination.

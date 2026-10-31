@@ -458,6 +458,7 @@ add_test(
 add_test(
     NAME ViewportWidgetTestSuite
     COMMAND test_widget "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/redaction/signed.pdf"
 )
 
 add_test(

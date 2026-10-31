@@ -58,6 +58,42 @@ bool confirmInPlaceSave(QWidget* parent, const QString& path) {
                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
 }
 
+bool saveViewerWithConfirmation(QWidget* parent, PdfViewerWidget* viewer) {
+    if (!viewer || viewer->isSaveInProgress() || viewer->isEditInProgress()) {
+        return false;
+    }
+    const QString sourcePath = viewer->currentFilePath();
+    QString destinationPath = sourcePath;
+    if (destinationPath.isEmpty()) {
+        destinationPath = QFileDialog::getSaveFileName(parent, QObject::tr("Save PDF As"), QString(),
+                                                       QObject::tr("PDF Documents (*.pdf)"));
+        if (destinationPath.isEmpty()) {
+            return false;
+        }
+    }
+    if (viewer->editLog().isDirty() && !sourcePath.isEmpty() &&
+        sameDestinationFile(destinationPath, sourcePath) && !confirmInPlaceSave(parent, sourcePath)) {
+        return false;
+    }
+    return viewer->saveDocument(destinationPath);
+}
+
+bool confirmDirtyDocument(QWidget* parent, PdfViewerWidget* viewer) {
+    if (!viewer || !viewer->editLog().isDirty()) {
+        return true;
+    }
+    QString name = QFileInfo(viewer->currentFilePath()).fileName();
+    if (name.isEmpty()) name = QObject::tr("Untitled");
+    const auto result = QMessageBox::question(
+        parent, QObject::tr("Unsaved Changes"),
+        QObject::tr("The document \"%1\" has unsaved edits.\nDo you want to save before closing?").arg(name),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (result == QMessageBox::Save) {
+        return saveViewerWithConfirmation(parent, viewer);
+    }
+    return result == QMessageBox::Discard;
+}
+
 class PasswordDialog final : public QDialog {
 public:
     using QDialog::QDialog;
@@ -218,25 +254,9 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     if (m_docTabs) {
         for (int i = 0; i < m_docTabs->count(); ++i) {
             if (auto* v = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(i))) {
-                if (v->editLog().isDirty()) {
-                    QString name = QFileInfo(v->currentFilePath()).fileName();
-                    if (name.isEmpty()) name = tr("Untitled");
-                    auto res = QMessageBox::question(
-                        this,
-                        tr("Unsaved Changes"),
-                        tr("The document \"%1\" has unsaved edits.\nDo you want to save before closing?").arg(name),
-                        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
-                        QMessageBox::Save
-                    );
-                    if (res == QMessageBox::Save) {
-                        if (!v->saveDocument()) {
-                            event->ignore();
-                            return;
-                        }
-                    } else if (res == QMessageBox::Cancel) {
-                        event->ignore();
-                        return;
-                    }
+                if (v->isSaveInProgress() || v->isEditInProgress() || !confirmDirtyDocument(this, v)) {
+                    event->ignore();
+                    return;
                 }
                 saveReadingPosition(v);
             }
@@ -892,6 +912,24 @@ bool MainWindow::openFile(const QString& filePath, bool inNewTab) {
     if (!viewer) {
         viewer = createViewerTab();
     }
+    if (viewer->isSaveInProgress() || viewer->isEditInProgress()) {
+        return false;
+    }
+    if (viewer->editLog().isDirty()) {
+        QString name = QFileInfo(viewer->currentFilePath()).fileName();
+        if (name.isEmpty()) name = tr("Untitled");
+        const auto result = QMessageBox::question(
+            this, tr("Unsaved Changes"),
+            tr("The document \"%1\" has unsaved edits.\nDo you want to save before opening another document?").arg(name),
+            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+        if (result == QMessageBox::Save) {
+            if (!saveViewerWithConfirmation(this, viewer)) return false;
+        } else if (result == QMessageBox::Discard) {
+            viewer->closeDocument();
+        } else {
+            return false;
+        }
+    }
     viewer->openDocumentAsync(filePath);
     return true;
 }
@@ -929,23 +967,8 @@ void MainWindow::closeTab(int index) {
         return;
     }
     auto* viewer = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(index));
-    if (viewer && viewer->editLog().isDirty()) {
-        QString name = QFileInfo(viewer->currentFilePath()).fileName();
-        if (name.isEmpty()) name = tr("Untitled");
-        auto res = QMessageBox::question(
-            this,
-            tr("Unsaved Changes"),
-            tr("The document \"%1\" has unsaved edits.\nDo you want to save before closing?").arg(name),
-            QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
-            QMessageBox::Save
-        );
-        if (res == QMessageBox::Save) {
-            if (!viewer->saveDocument()) {
-                return;
-            }
-        } else if (res == QMessageBox::Cancel) {
-            return;
-        }
+    if (viewer && (viewer->isSaveInProgress() || viewer->isEditInProgress() || !confirmDirtyDocument(this, viewer))) {
+        return;
     }
     if (viewer) {
         saveReadingPosition(viewer);
@@ -983,6 +1006,7 @@ void MainWindow::selectPreviousTab() {
 
 void MainWindow::onCurrentTabChanged(int index) {
     if (index < 0 || !m_docTabs) {
+        onEditLogDirtyChanged(false);
         return;
     }
     if (m_viewer && m_viewer->isDocumentOpen()) {
@@ -990,8 +1014,10 @@ void MainWindow::onCurrentTabChanged(int index) {
     }
     m_viewer = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(index));
     if (!m_viewer) {
+        onEditLogDirtyChanged(false);
         return;
     }
+    onEditLogDirtyChanged(m_viewer->editLog().isDirty());
 
     if (m_thumbnailWidget) {
         m_thumbnailWidget->setViewer(m_viewer);

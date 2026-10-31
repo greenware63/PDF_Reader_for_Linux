@@ -17,6 +17,11 @@ struct PageCharBox {
     double right{0.0};
     double bottom{0.0};
     char32_t unicode{0};
+    float userSpaceLeft{0.0f};
+    float userSpaceRight{0.0f};
+    float userSpaceBottom{0.0f};
+    float userSpaceTop{0.0f};
+    bool hasUserSpaceBox{false};
 
     bool isValid() const noexcept {
         return (right > left) && (bottom > top);

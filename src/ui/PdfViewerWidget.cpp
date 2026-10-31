@@ -6,14 +6,6 @@ namespace {
 
 constexpr qint64 MAX_VALIDATED_PDF_BYTES = 512LL * 1024 * 1024;
 
-bool refersToSameFile(const QString& left, const QString& right) {
-    const QFileInfo l(left), r(right);
-    const QString lc = l.canonicalFilePath();
-    const QString rc = r.canonicalFilePath();
-    if (!lc.isEmpty() && !rc.isEmpty()) return lc == rc;
-    return l.absoluteFilePath() == r.absoluteFilePath();
-}
-
 // Rotates a page-point rectangle into displayed page-point coordinates [px, py, pw, ph]
 void rotateRectPointsForDisplay(const pdf::PageCharBox& r, double pageW, double pageH, int rotation,
                                 double& outPx, double& outPy, double& outPw, double& outPh) {
@@ -62,8 +54,10 @@ void rotateRectPointsForDisplay(const pdf::PageCharBox& r, double pageW, double 
 #include <QCoreApplication>
 #include <QGuiApplication>
 #include <QClipboard>
+#include <QScopedValueRollback>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <unordered_set>
 
 namespace ui {
@@ -252,9 +246,15 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath, const 
     if (filePath.isEmpty()) {
         return pdf::DocumentError::FileNotFound;
     }
+    if (m_saveInProgress || m_editInProgress ||
+        (m_editLog.isDirty() && !m_preserveEditLogOnOpen)) {
+        Q_EMIT loadError(tr("Save or discard the current edits before opening another document."));
+        return pdf::DocumentError::InvalidFormat;
+    }
 
     // A synchronous open supersedes any asynchronous open that is pending or queued.
     cancelPendingOpen();
+    QScopedValueRollback<bool> openGuard(m_editInProgress, true);
 
     const int64_t nextDocId = m_currentDocumentId + 1;
     // Open serially on the engine worker thread - 0 PDFium calls on UI thread!
@@ -271,6 +271,11 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath, const 
 void PdfViewerWidget::openDocumentAsync(const QString& filePath, const QString& password) {
     if (filePath.isEmpty()) {
         Q_EMIT loadError(openErrorMessage(pdf::DocumentError::FileNotFound, filePath));
+        return;
+    }
+    if (m_saveInProgress || m_editInProgress ||
+        (m_editLog.isDirty() && !m_preserveEditLogOnOpen)) {
+        Q_EMIT loadError(tr("Save or discard the current edits before opening another document."));
         return;
     }
     if (m_loading) {
@@ -344,6 +349,10 @@ void PdfViewerWidget::onDocumentOpened(int64_t documentId, pdf::OpenResult resul
 }
 
 void PdfViewerWidget::closeDocument() {
+    if (m_saveInProgress || m_editInProgress || m_recovering) {
+        return;
+    }
+    QScopedValueRollback<bool> closeGuard(m_editInProgress, true);
     clearStagedRedactions();
     m_isRedacting = false;
     m_redactStartPage = -1;
@@ -366,6 +375,7 @@ void PdfViewerWidget::closeDocument() {
     Q_EMIT rotationChanged(0);
 
     m_hasDocument = false;
+    m_editLog.clear();
     m_currentFilePath.clear();
     m_currentPassword.clear();
     m_sourceFileSize = -1;
@@ -2306,9 +2316,10 @@ void PdfViewerWidget::drawRedactionOverlays(QPainter& painter, const layout::Vie
 }
 
 bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
-    if (!hasSelection() || !m_hasDocument) {
+    if (!hasSelection() || !m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
     }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
 
     bool forward = (m_selectionStart.pageIndex < m_selectionEnd.pageIndex) ||
                    (m_selectionStart.pageIndex == m_selectionEnd.pageIndex && m_selectionStart.charIndex <= m_selectionEnd.charIndex);
@@ -2332,25 +2343,31 @@ bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
             continue;
         }
 
-        const auto& pl = m_layout.getPageLayout(p);
-        double pageH = pl.heightPoints;
-
         pdf::AnnotationItem hl;
         // The UI owns the annotation id (RFC section 3.1): undo, redo and crash recovery address it by /NM.
         hl.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
         hl.subtype = pdf::AnnotationSubtype::Highlight;
         hl.pageIndex = p;
-        hl.colorArgb = (colorArgb != 0) ? colorArgb : 0xFFFFFF00;
+        hl.colorArgb = (colorArgb != 0) ? colorArgb : 0x80FFFF00;
         hl.hasColor = true;
         hl.flags = 4; // FPDF_ANNOT_FLAG_PRINT
         hl.contents = QString::fromStdU16String(pt.getSelectedText(startChar, endChar));
 
-        double minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
-        for (const auto& b : rects) {
-            double pLeft = b.left;
-            double pRight = b.right;
-            double pTop = pageH - b.top;
-            double pBottom = pageH - b.bottom;
+        double minX = std::numeric_limits<double>::max();
+        double maxX = std::numeric_limits<double>::lowest();
+        double minY = std::numeric_limits<double>::max();
+        double maxY = std::numeric_limits<double>::lowest();
+        const int first = std::max(0, startChar);
+        const int last = std::min(endChar, static_cast<int>(pt.charCount()) - 1);
+        for (int charIndex = first; charIndex <= last; ++charIndex) {
+            const auto& b = pt.chars[static_cast<size_t>(charIndex)];
+            if (!b.hasUserSpaceBox) {
+                continue;
+            }
+            const double pLeft = b.userSpaceLeft;
+            const double pRight = b.userSpaceRight;
+            const double pTop = b.userSpaceTop;
+            const double pBottom = b.userSpaceBottom;
 
             minX = std::min(minX, pLeft);
             maxX = std::max(maxX, pRight);
@@ -2364,13 +2381,21 @@ bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
             quad.x4 = pRight; quad.y4 = pBottom;
             hl.quadPoints.push_back(quad);
         }
+        if (hl.quadPoints.empty()) {
+            Q_EMIT loadError(tr("Could not determine PDF coordinates for the selected text."));
+            continue;
+        }
         hl.left = minX;
         hl.right = maxX;
         hl.bottom = minY;
         hl.top = maxY;
 
+        const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, p, hl);
+        if (!response.success) {
+            Q_EMIT loadError(tr("Could not apply highlight on page %1: %2").arg(p + 1).arg(response.errorMessage));
+            continue;
+        }
         m_editLog.recordAddAnnotation(p, hl);
-        m_renderWorker.requestAddAnnotation(m_currentDocumentId, p, hl);
         anyAdded = true;
     }
 
@@ -2394,24 +2419,44 @@ void PdfViewerWidget::refreshAfterEdit() {
 }
 
 bool PdfViewerWidget::undoEdit() {
+    if (m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
     pdf::EditCommand cmd;
     if (!m_hasDocument || !m_editLog.undo(cmd)) {
         return false;
     }
     if (cmd.type == pdf::EditCommandType::AddAnnotation) {
-        m_renderWorker.requestRemoveAnnotation(m_currentDocumentId, cmd.pageIndex, cmd.after.name);
+        const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.after.name);
+        if (!response.success || response.removedCount == 0) {
+            pdf::EditCommand restored;
+            m_editLog.redo(restored);
+            Q_EMIT loadError(tr("Could not undo the annotation: %1").arg(response.errorMessage));
+            return false;
+        }
     }
     refreshAfterEdit();
     return true;
 }
 
 bool PdfViewerWidget::redoEdit() {
+    if (m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
     pdf::EditCommand cmd;
     if (!m_hasDocument || !m_editLog.redo(cmd)) {
         return false;
     }
     if (cmd.type == pdf::EditCommandType::AddAnnotation) {
-        m_renderWorker.requestAddAnnotation(m_currentDocumentId, cmd.pageIndex, cmd.after);
+        const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.after);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.undo(restored);
+            Q_EMIT loadError(tr("Could not redo the annotation: %1").arg(response.errorMessage));
+            return false;
+        }
     }
     refreshAfterEdit();
     return true;
@@ -2435,12 +2480,17 @@ void PdfViewerWidget::recoverAfterWorkerFailure() {
         return;
     }
 
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
     int applied = 0;
     bool ok = true;
     for (const auto& op : m_editLog.opsSinceSave()) {
-        const bool done = op.add
-            ? m_renderWorker.addAnnotationSync(m_currentDocumentId, op.command.pageIndex, op.command.after).success
-            : m_renderWorker.removeAnnotationSync(m_currentDocumentId, op.command.pageIndex, op.command.after.name).success;
+        bool done = false;
+        if (op.add) {
+            done = m_renderWorker.addAnnotationSync(m_currentDocumentId, op.command.pageIndex, op.command.after).success;
+        } else {
+            const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, op.command.pageIndex, op.command.after.name);
+            done = response.success && response.removedCount > 0;
+        }
         if (!done) {
             ok = false;
             break;
@@ -2452,14 +2502,16 @@ void PdfViewerWidget::recoverAfterWorkerFailure() {
     if (ok) {
         Q_EMIT editsRecovered(applied);
     } else {
+        m_hasDocument = false;
         Q_EMIT loadError(tr("The viewer process stopped; only some unsaved annotations could be restored."));
     }
 }
 
 bool PdfViewerWidget::saveDocument(const QString& targetPath) {
-    if (!m_hasDocument || m_currentDocumentId == 0) {
+    if (!m_hasDocument || m_currentDocumentId == 0 || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
     }
+    QScopedValueRollback<bool> saveGuard(m_saveInProgress, true);
     QString destPath = targetPath.isEmpty() ? m_currentFilePath : targetPath;
     if (destPath.isEmpty()) {
         return false;
@@ -2471,14 +2523,10 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
         return false;
     }
     QString tempPath = tempFile.fileName();
-    int tempFd = -1;
-#ifdef Q_OS_LINUX
-    tempFd = ::dup(tempFile.handle());
-#else
-    tempFile.close();
-#endif
 
-    const bool incremental = refersToSameFile(destPath, m_currentFilePath);
+    // Preserve the source PDF's existing objects and signatures for every save based on a file,
+    // including Save As. A full rewrite is only appropriate for documents without a source path.
+    const bool incremental = !m_currentFilePath.isEmpty();
     QByteArray origBytes;
     if (incremental) {
         const QFileInfo currentSourceInfo(m_currentFilePath);
@@ -2499,6 +2547,16 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
             return false;
         }
     }
+    int tempFd = -1;
+#ifdef Q_OS_LINUX
+    tempFd = ::dup(tempFile.handle());
+    if (tempFd < 0) {
+        tempFile.remove();
+        return false;
+    }
+#else
+    tempFile.close();
+#endif
     auto saveResp = m_renderWorker.saveDocumentSync(m_currentDocumentId, tempFd, incremental, tempPath);
     if (!saveResp.success || saveResp.bytesWritten == 0) {
         tempFile.remove();
@@ -2609,6 +2667,19 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
     }
 #endif
 
+    // Recheck both metadata and bytes as late as possible. This narrows the conflict window and
+    // catches source changes made while output validation (or a test hook) was running.
+    if (incremental) {
+        const QFileInfo currentSourceInfo(m_currentFilePath);
+        QFile currentSource(m_currentFilePath);
+        if (!currentSourceInfo.exists() || currentSourceInfo.size() != m_sourceFileSize ||
+            currentSourceInfo.lastModified() != m_sourceFileModified ||
+            !currentSource.open(QIODevice::ReadOnly) || currentSource.readAll() != origBytes) {
+            tempFile.remove();
+            return false;
+        }
+    }
+
     // Commit exactly the bytes that were validated above - never re-read the worker-written temp file, whose
     // descriptor a compromised worker may still hold. QSaveFile writes a sibling temp file and renames it over
     // the target (atomic), follows a symlink to its target, and keeps the existing file's permissions.
@@ -2627,6 +2698,26 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
     m_sourceFileSize = savedInfo.exists() ? savedInfo.size() : -1;
     m_sourceFileModified = savedInfo.exists() ? savedInfo.lastModified() : QDateTime();
     m_editLog.markSaved();
+
+    // The worker must use the committed revision as its base for the next incremental save.
+    // Keep the edit history (now clean) so undo remains available after saving.
+    const int64_t rebasedDocumentId = m_currentDocumentId + 1;
+    const auto rebased = m_renderWorker.openDocumentSync(rebasedDocumentId, destPath.toStdString(),
+                                                         m_currentPassword.toStdString());
+    if (rebased.error != pdf::DocumentError::None) {
+        m_hasDocument = false;
+        m_workerErrorMessage = openErrorMessage(rebased.error, destPath);
+        Q_EMIT loadError(tr("The PDF was saved, but the viewer could not reload the saved revision. Reopen the file to continue."));
+        return true;
+    }
+    const int savedPage = m_currentPage;
+    const double savedZoom = m_scale;
+    const int64_t savedScrollX = m_docScrollX;
+    const int64_t savedScrollY = m_docScrollY;
+    m_preserveEditLogOnOpen = true;
+    applyOpenedDocument(rebasedDocumentId, destPath, m_currentPassword, rebased);
+    m_preserveEditLogOnOpen = false;
+    restoreReadingPosition(savedPage, savedZoom, savedScrollX, savedScrollY);
     return true;
 }
 
