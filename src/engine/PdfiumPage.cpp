@@ -773,6 +773,95 @@ bool PdfiumPage::addHighlightAnnotation(const AnnotationItem& item) {
     return addMarkupAnnotation(copy);
 }
 
+bool PdfiumPage::addTextAnnotation(const AnnotationItem& item) {
+    if (!m_page || !item.isValid()) {
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    // 1. Create the annotation in PDFium
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, FPDF_ANNOT_TEXT);
+    if (!annot) {
+        return false;
+    }
+    const int annotIndex = FPDFPage_GetAnnotCount(m_page) - 1;
+    auto failText = [&]() {
+        FPDFPage_CloseAnnot(annot);
+        FPDFPage_RemoveAnnot(m_page, annotIndex);
+        return false;
+    };
+
+    // 2. Set /Rect
+    FS_RECTF rect{};
+    rect.left = static_cast<float>(item.left);
+    rect.top = static_cast<float>(item.top);
+    rect.right = static_cast<float>(item.right);
+    rect.bottom = static_cast<float>(item.bottom);
+    if (!FPDFAnnot_SetRect(annot, &rect)) {
+        return failText();
+    }
+
+    // 3. Set Color (/C)
+    uint32_t a = (item.colorArgb >> 24) & 0xFF;
+    uint32_t r = (item.colorArgb >> 16) & 0xFF;
+    uint32_t g = (item.colorArgb >> 8) & 0xFF;
+    uint32_t b = item.colorArgb & 0xFF;
+    if (a == 0 && item.colorArgb == 0) {
+        // Default Sticky Note color: Gold/Yellow #FFD700
+        r = 255; g = 215; b = 0; a = 255;
+    }
+    if (!FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, a)) {
+        return failText();
+    }
+
+    // 4. Set Flags (/F)
+    uint32_t flags = item.flags ? item.flags : (FPDF_ANNOT_FLAG_PRINT | FPDF_ANNOT_FLAG_NOZOOM | FPDF_ANNOT_FLAG_NOROTATE);
+    if (!FPDFAnnot_SetFlags(annot, flags)) {
+        return failText();
+    }
+
+    // 5. Set /NM (unique identifier string)
+    if (!item.name.isEmpty()) {
+        const std::u16string u16 = item.name.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failText();
+        }
+    }
+
+    // 6. Set /Contents (the note text)
+    if (!item.contents.isEmpty()) {
+        const std::u16string u16 = item.contents.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failText();
+        }
+    }
+
+    // 7. Set /T (Author)
+    if (!item.author.isEmpty()) {
+        const std::u16string u16 = item.author.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failText();
+        }
+    }
+
+    // 8. Set /Name (icon name: default "Comment")
+    const std::u16string iconName = u"Comment";
+    FPDFAnnot_SetStringValue(annot, "Name", reinterpret_cast<FPDF_WIDESTRING>(iconName.c_str()));
+
+    // 9. Generate appearance stream
+    FPDF_BITMAP appearanceBitmap = FPDFBitmap_Create(1, 1, 0);
+    if (!appearanceBitmap) return failText();
+    FPDF_RenderPageBitmap(appearanceBitmap, m_page, 0, 0, 1, 1, 0, FPDF_ANNOT);
+    FPDFBitmap_Destroy(appearanceBitmap);
+    if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
+        return failText();
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
+}
+
 int PdfiumPage::removeAnnotationByName(const QString& name) {
     if (!m_page || name.isEmpty() || name.size() > 256) {
         return 0;

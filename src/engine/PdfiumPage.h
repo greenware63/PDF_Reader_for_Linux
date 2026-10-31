@@ -40,6 +40,7 @@ public:
     bool hitTestAnnotation(double xPoints, double yPoints, AnnotationItem& out) override;
     bool addMarkupAnnotation(const AnnotationItem& item) override;
     bool addHighlightAnnotation(const AnnotationItem& item) override;
+    bool addTextAnnotation(const AnnotationItem& item) override;
     int removeAnnotationByName(const QString& name) override;
 
     static void setSimulateGetTextFailureForTesting(bool simulate) noexcept;

@@ -3101,8 +3101,127 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Underline, StrikeOut, Squiggly creation, hit-test, incremental save, and removal verified." << std::endl;
     }
 
+    // Test 34: Milestone M3: Text Note Annotations (/Text, sticky notes)
+    std::cout << "[TEST 34] Testing Text Note annotations (/Text, sticky note)..." << std::endl;
+    {
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] Test 34: Failed to create temp dir" << std::endl;
+            return 1;
+        }
+
+        const std::string pdfPath = tempDir.filePath("text_note_test.pdf").toStdString();
+        generateTextPdfFixture(pdfPath, "Text Note Test: Sticky Notes");
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(pdfPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 34: Failed to load fixture" << std::endl;
+            return 1;
+        }
+
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 34: Failed to get page 0" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem note;
+        note.subtype = pdf::AnnotationSubtype::Text;
+        note.pageIndex = 0;
+        note.left = 100.0;
+        note.bottom = 676.0;
+        note.right = 124.0;
+        note.top = 700.0;
+        note.colorArgb = 0xFFFFD700; // Gold / Yellow
+        note.hasColor = true;
+        note.flags = 4;
+        note.contents = QStringLiteral("This is a test sticky note.");
+        note.author = QStringLiteral("TestAuthor");
+        note.name = QStringLiteral("note-test-34");
+
+        if (!page->addTextAnnotation(note)) {
+            std::cerr << "[FAIL] Test 34: addTextAnnotation failed" << std::endl;
+            return 1;
+        }
+
+        // Verify listed
+        auto annots = page->listAnnotations();
+        if (annots.size() != 1) {
+            std::cerr << "[FAIL] Test 34: Expected 1 annotation listed, got " << annots.size() << std::endl;
+            return 1;
+        }
+        if (annots[0].subtype != pdf::AnnotationSubtype::Text ||
+            annots[0].name != "note-test-34" ||
+            annots[0].contents != "This is a test sticky note." ||
+            annots[0].author != "TestAuthor") {
+            std::cerr << "[FAIL] Test 34: Annotation properties mismatch" << std::endl;
+            return 1;
+        }
+
+        // Hit testing
+        pdf::AnnotationItem hit;
+        if (!page->hitTestAnnotation(112.0, 688.0, hit) || hit.subtype != pdf::AnnotationSubtype::Text || hit.name != "note-test-34") {
+            std::cerr << "[FAIL] Test 34: Hit test inside note rect failed" << std::endl;
+            return 1;
+        }
+        if (page->hitTestAnnotation(50.0, 50.0, hit)) {
+            std::cerr << "[FAIL] Test 34: Hit test outside note rect unexpectedly succeeded" << std::endl;
+            return 1;
+        }
+
+        // Incremental save and verify preservation
+        const std::string savedPath = tempDir.filePath("text_note_saved.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (saveFd < 0) {
+            std::cerr << "[FAIL] Test 34: Failed to open saveFd" << std::endl;
+            return 1;
+        }
+        uint64_t written = 0;
+        if (!doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
+            std::cerr << "[FAIL] Test 34: saveAsCopy failed" << std::endl;
+            return 1;
+        }
+
+        // Reopen saved file in fresh document and check annotations
+        auto freshDoc = pdf::createDocument();
+        if (freshDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 34: Failed to reopen saved file" << std::endl;
+            return 1;
+        }
+        auto freshPage = freshDoc->getPage(0);
+        if (!freshPage) {
+            std::cerr << "[FAIL] Test 34: Failed to get page 0 in fresh document" << std::endl;
+            return 1;
+        }
+        auto freshAnnots = freshPage->listAnnotations();
+        if (freshAnnots.size() != 1 ||
+            freshAnnots[0].subtype != pdf::AnnotationSubtype::Text ||
+            freshAnnots[0].contents != "This is a test sticky note.") {
+            std::cerr << "[FAIL] Test 34: Reopened annotations mismatch" << std::endl;
+            return 1;
+        }
+
+        // Verify removeAnnotationByName
+        int removed = page->removeAnnotationByName(QStringLiteral("note-test-34"));
+        if (removed != 1) {
+            std::cerr << "[FAIL] Test 34: removeAnnotationByName did not remove exactly 1 annotation" << std::endl;
+            return 1;
+        }
+        auto afterRemove = page->listAnnotations();
+        if (!afterRemove.empty()) {
+            std::cerr << "[FAIL] Test 34: Expected 0 annotations after removal, got " << afterRemove.size() << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Text Note (/Text) creation, listing, hit-test, incremental save, and removal verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 33 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 34 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

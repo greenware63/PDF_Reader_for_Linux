@@ -865,6 +865,8 @@ void RenderWorker::requestAddAnnotation(int64_t documentId, int pageIndex, const
             annotItem.subtype == AnnotationSubtype::StrikeOut ||
             annotItem.subtype == AnnotationSubtype::Squiggly) {
             ok = page->addMarkupAnnotation(annotItem);
+        } else if (annotItem.subtype == AnnotationSubtype::Text) {
+            ok = page->addTextAnnotation(annotItem);
         } else {
             Q_EMIT annotationAddFailed(documentId, pageIndex, QStringLiteral("Unsupported annotation subtype"));
             return;
