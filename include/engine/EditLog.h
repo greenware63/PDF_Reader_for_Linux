@@ -27,8 +27,10 @@ struct EditCommand {
 
 /// One operation to apply to a worker document so that it matches the log's current state.
 struct EditOp {
-    bool add{true};          // true: add `command.after`; false: remove it (by its /NM)
-    EditCommand command;
+    bool add{true};          // true: add `item`; false: remove `name`
+    int pageIndex{0};
+    AnnotationItem item;
+    QString name;
 };
 
 class EditLog : public QObject {
@@ -39,6 +41,8 @@ public:
     ~EditLog() override = default;
 
     uint64_t recordAddAnnotation(int pageIndex, const AnnotationItem& item);
+    uint64_t recordDeleteAnnotation(int pageIndex, const AnnotationItem& item);
+    uint64_t recordModifyAnnotation(int pageIndex, const AnnotationItem& before, const AnnotationItem& after);
 
     bool canUndo() const;
     bool canRedo() const;

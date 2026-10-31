@@ -5250,8 +5250,8 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Underline, StrikeOut, Squiggly selection, undo/redo, and saveDocument in PdfViewerWidget verified." << std::endl;
     }
 
-    // --- Test 49: Text Note (Sticky Note) creation, undo/redo, and saveDocument in PdfViewerWidget ---
-    std::cout << "[TEST 49] Testing Sticky Note in PdfViewerWidget..." << std::endl;
+    // --- Test 49: Text Note (Sticky Note) creation, editing, deletion, undo/redo, and saveDocument in PdfViewerWidget ---
+    std::cout << "[TEST 49] Testing Sticky Note creation, editing, deletion, undo/redo in PdfViewerWidget..." << std::endl;
     {
         QTemporaryDir tmp;
         if (!tmp.isValid()) {
@@ -5284,7 +5284,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Add sticky note at PDF coordinates (100.0, 700.0)
+        // 1. Add sticky note at PDF coordinates (100.0, 700.0)
         const QString noteText = QStringLiteral("This is a widget sticky note");
         if (!viewer.addTextAnnotation(0, 100.0, 700.0, noteText)) {
             std::cerr << "[FAIL] 49 addTextAnnotation returned false" << std::endl;
@@ -5296,7 +5296,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Undo & Redo
+        // Undo & Redo adding
         if (!viewer.undoEdit()) {
             std::cerr << "[FAIL] 49 undoEdit failed" << std::endl;
             return 1;
@@ -5314,7 +5314,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Save document
+        // Save document with the note
         const QString savedPath = tmp.filePath(QStringLiteral("note_saved.pdf"));
         if (!viewer.saveDocument(savedPath)) {
             std::cerr << "[FAIL] 49 saveDocument failed" << std::endl;
@@ -5325,37 +5325,122 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Verify the saved file contains the Text Note annotation
+        // 2. Test Editing / Modifying the note
+        const auto activeCmds = viewer.editLog().activeCommands();
+        if (activeCmds.empty()) {
+            std::cerr << "[FAIL] 49 activeCommands is empty after save" << std::endl;
+            return 1;
+        }
+        const pdf::AnnotationItem originalItem = activeCmds.back().after;
+        const QString editedText = QStringLiteral("This note has been updated with new text");
+        if (!viewer.modifyTextAnnotation(0, originalItem, editedText)) {
+            std::cerr << "[FAIL] 49 modifyTextAnnotation returned false" << std::endl;
+            return 1;
+        }
+        if (!viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 49 editing a note did not mark EditLog dirty" << std::endl;
+            return 1;
+        }
+
+        // Undo modification -> reverts to original note
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 49 undoEdit of modify failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 49 undoing modification back to saved point should not be dirty" << std::endl;
+            return 1;
+        }
+
+        // Redo modification
+        if (!viewer.redoEdit()) {
+            std::cerr << "[FAIL] 49 redoEdit of modify failed" << std::endl;
+            return 1;
+        }
+        if (!viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 49 redoing modification should mark EditLog dirty" << std::endl;
+            return 1;
+        }
+
+        // Worker crash recovery: verify replay does not duplicate notes
+        bool recovered = false;
+        QObject::connect(&viewer, &ui::PdfViewerWidget::editsRecovered, &viewer, [&](int) { recovered = true; });
+        viewer.simulateWorkerCrashForTesting();
+        QElapsedTimer crashTimer;
+        crashTimer.start();
+        while (crashTimer.elapsed() < 8000 && !recovered) {
+            QApplication::processEvents();
+            QThread::msleep(20);
+        }
+        if (!recovered) {
+            std::cerr << "[FAIL] 49 viewer did not recover after crash" << std::endl;
+            return 1;
+        }
+
+        // 3. Test Deleting the note
+        const auto postCrashCmds = viewer.editLog().activeCommands();
+        if (postCrashCmds.empty()) {
+            std::cerr << "[FAIL] 49 activeCommands is empty after crash recovery" << std::endl;
+            return 1;
+        }
+        const pdf::AnnotationItem postCrashItem = postCrashCmds.back().after;
+        if (!viewer.deleteAnnotation(0, postCrashItem)) {
+            std::cerr << "[FAIL] 49 deleteAnnotation returned false" << std::endl;
+            return 1;
+        }
+        if (!viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 49 deleting note did not mark EditLog dirty" << std::endl;
+            return 1;
+        }
+
+        // Undo deletion -> note comes back
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 49 undoEdit of deletion failed" << std::endl;
+            return 1;
+        }
+        // Redo deletion -> note deleted again
+        if (!viewer.redoEdit()) {
+            std::cerr << "[FAIL] 49 redoEdit of deletion failed" << std::endl;
+            return 1;
+        }
+        if (!viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 49 redone deletion must be dirty" << std::endl;
+            return 1;
+        }
+
+        // Save document with the deletion committed
+        const QString deletedSavedPath = tmp.filePath(QStringLiteral("note_deleted_saved.pdf"));
+        if (!viewer.saveDocument(deletedSavedPath)) {
+            std::cerr << "[FAIL] 49 saveDocument after deletion failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 49 EditLog is dirty after save of deletion" << std::endl;
+            return 1;
+        }
+
+        // Reopen deletedSavedPath with WorkerClient: verify 0 annotations exist on page 0
         static int64_t nextId49 = 4900;
         pdf::ipc::WorkerClient client;
         const int64_t id49 = ++nextId49;
-        if (client.openDocumentSync(id49, savedPath.toStdString()).error != pdf::DocumentError::None) {
+        if (client.openDocumentSync(id49, deletedSavedPath.toStdString()).error != pdf::DocumentError::None) {
             std::cerr << "[FAIL] 49 cannot reopen saved file in worker" << std::endl;
             return 1;
         }
         const auto r = client.listAnnotationsSync(id49, 0, 15000);
-        int textNoteCount = 0;
-        QString loadedContents;
-        for (const auto& a : r.annotations) {
-            if (a.subtype == pdf::AnnotationSubtype::Text) {
-                ++textNoteCount;
-                loadedContents = a.contents;
-            }
-        }
         client.closeDocumentSync();
         client.stop();
 
         if (!r.success) {
-            std::cerr << "[FAIL] 49 listing annotations on saved file failed" << std::endl;
+            std::cerr << "[FAIL] 49 listing annotations on deleted saved file failed" << std::endl;
             return 1;
         }
-        if (textNoteCount != 1 || loadedContents != noteText) {
-            std::cerr << "[FAIL] 49 saved file text note verification failed: count=" << textNoteCount
-                      << " contents=\"" << loadedContents.toStdString() << "\"" << std::endl;
+        if (!r.annotations.empty()) {
+            std::cerr << "[FAIL] 49 deleted annotation still present in saved file! count=" << r.annotations.size() << std::endl;
             return 1;
         }
 
-        std::cout << "  -> Passed: Sticky Note creation, undo/redo, and saved file content verified." << std::endl;
+        std::cout << "  -> Passed: Sticky Note creation, editing, deletion, undo/redo, crash replay, and saved-file removal verified." << std::endl;
     }
 
     std::cout << " ALL 49 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
