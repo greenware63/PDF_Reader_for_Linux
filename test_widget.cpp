@@ -9,6 +9,7 @@
 #include <QStandardItemModel>
 #include "ui/FindBar.h"
 #include <QApplication>
+#include <QTextDocument>
 #include <QImage>
 #include <QFile>
 #include <QFileInfo>
@@ -5445,7 +5446,31 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Sticky Note creation, editing, deletion, undo/redo, crash replay, and saved-file removal verified." << std::endl;
     }
 
-    std::cout << " ALL 49 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- Test 50: annotation tooltip text from the PDF is shown literally, never as HTML ---
+    std::cout << "Test 50: Annotation tooltip escapes untrusted markup..." << std::endl;
+    {
+        const QString hostile = QStringLiteral("<h1>FAKE ALERT</h1><img src='/etc/hostname'>");
+        const QString html = ui::PdfViewerWidget::annotationTooltipHtml(QStringLiteral("<b>x</b>"), hostile);
+        if (html.contains(QStringLiteral("<h1")) || html.contains(QStringLiteral("<img")) || html.contains(QStringLiteral("<b>x"))) {
+            std::cerr << "[FAIL] 50a tooltip contains live markup from the PDF: " << html.toStdString() << std::endl;
+            return 1;
+        }
+        QTextDocument doc;
+        doc.setHtml(html);
+        const QString plain = doc.toPlainText();
+        if (!plain.contains(hostile) || !plain.contains(QStringLiteral("<b>x</b>"))) {
+            std::cerr << "[FAIL] 50b markup is not displayed literally: " << plain.toStdString() << std::endl;
+            return 1;
+        }
+        const QString big = ui::PdfViewerWidget::annotationTooltipHtml(QString(), QString(100000, QLatin1Char('a')));
+        if (big.size() > 2000) {
+            std::cerr << "[FAIL] 50c tooltip is not length-capped: " << big.size() << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: tooltip text is escaped and capped." << std::endl;
+    }
+
+    std::cout << " ALL 50 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
