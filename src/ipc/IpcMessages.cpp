@@ -1264,6 +1264,49 @@ QDataStream& operator>>(QDataStream& in, AddAnnotationResponse& res) {
     return in;
 }
 
+// RemoveAnnotationRequest
+QDataStream& operator<<(QDataStream& out, const RemoveAnnotationRequest& req) {
+    out << static_cast<qint64>(req.documentId)
+        << static_cast<qint32>(req.pageIndex)
+        << req.annotationName;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, RemoveAnnotationRequest& req) {
+    qint64 docId = 0;
+    qint32 pageIdx = 0;
+    in >> docId >> pageIdx >> req.annotationName;
+    req.documentId = docId;
+    req.pageIndex = pageIdx;
+    if (pageIdx < 0 || req.annotationName.isEmpty() || req.annotationName.size() > 256) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
+// RemoveAnnotationResponse
+QDataStream& operator<<(QDataStream& out, const RemoveAnnotationResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << static_cast<qint32>(res.pageIndex)
+        << res.success
+        << static_cast<qint32>(res.removedCount)
+        << res.errorMessage;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, RemoveAnnotationResponse& res) {
+    qint64 docId = 0;
+    qint32 pageIdx = 0, removed = 0;
+    in >> docId >> pageIdx >> res.success >> removed >> res.errorMessage;
+    res.documentId = docId;
+    res.pageIndex = pageIdx;
+    res.removedCount = removed;
+    if (removed < 0 || res.errorMessage.size() > 4096) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
 // SaveDocumentRequest
 QDataStream& operator<<(QDataStream& out, const SaveDocumentRequest& req) {
     out << static_cast<qint64>(req.documentId)

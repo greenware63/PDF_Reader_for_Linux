@@ -335,6 +335,20 @@ struct AddAnnotationResponse {
     QString errorMessage;
 };
 
+struct RemoveAnnotationRequest {
+    int64_t documentId{0};
+    int pageIndex{0};
+    QString annotationName;   // /NM identifier assigned by the UI when the annotation was added (1..256 chars)
+};
+
+struct RemoveAnnotationResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+    bool success{false};
+    int removedCount{0};      // number of annotations with that /NM that were removed
+    QString errorMessage;
+};
+
 struct SaveDocumentRequest {
     int64_t documentId{0};
     QString tempFilePath;   // Destination temp file path (for Windows / non-SCM_RIGHTS fallback)
@@ -467,6 +481,12 @@ QDataStream& operator>>(QDataStream& in, HitTestAnnotationResponse& res);
 
 QDataStream& operator<<(QDataStream& out, const AddAnnotationRequest& req);
 QDataStream& operator>>(QDataStream& in, AddAnnotationRequest& req);
+
+QDataStream& operator<<(QDataStream& out, const RemoveAnnotationRequest& req);
+QDataStream& operator>>(QDataStream& in, RemoveAnnotationRequest& req);
+
+QDataStream& operator<<(QDataStream& out, const RemoveAnnotationResponse& res);
+QDataStream& operator>>(QDataStream& in, RemoveAnnotationResponse& res);
 
 QDataStream& operator<<(QDataStream& out, const AddAnnotationResponse& res);
 QDataStream& operator>>(QDataStream& in, AddAnnotationResponse& res);

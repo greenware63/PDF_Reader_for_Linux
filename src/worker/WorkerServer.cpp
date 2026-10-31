@@ -41,6 +41,7 @@ bool isRequestType(uint32_t type) {
         case ipc::MessageType::ListAnnotationsRequest:
         case ipc::MessageType::HitTestAnnotationRequest:
         case ipc::MessageType::AddAnnotationRequest:
+        case ipc::MessageType::RemoveAnnotationRequest:
         case ipc::MessageType::SaveDocumentRequest:
         case ipc::MessageType::SharedMemoryAck:
         case ipc::MessageType::WorkerControlRequest:
@@ -98,6 +99,10 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
             this, &WorkerServer::onAnnotationHitTestFailed, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::annotationAdded,
             this, &WorkerServer::onAnnotationAdded, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::annotationRemoved,
+            this, &WorkerServer::onAnnotationRemoved, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::annotationRemoveFailed,
+            this, &WorkerServer::onAnnotationRemoveFailed, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::annotationAddFailed,
             this, &WorkerServer::onAnnotationAddFailed, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::documentSaved,
@@ -563,6 +568,16 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             break;
         }
 
+        case ipc::MessageType::RemoveAnnotationRequest: {
+            ipc::RemoveAnnotationRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestRemoveAnnotation(req.documentId, req.pageIndex, req.annotationName);
+            } else {
+                onAnnotationRemoveFailed(req.documentId, req.pageIndex, QStringLiteral("Malformed RemoveAnnotationRequest payload"));
+            }
+            break;
+        }
+
         case ipc::MessageType::SaveDocumentRequest: {
             ipc::SaveDocumentRequest req;
             const bool parsed = ipc::deserialize(payload, req);
@@ -917,6 +932,24 @@ void WorkerServer::onAnnotationAdded(int64_t documentId, int pageIndex, const QS
     res.success = true;
     res.annotationName = annotationName;
     sendPacket(ipc::MessageType::AddAnnotationResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onAnnotationRemoved(int64_t documentId, int pageIndex, int removedCount) {
+    ipc::RemoveAnnotationResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.success = true;
+    res.removedCount = removedCount;
+    sendPacket(ipc::MessageType::RemoveAnnotationResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onAnnotationRemoveFailed(int64_t documentId, int pageIndex, const QString& errorMessage) {
+    ipc::RemoveAnnotationResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.success = false;
+    res.errorMessage = errorMessage;
+    sendPacket(ipc::MessageType::RemoveAnnotationResponse, ipc::serialize(res));
 }
 
 void WorkerServer::onAnnotationAddFailed(int64_t documentId, int pageIndex, const QString& errorMessage) {

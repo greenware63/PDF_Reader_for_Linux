@@ -154,6 +154,14 @@ void testPayloadWithAllTypes(const uint8_t* data, size_t size) {
         deserialize(payload, msg);
     }
     {
+        RemoveAnnotationRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        RemoveAnnotationResponse msg;
+        deserialize(payload, msg);
+    }
+    {
         ListAnnotationsRequest msg;
         deserialize(payload, msg);
     }

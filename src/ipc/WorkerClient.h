@@ -73,6 +73,9 @@ public:
                                              int timeoutMs = 60000);
 
     void requestAddAnnotation(int64_t documentId, int pageIndex, const pdf::AnnotationItem& annotation);
+    void requestRemoveAnnotation(int64_t documentId, int pageIndex, const QString& annotationName);
+    RemoveAnnotationResponse removeAnnotationSync(int64_t documentId, int pageIndex, const QString& annotationName,
+                                                  int timeoutMs = 10000);
     AddAnnotationResponse addAnnotationSync(int64_t documentId, int pageIndex,
                                             const pdf::AnnotationItem& annotation,
                                             int timeoutMs = 10000);
@@ -108,6 +111,8 @@ Q_SIGNALS:
     void redactDocumentFailed(int64_t documentId, const QString& errorMessage);
     void annotationAdded(int64_t documentId, int pageIndex, const QString& annotationName);
     void annotationAddFailed(int64_t documentId, int pageIndex, const QString& errorMessage);
+    void annotationRemoved(int64_t documentId, int pageIndex, int removedCount);
+    void annotationRemoveFailed(int64_t documentId, int pageIndex, const QString& errorMessage);
     void documentSaved(int64_t documentId, uint64_t bytesWritten);
     void documentSaveFailed(int64_t documentId, const QString& errorMessage);
     /// The worker's engine heartbeat advanced while busy (observed through the watchdog ping).

@@ -94,6 +94,15 @@ public:
         (void)item;
         return false;
     }
+
+    /**
+     * @brief Removes every annotation on this page whose /NM equals `name` (undo of an added annotation).
+     * @return the number removed (0 if none matched or the name is empty).
+     */
+    virtual int removeAnnotationByName(const QString& name) {
+        (void)name;
+        return 0;
+    }
 };
 
 } // namespace pdf

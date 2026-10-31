@@ -33,6 +33,8 @@
 #include <vector>
 #include <cstring>
 #include <QSettings>
+#include <QTemporaryDir>
+#include <QDir>
 
 static void generateOutlinePdfFixture(const std::string& path, bool cyclicSibling = false,
                                       bool cyclicChildToParent = false) {
@@ -4547,7 +4549,234 @@ int main(int argc, char* argv[]) {
         QFile::remove(savedPath);
         std::cout << "  -> Passed: highlightSelection, EditLog dirty/undo/redo tracking, and saveDocument verified." << std::endl;
     }
-    std::cout << " ALL 46 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // Test 47: M2 integrity - what is SAVED must match what the edit log says (undo/redo, in-place commit, crash recovery)
+    std::cout << "[TEST 47] Testing saved-file integrity: undo/redo, in-place commit, late worker writes, crash recovery..." << std::endl;
+    {
+        const std::string textPath = "widget_two_page_text.pdf";
+        QTemporaryDir tmp;
+        if (!tmp.isValid()) {
+            std::cerr << "[FAIL] 47: cannot create temp dir." << std::endl;
+            return 1;
+        }
+
+        auto pumpMs = [](int ms) {
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < ms) {
+                QCoreApplication::processEvents();
+                QThread::msleep(5);
+            }
+        };
+        // Counts Highlight annotations that are actually attached to page 0 (parsed by the real engine in a
+        // sandboxed worker). A byte search would also count orphaned objects PDFium leaves behind when an
+        // annotation that was loaded from a file is removed.
+        auto countHighlights = [](const QString& path) -> int {
+            static int64_t nextId = 4700;
+            pdf::ipc::WorkerClient client;
+            const int64_t id = ++nextId;
+            if (client.openDocumentSync(id, path.toStdString()).error != pdf::DocumentError::None) {
+                return -1;
+            }
+            const auto r = client.listAnnotationsSync(id, 0, 15000);
+            int n = 0;
+            for (const auto& a : r.annotations) {
+                if (a.subtype == pdf::AnnotationSubtype::Highlight) {
+                    ++n;
+                }
+            }
+            client.closeDocumentSync();
+            client.stop();
+            return r.success ? n : -1;
+        };
+        auto openViewer = [&](ui::PdfViewerWidget& v, const QString& path) -> bool {
+            v.resize(800, 600);
+            v.show();
+            if (v.openDocument(path) != pdf::DocumentError::None) {
+                return false;
+            }
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < 4000 && !v.isDocumentOpen()) {
+                pumpMs(10);
+            }
+            return v.isDocumentOpen();
+        };
+        // Selects characters [a, b] on page 0 with the mouse and highlights them.
+        auto highlightChars = [&](ui::PdfViewerWidget& v, int a, int b) -> bool {
+            auto pt = v.getPageText(0);
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < 4000 && !pt) {
+                pumpMs(10);
+                pt = v.getPageText(0);
+            }
+            if (!pt || static_cast<int>(pt->charCount()) <= b) {
+                return false;
+            }
+            const auto& pl = v.layout().getPageLayout(0);
+            const double dpr = v.effectiveDpr();
+            const double sc = pdf::quantizeScale(v.currentZoom()) * dpr;
+            auto vp = [&](const pdf::PageCharBox& box) {
+                const double cx = (box.left + box.right) * 0.5;
+                const double cy = (box.top + box.bottom) * 0.5;
+                const int64_t dx = pl.leftPixel + static_cast<int64_t>(std::round(cx * sc));
+                const int64_t dy = pl.topPixel + static_cast<int64_t>(std::round(cy * sc));
+                return QPointF(static_cast<double>(dx - v.currentDocScrollX()) / dpr,
+                               static_cast<double>(dy - v.currentDocScrollY()) / dpr);
+            };
+            const QPointF p0 = vp(pt->chars[static_cast<size_t>(a)]);
+            const QPointF p1 = vp(pt->chars[static_cast<size_t>(b)]);
+            QMouseEvent press(QEvent::MouseButtonPress, p0, p0, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(v.viewport(), &press);
+            QMouseEvent move(QEvent::MouseMove, p1, p1, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(v.viewport(), &move);
+            QMouseEvent release(QEvent::MouseButtonRelease, p1, p1, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(v.viewport(), &release);
+            return v.hasSelection() && v.highlightSelection(0xFFFFFF00);
+        };
+        auto fail = [](const char* what) {
+            std::cerr << "[FAIL] 47: " << what << std::endl;
+            return 1;
+        };
+
+        // 47a: undo removes the annotation from the document that gets saved; redo puts it back.
+        {
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, QString::fromStdString(textPath))) return fail("47a cannot open document");
+            if (!highlightChars(v, 0, 4)) return fail("47a highlight failed");
+            if (!v.undoEdit()) return fail("47a undo returned false");
+            if (v.editLog().isDirty()) return fail("47a log should be clean after undoing the only edit");
+            const QString undone = tmp.filePath(QStringLiteral("undone.pdf"));
+            if (!v.saveDocument(undone)) return fail("47a save after undo failed");
+            if (countHighlights(undone) != 0) return fail("47a undone highlight is still in the saved file");
+            if (!v.redoEdit()) return fail("47a redo returned false");
+            const QString redone = tmp.filePath(QStringLiteral("redone.pdf"));
+            if (!v.saveDocument(redone)) return fail("47a save after redo failed");
+            if (countHighlights(redone) != 1) return fail("47a redone highlight is missing from the saved file");
+        }
+
+        // 47b: in-place save must not create/delete .bak files, must keep permissions, must keep a symlink.
+        {
+            const QString doc = tmp.filePath(QStringLiteral("doc.pdf"));
+            const QString bak = doc + QStringLiteral(".bak");
+            QFile::remove(doc);
+            if (!QFile::copy(QString::fromStdString(textPath), doc)) return fail("47b cannot copy fixture");
+            QFile::setPermissions(doc, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);
+            {
+                QFile b(bak);
+                if (!b.open(QIODevice::WriteOnly)) return fail("47b cannot create .bak");
+                b.write("PRECIOUS USER DATA");
+            }
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, doc)) return fail("47b cannot open document");
+            if (!highlightChars(v, 0, 4)) return fail("47b highlight failed");
+            if (!v.saveDocument()) return fail("47b in-place save failed");
+            if (countHighlights(doc) != 1) return fail("47b in-place save lost the highlight");
+            QFile b(bak);
+            if (!b.open(QIODevice::ReadOnly) || b.readAll() != "PRECIOUS USER DATA") return fail("47b a pre-existing .bak file was deleted or changed");
+            const auto perms = QFile::permissions(doc);
+            if (!(perms & QFileDevice::ReadGroup) || !(perms & QFileDevice::ReadOther)) return fail("47b file permissions were not preserved");
+            const QStringList names = QDir(tmp.path()).entryList(QDir::Files | QDir::NoDotAndDotDot);
+            for (const QString& n : names) {
+                if (n.startsWith(QStringLiteral("save_")) || n == QStringLiteral("doc.pdf.bak.bak")) return fail("47b leftover temp file");
+            }
+        }
+        {
+            const QString real = tmp.filePath(QStringLiteral("real.pdf"));
+            const QString link = tmp.filePath(QStringLiteral("link.pdf"));
+            QFile::copy(QString::fromStdString(textPath), real);
+            if (!QFile::link(real, link)) return fail("47b cannot create symlink");
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, link)) return fail("47b cannot open through symlink");
+            if (!highlightChars(v, 0, 4)) return fail("47b symlink highlight failed");
+            if (!v.saveDocument()) return fail("47b symlink save failed");
+            if (!QFileInfo(link).isSymLink()) return fail("47b symlink was replaced by a regular file");
+            if (countHighlights(real) != 1) return fail("47b symlink target was not updated");
+        }
+
+#ifdef PDF_WORKER_TEST_HOOKS
+        // 47c: bytes written by the worker AFTER validation must not reach the destination.
+        {
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, QString::fromStdString(textPath))) return fail("47c cannot open document");
+            if (!highlightChars(v, 0, 4)) return fail("47c highlight failed");
+            v.setBeforeCommitHookForTesting([](const QString& tempPath) {
+                QFile f(tempPath);   // simulates a compromised worker that kept its descriptor
+                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    f.write("%PDF-1.4\nGARBAGE-WRITTEN-AFTER-VALIDATION\n%%EOF\n");
+                }
+            });
+            const QString dest = tmp.filePath(QStringLiteral("late.pdf"));
+            if (!v.saveDocument(dest)) return fail("47c save failed");
+            QFile f(dest);
+            if (!f.open(QIODevice::ReadOnly)) return fail("47c cannot read destination");
+            const QByteArray bytes = f.readAll();
+            if (bytes.contains("GARBAGE-WRITTEN-AFTER-VALIDATION")) return fail("47c post-validation worker write reached the destination");
+            if (countHighlights(dest) != 1) return fail("47c destination is not the validated output");
+        }
+
+        // 47d: worker crash with unsaved edits -> reopen and re-apply (no duplicates of saved edits).
+        {
+            const QString doc = tmp.filePath(QStringLiteral("crash.pdf"));
+            QFile::copy(QString::fromStdString(textPath), doc);
+            ui::PdfViewerWidget v;
+            bool recovered = false;
+            int appliedOps = -1;
+            QObject::connect(&v, &ui::PdfViewerWidget::editsRecovered, &v, [&](int n) { recovered = true; appliedOps = n; });
+            if (!openViewer(v, doc)) return fail("47d cannot open document");
+            if (!highlightChars(v, 0, 4)) return fail("47d first highlight failed");
+            if (!v.saveDocument()) return fail("47d in-place save failed");          // highlight #1 is now in the file
+            if (!highlightChars(v, 6, 10)) return fail("47d second highlight failed"); // highlight #2 is unsaved
+            pumpMs(300);
+            v.simulateWorkerCrashForTesting();
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < 20000 && !recovered) {
+                pumpMs(20);
+            }
+            if (!recovered) return fail("47d worker crash was not recovered");
+            if (appliedOps != 1) {
+                std::cerr << "[FAIL] 47d expected exactly 1 re-applied operation (the unsaved highlight), got " << appliedOps << std::endl;
+                return 1;
+            }
+            const QString out = tmp.filePath(QStringLiteral("crash_out.pdf"));
+            if (!v.saveDocument(out)) return fail("47d save after recovery failed");
+            const int n = countHighlights(out);
+            if (n != 2) {
+                std::cerr << "[FAIL] 47d expected 2 highlights after recovery (1 saved + 1 recovered), got " << n << std::endl;
+                return 1;
+            }
+        }
+
+        // 47e: a saved highlight that was undone is removed again when the worker is recovered.
+        {
+            const QString doc = tmp.filePath(QStringLiteral("crash2.pdf"));
+            QFile::copy(QString::fromStdString(textPath), doc);
+            ui::PdfViewerWidget v;
+            bool recovered = false;
+            QObject::connect(&v, &ui::PdfViewerWidget::editsRecovered, &v, [&](int) { recovered = true; });
+            if (!openViewer(v, doc)) return fail("47e cannot open document");
+            if (!highlightChars(v, 0, 4)) return fail("47e highlight failed");
+            if (!v.saveDocument()) return fail("47e in-place save failed");
+            if (!v.undoEdit()) return fail("47e undo failed");
+            pumpMs(300);
+            v.simulateWorkerCrashForTesting();
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < 20000 && !recovered) {
+                pumpMs(20);
+            }
+            if (!recovered) return fail("47e worker crash was not recovered");
+            const QString out = tmp.filePath(QStringLiteral("crash2_out.pdf"));
+            if (!v.saveDocument(out)) return fail("47e save after recovery failed");
+            if (countHighlights(out) != 0) return fail("47e undone (previously saved) highlight came back after recovery");
+        }
+#else
+        std::cout << "  -> 47c/47d/47e SKIPPED: need test hooks (build with -DENABLE_TEST_HOOKS=ON)." << std::endl;
+#endif
+        std::cout << "  -> Passed: undo/redo reach the saved file; in-place save keeps .bak/mode/symlink (+ hooks builds: late worker writes ignored; crash recovery re-applies only unsaved edits)." << std::endl;
+    }
+    std::cout << " ALL 47 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

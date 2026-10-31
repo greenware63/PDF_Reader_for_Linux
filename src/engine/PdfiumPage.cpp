@@ -732,4 +732,38 @@ bool PdfiumPage::addHighlightAnnotation(const AnnotationItem& item) {
     return true;
 }
 
+int PdfiumPage::removeAnnotationByName(const QString& name) {
+    if (!m_page || name.isEmpty() || name.size() > 256) {
+        return 0;
+    }
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    const std::u16string wanted = name.toStdU16String();
+    int removed = 0;
+    // Walk backwards so removal does not shift the indices still to be visited.
+    for (int i = FPDFPage_GetAnnotCount(m_page) - 1; i >= 0; --i) {
+        FPDF_ANNOTATION annot = FPDFPage_GetAnnot(m_page, i);
+        if (!annot) {
+            continue;
+        }
+        bool match = false;
+        if (FPDFAnnot_HasKey(annot, "NM")) {
+            const unsigned long needed = FPDFAnnot_GetStringValue(annot, "NM", nullptr, 0);
+            // Only compare values of the expected size; anything else cannot equal `wanted`.
+            if (needed == (wanted.size() + 1) * 2) {
+                std::vector<unsigned short> buf(needed / 2 + 1, 0);
+                const unsigned long got = FPDFAnnot_GetStringValue(annot, "NM", reinterpret_cast<FPDF_WCHAR*>(buf.data()),
+                                                                   static_cast<unsigned long>(buf.size() * 2));
+                match = (got == needed) &&
+                        std::u16string(reinterpret_cast<const char16_t*>(buf.data()), wanted.size()) == wanted;
+            }
+        }
+        FPDFPage_CloseAnnot(annot);
+        if (match && FPDFPage_RemoveAnnot(m_page, i)) {
+            ++removed;
+        }
+    }
+    return removed;
+}
+
 } // namespace pdf

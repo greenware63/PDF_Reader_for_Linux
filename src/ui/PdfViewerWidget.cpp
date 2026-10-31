@@ -44,6 +44,9 @@ void rotateRectPointsForDisplay(const pdf::PageCharBox& r, double pageW, double 
 #include <QFileInfo>
 #include <QScrollBar>
 #include <QTemporaryFile>
+#include <QSaveFile>
+#include <QUuid>
+#include <QTimer>
 #include <QDir>
 #include <QCoreApplication>
 #include <QGuiApplication>
@@ -95,6 +98,13 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
                 }
             });
     connect(&m_renderWorker, &pdf::ipc::WorkerClient::workerFailed, this, [this](const QString& message) {
+        // Unsaved edits live in the UI-owned edit log; remember where to reopen the document so they can be
+        // re-applied to a fresh worker (RFC section 3.1). Only one recovery attempt per failure.
+        const bool wantRecovery = !m_recovering && m_hasDocument && !m_loading &&
+                                  !m_currentFilePath.isEmpty() && m_editLog.isDirty();
+        if (wantRecovery) {
+            m_recoveryPath = m_currentFilePath;
+        }
         const QString failedPath = m_pendingOpenPath;
         if (m_loading) {
             m_loading = false;
@@ -110,6 +120,9 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
         m_inFlightKeys.clear();
         Q_EMIT loadError(message);
         viewport()->update();
+        if (wantRecovery) {
+            QTimer::singleShot(0, this, &PdfViewerWidget::recoverAfterWorkerFailure);
+        }
     });
 
     setStyleSheet(QStringLiteral("QAbstractScrollArea { background-color: #323639; border: none; }"));
@@ -171,7 +184,9 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_transformedPixmapCache.clear();
     clearSelection();
     clearSearch();
-    m_editLog.clear();
+    if (!m_preserveEditLogOnOpen) {
+        m_editLog.clear();
+    }
     m_currentDocumentId = nextDocId;
     ++m_currentGeneration;
     m_renderWorker.setGeneration(m_currentGeneration);
@@ -2298,6 +2313,8 @@ bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
         double pageH = pl.heightPoints;
 
         pdf::AnnotationItem hl;
+        // The UI owns the annotation id (RFC section 3.1): undo, redo and crash recovery address it by /NM.
+        hl.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
         hl.subtype = pdf::AnnotationSubtype::Highlight;
         hl.pageIndex = p;
         hl.colorArgb = (colorArgb != 0) ? colorArgb : 0xFFFFFF00;
@@ -2343,6 +2360,77 @@ bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
         viewport()->update();
     }
     return anyAdded;
+}
+
+void PdfViewerWidget::refreshAfterEdit() {
+    m_cache.clear();
+    m_inFlightKeys.clear();
+    ++m_currentGeneration;
+    m_renderWorker.setGeneration(m_currentGeneration);
+    viewport()->update();
+}
+
+bool PdfViewerWidget::undoEdit() {
+    pdf::EditCommand cmd;
+    if (!m_hasDocument || !m_editLog.undo(cmd)) {
+        return false;
+    }
+    if (cmd.type == pdf::EditCommandType::AddAnnotation) {
+        m_renderWorker.requestRemoveAnnotation(m_currentDocumentId, cmd.pageIndex, cmd.after.name);
+    }
+    refreshAfterEdit();
+    return true;
+}
+
+bool PdfViewerWidget::redoEdit() {
+    pdf::EditCommand cmd;
+    if (!m_hasDocument || !m_editLog.redo(cmd)) {
+        return false;
+    }
+    if (cmd.type == pdf::EditCommandType::AddAnnotation) {
+        m_renderWorker.requestAddAnnotation(m_currentDocumentId, cmd.pageIndex, cmd.after);
+    }
+    refreshAfterEdit();
+    return true;
+}
+
+void PdfViewerWidget::recoverAfterWorkerFailure() {
+    if (m_recovering || m_recoveryPath.isEmpty()) {
+        return;
+    }
+    m_recovering = true;
+    const QString path = m_recoveryPath;
+    m_recoveryPath.clear();
+
+    m_preserveEditLogOnOpen = true;
+    const pdf::DocumentError err = openDocument(path);   // restarts the worker; the file on disk is the saved state
+    m_preserveEditLogOnOpen = false;
+    if (err != pdf::DocumentError::None) {
+        m_recovering = false;
+        Q_EMIT loadError(tr("The viewer process stopped and the document could not be reopened. "
+                            "Unsaved annotations were not restored."));
+        return;
+    }
+
+    int applied = 0;
+    bool ok = true;
+    for (const auto& op : m_editLog.opsSinceSave()) {
+        const bool done = op.add
+            ? m_renderWorker.addAnnotationSync(m_currentDocumentId, op.command.pageIndex, op.command.after).success
+            : m_renderWorker.removeAnnotationSync(m_currentDocumentId, op.command.pageIndex, op.command.after.name).success;
+        if (!done) {
+            ok = false;
+            break;
+        }
+        ++applied;
+    }
+    refreshAfterEdit();
+    m_recovering = false;
+    if (ok) {
+        Q_EMIT editsRecovered(applied);
+    } else {
+        Q_EMIT loadError(tr("The viewer process stopped; only some unsaved annotations could be restored."));
+    }
 }
 
 bool PdfViewerWidget::saveDocument(const QString& targetPath) {
@@ -2412,28 +2500,24 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
         return false;
     }
 
-    // Atomic replace destination file
-    if (QFile::exists(destPath)) {
-        QString backupPath = destPath + QStringLiteral(".bak");
-        QFile::remove(backupPath);
-        if (!QFile::rename(destPath, backupPath)) {
-            tempFile.remove();
-            return false;
-        }
-        if (!QFile::copy(tempPath, destPath)) {
-            QFile::rename(backupPath, destPath);
-            tempFile.remove();
-            return false;
-        }
-        QFile::remove(backupPath);
-        tempFile.remove();
-    } else {
-        if (!QFile::copy(tempPath, destPath)) {
-            tempFile.remove();
-            return false;
-        }
-        tempFile.remove();
+#ifdef PDF_WORKER_TEST_HOOKS
+    if (m_beforeCommitHook) {
+        m_beforeCommitHook(tempPath);
     }
+#endif
+
+    // Commit exactly the bytes that were validated above - never re-read the worker-written temp file, whose
+    // descriptor a compromised worker may still hold. QSaveFile writes a sibling temp file and renames it over
+    // the target (atomic), follows a symlink to its target, and keeps the existing file's permissions.
+    // No ".bak" is created or deleted.
+    QSaveFile out(destPath);
+    out.setDirectWriteFallback(false);
+    if (!out.open(QIODevice::WriteOnly) || out.write(checkBytes) != checkBytes.size() || !out.commit()) {
+        out.cancelWriting();
+        tempFile.remove();
+        return false;
+    }
+    tempFile.remove();
 
     m_currentFilePath = destPath;
     m_editLog.markSaved();
