@@ -2499,6 +2499,18 @@ bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem&
     return true;
 }
 
+QString PdfViewerWidget::annotationTooltipHtml(const QString& author, const QString& contents) {
+    constexpr qsizetype kMaxTipChars = 1000;
+    auto prep = [](QString s) {
+        if (s.size() > kMaxTipChars) s = s.left(kMaxTipChars) + QStringLiteral("…");
+        return s.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
+    };
+    QString html = QStringLiteral("<p>");
+    if (!author.isEmpty()) html += QStringLiteral("<b>[") + prep(author) + QStringLiteral("]</b><br>");
+    html += prep(contents) + QStringLiteral("</p>");
+    return html;
+}
+
 bool PdfViewerWidget::deleteAnnotationByName(int pageIndex, const QString& annotationName) {
     if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
@@ -2668,10 +2680,7 @@ bool PdfViewerWidget::viewportEvent(QEvent* event) {
                 const double userY = pl.heightPoints - ay;
                 auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, page, userX, userY);
                 if (hit.hit && !hit.annotation.contents.isEmpty()) {
-                    QString tip = hit.annotation.contents;
-                    if (!hit.annotation.author.isEmpty()) {
-                        tip = QString::fromLatin1("[%1]\n%2").arg(hit.annotation.author, tip);
-                    }
+                    const QString tip = annotationTooltipHtml(hit.annotation.author, hit.annotation.contents);
                     QToolTip::showText(helpEvent->globalPos(), tip, viewport());
                     return true;
                 }
