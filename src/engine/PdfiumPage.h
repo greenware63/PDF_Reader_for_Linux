@@ -38,6 +38,7 @@ public:
     PageText extractText() override;
     std::vector<AnnotationItem> listAnnotations(bool* truncated = nullptr) override;
     bool hitTestAnnotation(double xPoints, double yPoints, AnnotationItem& out) override;
+    bool addMarkupAnnotation(const AnnotationItem& item) override;
     bool addHighlightAnnotation(const AnnotationItem& item) override;
     int removeAnnotationByName(const QString& name) override;
 

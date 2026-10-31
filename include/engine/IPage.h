@@ -85,14 +85,25 @@ public:
     virtual bool hitTestAnnotation(double xPoints, double yPoints, AnnotationItem& out) = 0;
 
     /**
-     * @brief Creates a highlight annotation on this page.
+     * @brief Creates a text markup annotation (Highlight, Underline, StrikeOut, Squiggly) on this page.
      * Generates standard QuadPoints, color (/C), flags, /NM identifier, and normal appearance stream (/AP).
-     * @param item Annotation properties (bounding box, quad points, color, /NM identifier, etc.).
+     * @param item Annotation properties (subtype, bounding box, quad points, color, /NM identifier, etc.).
+     * @return true if successfully created, false otherwise.
+     */
+    virtual bool addMarkupAnnotation(const AnnotationItem& item) {
+        (void)item;
+        return false;
+    }
+
+    /**
+     * @brief Creates a highlight annotation on this page (convenience wrapper around addMarkupAnnotation).
+     * @param item Annotation properties.
      * @return true if successfully created, false otherwise.
      */
     virtual bool addHighlightAnnotation(const AnnotationItem& item) {
-        (void)item;
-        return false;
+        AnnotationItem copy = item;
+        copy.subtype = AnnotationSubtype::Highlight;
+        return addMarkupAnnotation(copy);
     }
 
     /**
