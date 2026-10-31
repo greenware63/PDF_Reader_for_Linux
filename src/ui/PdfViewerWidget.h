@@ -65,6 +65,8 @@ public:
     void closeDocument();
 
     bool isDocumentOpen() const noexcept { return m_hasDocument; }
+    bool isSaveInProgress() const noexcept { return m_saveInProgress; }
+    bool isEditInProgress() const noexcept { return m_editInProgress || m_recovering; }
     QString currentFilePath() const noexcept { return m_currentFilePath; }
     int pageCount() const noexcept { return m_pageCount; }
     int currentPage() const noexcept { return m_currentPage; }
@@ -158,7 +160,7 @@ public:
     pdf::EditLog& editLog() noexcept { return m_editLog; }
     const pdf::EditLog& editLog() const noexcept { return m_editLog; }
 
-    bool highlightSelection(uint32_t colorArgb = 0xFFFFFF00);
+    bool highlightSelection(uint32_t colorArgb = 0x80FFFF00);
     bool saveDocument(const QString& targetPath = QString());
     bool saveDocumentAs(const QString& targetPath) { return saveDocument(targetPath); }
 
@@ -378,6 +380,8 @@ private:
     QPointF m_redactCurrentDocPos;
 
     pdf::EditLog m_editLog;
+    bool m_saveInProgress{false};
+    bool m_editInProgress{false};
 
     void refreshAfterEdit();
     void recoverAfterWorkerFailure();

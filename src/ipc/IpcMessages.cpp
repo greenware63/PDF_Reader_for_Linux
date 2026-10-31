@@ -231,13 +231,23 @@ QDataStream& operator>>(QDataStream& in, OutlineItem& item) {
 // PageCharBox
 QDataStream& operator<<(QDataStream& out, const PageCharBox& box) {
     out << box.left << box.top << box.right << box.bottom;
+    const auto precision = out.floatingPointPrecision();
+    out.setFloatingPointPrecision(QDataStream::SinglePrecision);
+    out << box.userSpaceLeft << box.userSpaceRight << box.userSpaceBottom << box.userSpaceTop;
+    out.setFloatingPointPrecision(precision);
+    out << box.hasUserSpaceBox;
     out << static_cast<quint32>(box.unicode);
     return out;
 }
 
 QDataStream& operator>>(QDataStream& in, PageCharBox& box) {
     quint32 u = 0;
-    in >> box.left >> box.top >> box.right >> box.bottom >> u;
+    in >> box.left >> box.top >> box.right >> box.bottom;
+    const auto precision = in.floatingPointPrecision();
+    in.setFloatingPointPrecision(QDataStream::SinglePrecision);
+    in >> box.userSpaceLeft >> box.userSpaceRight >> box.userSpaceBottom >> box.userSpaceTop;
+    in.setFloatingPointPrecision(precision);
+    in >> box.hasUserSpaceBox >> u;
     box.unicode = static_cast<char32_t>(u);
     return in;
 }
@@ -265,7 +275,7 @@ QDataStream& operator>>(QDataStream& in, PageText& text) {
     quint32 count = 0;
     in >> count;
     text.chars.clear();
-    if (!validateCollection(in, count, MAX_PAGE_CHARACTERS, 36)) {
+    if (!validateCollection(in, count, MAX_PAGE_CHARACTERS, 53)) {
         return in;
     }
     text.chars.reserve(count);
@@ -301,7 +311,7 @@ QDataStream& operator>>(QDataStream& in, SearchMatch& match) {
     quint32 count = 0;
     in >> count;
     match.rects.clear();
-    if (!validateCollection(in, count, MAX_MATCH_RECTS, 36)) {
+    if (!validateCollection(in, count, MAX_MATCH_RECTS, 53)) {
         return in;
     }
     match.rects.reserve(count);
