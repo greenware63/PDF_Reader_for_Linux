@@ -2944,8 +2944,165 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: EditLog undo/redo, dirty tracking, and monotonic IDs verified." << std::endl;
     }
 
+    // Test 33: Milestone M3: Text Markup Annotations (Underline, StrikeOut, Squiggly)
+    std::cout << "[TEST 33] Testing text markup annotations (Underline, StrikeOut, Squiggly)..." << std::endl;
+    {
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] Test 33: Failed to create temp dir" << std::endl;
+            return 1;
+        }
+
+        const std::string pdfPath = tempDir.filePath("markup_test.pdf").toStdString();
+        generateTextPdfFixture(pdfPath, "Text Markup Test: Underline StrikeOut Squiggly");
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(pdfPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 33: Failed to load fixture" << std::endl;
+            return 1;
+        }
+
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 33: Failed to get page 0" << std::endl;
+            return 1;
+        }
+
+        // 1. Underline
+        pdf::AnnotationItem ul;
+        ul.subtype = pdf::AnnotationSubtype::Underline;
+        ul.pageIndex = 0;
+        ul.left = 50.0; ul.bottom = 750.0; ul.right = 150.0; ul.top = 770.0;
+        ul.colorArgb = 0xFF00AA00; // Green
+        ul.hasColor = true;
+        ul.flags = 4;
+        ul.contents = QStringLiteral("Underline Annotation");
+        ul.name = QStringLiteral("ul-test-33");
+        ul.quadPoints.push_back({50.0, 770.0, 150.0, 770.0, 50.0, 750.0, 150.0, 750.0});
+
+        if (!page->addMarkupAnnotation(ul)) {
+            std::cerr << "[FAIL] Test 33: addMarkupAnnotation failed for Underline" << std::endl;
+            return 1;
+        }
+
+        // 2. StrikeOut
+        pdf::AnnotationItem so;
+        so.subtype = pdf::AnnotationSubtype::StrikeOut;
+        so.pageIndex = 0;
+        so.left = 160.0; so.bottom = 750.0; so.right = 260.0; so.top = 770.0;
+        so.colorArgb = 0xFFFF0000; // Red
+        so.hasColor = true;
+        so.flags = 4;
+        so.contents = QStringLiteral("StrikeOut Annotation");
+        so.name = QStringLiteral("so-test-33");
+        so.quadPoints.push_back({160.0, 770.0, 260.0, 770.0, 160.0, 750.0, 260.0, 750.0});
+
+        if (!page->addMarkupAnnotation(so)) {
+            std::cerr << "[FAIL] Test 33: addMarkupAnnotation failed for StrikeOut" << std::endl;
+            return 1;
+        }
+
+        // 3. Squiggly
+        pdf::AnnotationItem sq;
+        sq.subtype = pdf::AnnotationSubtype::Squiggly;
+        sq.pageIndex = 0;
+        sq.left = 270.0; sq.bottom = 750.0; sq.right = 370.0; sq.top = 770.0;
+        sq.colorArgb = 0xFFFF00FF; // Magenta
+        sq.hasColor = true;
+        sq.flags = 4;
+        sq.contents = QStringLiteral("Squiggly Annotation");
+        sq.name = QStringLiteral("sq-test-33");
+        sq.quadPoints.push_back({270.0, 770.0, 370.0, 770.0, 270.0, 750.0, 370.0, 750.0});
+
+        if (!page->addMarkupAnnotation(sq)) {
+            std::cerr << "[FAIL] Test 33: addMarkupAnnotation failed for Squiggly" << std::endl;
+            return 1;
+        }
+
+        // Verify all 3 annotations listed
+        auto annots = page->listAnnotations();
+        if (annots.size() != 3) {
+            std::cerr << "[FAIL] Test 33: Expected 3 annotations listed, got " << annots.size() << std::endl;
+            return 1;
+        }
+
+        bool foundUl = false, foundSo = false, foundSq = false;
+        for (const auto& a : annots) {
+            if (a.subtype == pdf::AnnotationSubtype::Underline && a.name == "ul-test-33") foundUl = true;
+            if (a.subtype == pdf::AnnotationSubtype::StrikeOut && a.name == "so-test-33") foundSo = true;
+            if (a.subtype == pdf::AnnotationSubtype::Squiggly && a.name == "sq-test-33") foundSq = true;
+        }
+        if (!foundUl || !foundSo || !foundSq) {
+            std::cerr << "[FAIL] Test 33: Missing expected annotation subtypes in listed annotations" << std::endl;
+            return 1;
+        }
+
+        // Hit testing
+        pdf::AnnotationItem hit;
+        if (!page->hitTestAnnotation(100.0, 760.0, hit) || hit.subtype != pdf::AnnotationSubtype::Underline) {
+            std::cerr << "[FAIL] Test 33: Underline hit test failed" << std::endl;
+            return 1;
+        }
+        if (!page->hitTestAnnotation(200.0, 760.0, hit) || hit.subtype != pdf::AnnotationSubtype::StrikeOut) {
+            std::cerr << "[FAIL] Test 33: StrikeOut hit test failed" << std::endl;
+            return 1;
+        }
+        if (!page->hitTestAnnotation(300.0, 760.0, hit) || hit.subtype != pdf::AnnotationSubtype::Squiggly) {
+            std::cerr << "[FAIL] Test 33: Squiggly hit test failed" << std::endl;
+            return 1;
+        }
+
+        // Incremental save and verify preservation
+        const std::string savedPath = tempDir.filePath("markup_saved.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (saveFd < 0) {
+            std::cerr << "[FAIL] Test 33: Failed to open saveFd" << std::endl;
+            return 1;
+        }
+        uint64_t written = 0;
+        if (!doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
+            std::cerr << "[FAIL] Test 33: saveAsCopy failed" << std::endl;
+            return 1;
+        }
+
+        // Reopen saved file in fresh document and check annotations
+        auto freshDoc = pdf::createDocument();
+        if (freshDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 33: Failed to reopen saved file" << std::endl;
+            return 1;
+        }
+        auto freshPage = freshDoc->getPage(0);
+        if (!freshPage) {
+            std::cerr << "[FAIL] Test 33: Failed to get page 0 in fresh document" << std::endl;
+            return 1;
+        }
+        auto freshAnnots = freshPage->listAnnotations();
+        if (freshAnnots.size() != 3) {
+            std::cerr << "[FAIL] Test 33: Expected 3 annotations in reopened document, got " << freshAnnots.size() << std::endl;
+            return 1;
+        }
+
+        // Verify removeAnnotationByName
+        int removed = page->removeAnnotationByName(QStringLiteral("so-test-33"));
+        if (removed != 1) {
+            std::cerr << "[FAIL] Test 33: removeAnnotationByName did not remove exactly 1 annotation" << std::endl;
+            return 1;
+        }
+        auto afterRemove = page->listAnnotations();
+        if (afterRemove.size() != 2) {
+            std::cerr << "[FAIL] Test 33: Expected 2 annotations after removal, got " << afterRemove.size() << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Underline, StrikeOut, Squiggly creation, hit-test, incremental save, and removal verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 32 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 33 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

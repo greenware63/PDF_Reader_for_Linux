@@ -2554,6 +2554,123 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: RemoveAnnotation removes only the named annotation; missing/bad requests fail; names are validated." << std::endl;
     }
 
+    // --- TEST 29: Underline, StrikeOut, and Squiggly over IPC ---
+    std::cout << "[TEST 29] Testing Underline, StrikeOut, and Squiggly over IPC..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        if (client.openDocumentSync(29, samplePdf.toStdString()).error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 29: Failed to open document over IPC" << std::endl;
+            return 1;
+        }
+
+        // 1. Underline
+        pdf::AnnotationItem ul;
+        ul.subtype = pdf::AnnotationSubtype::Underline;
+        ul.pageIndex = 0;
+        ul.left = 50.0; ul.bottom = 700.0; ul.right = 150.0; ul.top = 720.0;
+        ul.colorArgb = 0xFF00AA00;
+        ul.hasColor = true;
+        ul.flags = 4;
+        ul.contents = QStringLiteral("IPC Underline");
+        ul.author = QStringLiteral("Tester");
+        ul.quadPoints.push_back({50.0, 720.0, 150.0, 720.0, 50.0, 700.0, 150.0, 700.0});
+
+        auto respUl = client.addAnnotationSync(29, 0, ul);
+        if (!respUl.success || respUl.annotationName.isEmpty()) {
+            std::cerr << "[FAIL] 29: Failed to add Underline annotation over IPC" << std::endl;
+            return 1;
+        }
+
+        // 2. StrikeOut
+        pdf::AnnotationItem so;
+        so.subtype = pdf::AnnotationSubtype::StrikeOut;
+        so.pageIndex = 0;
+        so.left = 160.0; so.bottom = 700.0; so.right = 260.0; so.top = 720.0;
+        so.colorArgb = 0xFFFF0000;
+        so.hasColor = true;
+        so.flags = 4;
+        so.contents = QStringLiteral("IPC StrikeOut");
+        so.author = QStringLiteral("Tester");
+        so.quadPoints.push_back({160.0, 720.0, 260.0, 720.0, 160.0, 700.0, 260.0, 700.0});
+
+        auto respSo = client.addAnnotationSync(29, 0, so);
+        if (!respSo.success || respSo.annotationName.isEmpty()) {
+            std::cerr << "[FAIL] 29: Failed to add StrikeOut annotation over IPC" << std::endl;
+            return 1;
+        }
+
+        // 3. Squiggly
+        pdf::AnnotationItem sq;
+        sq.subtype = pdf::AnnotationSubtype::Squiggly;
+        sq.pageIndex = 0;
+        sq.left = 270.0; sq.bottom = 700.0; sq.right = 370.0; sq.top = 720.0;
+        sq.colorArgb = 0xFFFF00FF;
+        sq.hasColor = true;
+        sq.flags = 4;
+        sq.contents = QStringLiteral("IPC Squiggly");
+        sq.author = QStringLiteral("Tester");
+        sq.quadPoints.push_back({270.0, 720.0, 370.0, 720.0, 270.0, 700.0, 370.0, 700.0});
+
+        auto respSq = client.addAnnotationSync(29, 0, sq);
+        if (!respSq.success || respSq.annotationName.isEmpty()) {
+            std::cerr << "[FAIL] 29: Failed to add Squiggly annotation over IPC" << std::endl;
+            return 1;
+        }
+
+        // Verify listAnnotationsSync
+        auto listResp = client.listAnnotationsSync(29, 0);
+        if (!listResp.success) {
+            std::cerr << "[FAIL] 29: listAnnotationsSync failed" << std::endl;
+            return 1;
+        }
+        bool foundUl = false, foundSo = false, foundSq = false;
+        for (const auto& a : listResp.annotations) {
+            if (a.name == respUl.annotationName && a.subtype == pdf::AnnotationSubtype::Underline) foundUl = true;
+            if (a.name == respSo.annotationName && a.subtype == pdf::AnnotationSubtype::StrikeOut) foundSo = true;
+            if (a.name == respSq.annotationName && a.subtype == pdf::AnnotationSubtype::Squiggly) foundSq = true;
+        }
+        if (!foundUl || !foundSo || !foundSq) {
+            std::cerr << "[FAIL] 29: One or more markup annotations missing in IPC list" << std::endl;
+            return 1;
+        }
+
+        // Hit testing
+        auto hitUl = client.hitTestAnnotationSync(29, 0, 100.0, 710.0);
+        if (!hitUl.hit || hitUl.annotation.subtype != pdf::AnnotationSubtype::Underline) {
+            std::cerr << "[FAIL] 29: Underline hit test failed over IPC" << std::endl;
+            return 1;
+        }
+        auto hitSo = client.hitTestAnnotationSync(29, 0, 200.0, 710.0);
+        if (!hitSo.hit || hitSo.annotation.subtype != pdf::AnnotationSubtype::StrikeOut) {
+            std::cerr << "[FAIL] 29: StrikeOut hit test failed over IPC" << std::endl;
+            return 1;
+        }
+        auto hitSq = client.hitTestAnnotationSync(29, 0, 300.0, 710.0);
+        if (!hitSq.hit || hitSq.annotation.subtype != pdf::AnnotationSubtype::Squiggly) {
+            std::cerr << "[FAIL] 29: Squiggly hit test failed over IPC" << std::endl;
+            return 1;
+        }
+
+        // Remove StrikeOut
+        auto remSo = client.removeAnnotationSync(29, 0, respSo.annotationName);
+        if (!remSo.success || remSo.removedCount != 1) {
+            std::cerr << "[FAIL] 29: removeAnnotationSync failed for StrikeOut" << std::endl;
+            return 1;
+        }
+
+        auto listAfter = client.listAnnotationsSync(29, 0);
+        for (const auto& a : listAfter.annotations) {
+            if (a.name == respSo.annotationName) {
+                std::cerr << "[FAIL] 29: StrikeOut still present after removal" << std::endl;
+                return 1;
+            }
+        }
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: Underline, StrikeOut, Squiggly add, list, hit-test, and remove over IPC verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

@@ -860,8 +860,11 @@ void RenderWorker::requestAddAnnotation(int64_t documentId, int pageIndex, const
         }
 
         bool ok = false;
-        if (annotItem.subtype == AnnotationSubtype::Highlight) {
-            ok = page->addHighlightAnnotation(annotItem);
+        if (annotItem.subtype == AnnotationSubtype::Highlight ||
+            annotItem.subtype == AnnotationSubtype::Underline ||
+            annotItem.subtype == AnnotationSubtype::StrikeOut ||
+            annotItem.subtype == AnnotationSubtype::Squiggly) {
+            ok = page->addMarkupAnnotation(annotItem);
         } else {
             Q_EMIT annotationAddFailed(documentId, pageIndex, QStringLiteral("Unsupported annotation subtype"));
             return;

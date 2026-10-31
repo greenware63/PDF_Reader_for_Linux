@@ -476,10 +476,12 @@ void MainWindow::connectViewer(PdfViewerWidget* viewer) {
         }
     });
     connect(viewer, &PdfViewerWidget::selectionChanged, this, [this]() {
-        if (m_highlightAction) {
-            auto* v = currentViewer();
-            m_highlightAction->setEnabled(v && v->hasSelection());
-        }
+        auto* v = currentViewer();
+        const bool canMarkup = (v && v->hasSelection());
+        if (m_highlightAction) m_highlightAction->setEnabled(canMarkup);
+        if (m_underlineAction) m_underlineAction->setEnabled(canMarkup);
+        if (m_strikeOutAction) m_strikeOutAction->setEnabled(canMarkup);
+        if (m_squigglyAction) m_squigglyAction->setEnabled(canMarkup);
     });
 }
 
@@ -532,6 +534,17 @@ void MainWindow::setupActions() {
     m_highlightAction = editMenu->addAction(tr("&Highlight Selection"), this, &MainWindow::highlightSelection);
     m_highlightAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_H));
     m_highlightAction->setEnabled(false);
+
+    m_underlineAction = editMenu->addAction(tr("&Underline Selection"), this, &MainWindow::underlineSelection);
+    m_underlineAction->setShortcut(QKeySequence::Underline);
+    m_underlineAction->setEnabled(false);
+
+    m_strikeOutAction = editMenu->addAction(tr("&Strikeout Selection"), this, &MainWindow::strikeOutSelection);
+    m_strikeOutAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_S));
+    m_strikeOutAction->setEnabled(false);
+
+    m_squigglyAction = editMenu->addAction(tr("S&quiggly Selection"), this, &MainWindow::squigglySelection);
+    m_squigglyAction->setEnabled(false);
 
     editMenu->addSeparator();
     QAction* copyAction = editMenu->addAction(tr("&Copy"), this, [this]() {
@@ -1063,6 +1076,12 @@ void MainWindow::onCurrentTabChanged(int index) {
             m_sidebarStack->setCurrentWidget(m_outlineEmptyLabel);
         }
     }
+
+    const bool canMarkup = (m_viewer && m_viewer->hasSelection());
+    if (m_highlightAction) m_highlightAction->setEnabled(canMarkup);
+    if (m_underlineAction) m_underlineAction->setEnabled(canMarkup);
+    if (m_strikeOutAction) m_strikeOutAction->setEnabled(canMarkup);
+    if (m_squigglyAction) m_squigglyAction->setEnabled(canMarkup);
 
     if (m_findBar && m_findBar->isVisible()) {
         m_findBar->clear();
@@ -1734,6 +1753,27 @@ void MainWindow::highlightSelection() {
     auto* v = currentViewer();
     if (v && v->hasSelection()) {
         v->highlightSelection();
+    }
+}
+
+void MainWindow::underlineSelection() {
+    auto* v = currentViewer();
+    if (v && v->hasSelection()) {
+        v->underlineSelection();
+    }
+}
+
+void MainWindow::strikeOutSelection() {
+    auto* v = currentViewer();
+    if (v && v->hasSelection()) {
+        v->strikeOutSelection();
+    }
+}
+
+void MainWindow::squigglySelection() {
+    auto* v = currentViewer();
+    if (v && v->hasSelection()) {
+        v->squigglySelection();
     }
 }
 

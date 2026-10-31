@@ -1,6 +1,8 @@
 #include "PdfViewerWidget.h"
 #include "ImageUtils.h"
 #include <QFileInfo>
+#include <QMenu>
+#include <QContextMenuEvent>
 
 namespace {
 
@@ -2315,11 +2317,21 @@ void PdfViewerWidget::drawRedactionOverlays(QPainter& painter, const layout::Vie
     }
 }
 
-bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
+bool PdfViewerWidget::markupSelection(pdf::AnnotationSubtype subtype, uint32_t colorArgb) {
     if (!hasSelection() || !m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
     }
     QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    if (colorArgb == 0) {
+        switch (subtype) {
+            case pdf::AnnotationSubtype::Highlight: colorArgb = 0x80FFFF00; break;
+            case pdf::AnnotationSubtype::Underline: colorArgb = 0xFF00AA00; break;
+            case pdf::AnnotationSubtype::StrikeOut: colorArgb = 0xFFFF0000; break;
+            case pdf::AnnotationSubtype::Squiggly: colorArgb = 0xFFFF0000; break;
+            default: colorArgb = 0x80FFFF00; break;
+        }
+    }
 
     bool forward = (m_selectionStart.pageIndex < m_selectionEnd.pageIndex) ||
                    (m_selectionStart.pageIndex == m_selectionEnd.pageIndex && m_selectionStart.charIndex <= m_selectionEnd.charIndex);
@@ -2346,9 +2358,9 @@ bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
         pdf::AnnotationItem hl;
         // The UI owns the annotation id (RFC section 3.1): undo, redo and crash recovery address it by /NM.
         hl.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
-        hl.subtype = pdf::AnnotationSubtype::Highlight;
+        hl.subtype = subtype;
         hl.pageIndex = p;
-        hl.colorArgb = (colorArgb != 0) ? colorArgb : 0x80FFFF00;
+        hl.colorArgb = colorArgb;
         hl.hasColor = true;
         hl.flags = 4; // FPDF_ANNOT_FLAG_PRINT
         hl.contents = QString::fromStdU16String(pt.getSelectedText(startChar, endChar));
@@ -2392,7 +2404,7 @@ bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
 
         const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, p, hl);
         if (!response.success) {
-            Q_EMIT loadError(tr("Could not apply highlight on page %1: %2").arg(p + 1).arg(response.errorMessage));
+            Q_EMIT loadError(tr("Could not apply markup on page %1: %2").arg(p + 1).arg(response.errorMessage));
             continue;
         }
         m_editLog.recordAddAnnotation(p, hl);
@@ -2408,6 +2420,40 @@ bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
         viewport()->update();
     }
     return anyAdded;
+}
+
+bool PdfViewerWidget::highlightSelection(uint32_t colorArgb) {
+    return markupSelection(pdf::AnnotationSubtype::Highlight, colorArgb);
+}
+
+bool PdfViewerWidget::underlineSelection(uint32_t colorArgb) {
+    return markupSelection(pdf::AnnotationSubtype::Underline, colorArgb);
+}
+
+bool PdfViewerWidget::strikeOutSelection(uint32_t colorArgb) {
+    return markupSelection(pdf::AnnotationSubtype::StrikeOut, colorArgb);
+}
+
+bool PdfViewerWidget::squigglySelection(uint32_t colorArgb) {
+    return markupSelection(pdf::AnnotationSubtype::Squiggly, colorArgb);
+}
+
+void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
+    if (!isDocumentOpen() || !hasSelection()) {
+        QAbstractScrollArea::contextMenuEvent(event);
+        return;
+    }
+
+    QMenu menu(this);
+    QAction* copyAct = menu.addAction(tr("&Copy"), this, &PdfViewerWidget::copySelection);
+    copyAct->setShortcut(QKeySequence::Copy);
+    menu.addSeparator();
+    menu.addAction(tr("&Highlight"), this, [this]() { highlightSelection(); });
+    menu.addAction(tr("&Underline"), this, [this]() { underlineSelection(); });
+    menu.addAction(tr("&Strikeout"), this, [this]() { strikeOutSelection(); });
+    menu.addAction(tr("S&quiggly"), this, [this]() { squigglySelection(); });
+
+    menu.exec(event->globalPos());
 }
 
 void PdfViewerWidget::refreshAfterEdit() {

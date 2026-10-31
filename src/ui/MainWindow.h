@@ -111,6 +111,9 @@ public Q_SLOTS:
     void saveDocument();
     void saveDocumentAs();
     void highlightSelection();
+    void underlineSelection();
+    void strikeOutSelection();
+    void squigglySelection();
     void undoEdit();
     void redoEdit();
 
@@ -180,6 +183,9 @@ private:
     QAction* m_undoAction{nullptr};
     QAction* m_redoAction{nullptr};
     QAction* m_highlightAction{nullptr};
+    QAction* m_underlineAction{nullptr};
+    QAction* m_strikeOutAction{nullptr};
+    QAction* m_squigglyAction{nullptr};
 };
 
 } // namespace ui

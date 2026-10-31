@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <QPixmap>
 #include <QDateTime>
+#include <QContextMenuEvent>
 #include "ColorMode.h"
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
@@ -160,7 +161,11 @@ public:
     pdf::EditLog& editLog() noexcept { return m_editLog; }
     const pdf::EditLog& editLog() const noexcept { return m_editLog; }
 
+    bool markupSelection(pdf::AnnotationSubtype subtype, uint32_t colorArgb = 0);
     bool highlightSelection(uint32_t colorArgb = 0x80FFFF00);
+    bool underlineSelection(uint32_t colorArgb = 0xFF00AA00);
+    bool strikeOutSelection(uint32_t colorArgb = 0xFFFF0000);
+    bool squigglySelection(uint32_t colorArgb = 0xFFFF0000);
     bool saveDocument(const QString& targetPath = QString());
     bool saveDocumentAs(const QString& targetPath) { return saveDocument(targetPath); }
 
@@ -246,6 +251,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
 
 private Q_SLOTS:
     void onScrollValueChanged();

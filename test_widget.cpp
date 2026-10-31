@@ -5062,7 +5062,159 @@ int main(int argc, char* argv[]) {
 #endif
         std::cout << "  -> Passed: undo/redo reach the saved file; in-place save keeps .bak/mode/symlink (+ hooks builds: invalid output rejected, late worker writes ignored, crash recovery re-applies only unsaved edits)." << std::endl;
     }
-    std::cout << " ALL 47 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+
+    // --- Test 48: Underline, StrikeOut, Squiggly selection and undo/redo in PdfViewerWidget ---
+    std::cout << "[TEST 48] Testing Underline, StrikeOut, Squiggly in PdfViewerWidget..." << std::endl;
+    {
+        QTemporaryDir tmp;
+        if (!tmp.isValid()) {
+            std::cerr << "[FAIL] 48 cannot create temp dir" << std::endl;
+            return 1;
+        }
+
+        const QString fixturePath = tmp.filePath(QStringLiteral("markup_widget.pdf"));
+        generateTextPdfFixture(fixturePath.toStdString(), "Testing markup selection in viewer widget");
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        QApplication::processEvents();
+
+        if (viewer.openDocument(fixturePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 48 failed to open document" << std::endl;
+            return 1;
+        }
+
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 5000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 48 document did not finish opening" << std::endl;
+            return 1;
+        }
+
+        // Wait for page text
+        auto pt = viewer.getPageText(0);
+        QElapsedTimer ptTimer;
+        ptTimer.start();
+        while (ptTimer.elapsed() < 5000 && !pt) {
+            QCoreApplication::processEvents();
+            QThread::msleep(10);
+            pt = viewer.getPageText(0);
+        }
+        if (!pt || pt->charCount() < 10) {
+            std::cerr << "[FAIL] 48 page text not available or too short" << std::endl;
+            return 1;
+        }
+
+        const auto& pl = viewer.layout().getPageLayout(0);
+        const double dpr = viewer.effectiveDpr();
+        const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+        auto selectRange = [&](int startIdx, int endIdx) {
+            const auto& b0 = pt->chars[static_cast<size_t>(startIdx)];
+            double c0X = (b0.left + b0.right) * 0.5;
+            double c0Y = (b0.top + b0.bottom) * 0.5;
+            int64_t doc0X = pl.leftPixel + static_cast<int64_t>(std::round(c0X * effScale));
+            int64_t doc0Y = pl.topPixel + static_cast<int64_t>(std::round(c0Y * effScale));
+            double vp0X = static_cast<double>(doc0X - viewer.currentDocScrollX()) / dpr;
+            double vp0Y = static_cast<double>(doc0Y - viewer.currentDocScrollY()) / dpr;
+
+            const auto& b1 = pt->chars[static_cast<size_t>(endIdx)];
+            double c1X = (b1.left + b1.right) * 0.5;
+            double c1Y = (b1.top + b1.bottom) * 0.5;
+            int64_t doc1X = pl.leftPixel + static_cast<int64_t>(std::round(c1X * effScale));
+            int64_t doc1Y = pl.topPixel + static_cast<int64_t>(std::round(c1Y * effScale));
+            double vp1X = static_cast<double>(doc1X - viewer.currentDocScrollX()) / dpr;
+            double vp1Y = static_cast<double>(doc1Y - viewer.currentDocScrollY()) / dpr;
+
+            QMouseEvent press(QEvent::MouseButtonPress, QPointF(vp0X, vp0Y), QPointF(vp0X, vp0Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &press);
+            QMouseEvent move(QEvent::MouseMove, QPointF(vp1X, vp1Y), QPointF(vp1X, vp1Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &move);
+            QMouseEvent release(QEvent::MouseButtonRelease, QPointF(vp1X, vp1Y), QPointF(vp1X, vp1Y), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &release);
+            return viewer.hasSelection();
+        };
+
+        // 1. Underline selection
+        if (!selectRange(0, 4)) {
+            std::cerr << "[FAIL] 48 failed to select chars 0..4" << std::endl;
+            return 1;
+        }
+        if (!viewer.underlineSelection()) {
+            std::cerr << "[FAIL] 48 underlineSelection returned false" << std::endl;
+            return 1;
+        }
+        if (viewer.hasSelection()) {
+            std::cerr << "[FAIL] 48 selection was not cleared after underlineSelection" << std::endl;
+            return 1;
+        }
+        if (!viewer.editLog().isDirty() || !viewer.editLog().canUndo()) {
+            std::cerr << "[FAIL] 48 EditLog dirty/canUndo state incorrect after underline" << std::endl;
+            return 1;
+        }
+
+        // Undo & Redo
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 48 undoEdit failed" << std::endl;
+            return 1;
+        }
+        if (!viewer.redoEdit()) {
+            std::cerr << "[FAIL] 48 redoEdit failed" << std::endl;
+            return 1;
+        }
+
+        // 2. Select chars 5..8 and apply StrikeOut
+        if (!selectRange(5, 8)) {
+            std::cerr << "[FAIL] 48 failed to select chars 5..8" << std::endl;
+            return 1;
+        }
+        if (!viewer.strikeOutSelection()) {
+            std::cerr << "[FAIL] 48 strikeOutSelection returned false" << std::endl;
+            return 1;
+        }
+
+        // 3. Select chars 9..12 and apply Squiggly
+        if (!selectRange(9, 12)) {
+            std::cerr << "[FAIL] 48 failed to select chars 9..12" << std::endl;
+            return 1;
+        }
+        if (!viewer.squigglySelection()) {
+            std::cerr << "[FAIL] 48 squigglySelection returned false" << std::endl;
+            return 1;
+        }
+
+        // Save
+        const QString savedPath = tmp.filePath(QStringLiteral("markup_saved.pdf"));
+        if (!viewer.saveDocument(savedPath)) {
+            std::cerr << "[FAIL] 48 saveDocument failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 48 EditLog is dirty after save" << std::endl;
+            return 1;
+        }
+
+        QFile savedFile(savedPath);
+        if (!savedFile.open(QIODevice::ReadOnly) || savedFile.size() == 0) {
+            std::cerr << "[FAIL] 48 saved file missing or empty" << std::endl;
+            return 1;
+        }
+        QByteArray savedBytes = savedFile.readAll();
+        if (!savedBytes.startsWith("%PDF-") || !savedBytes.contains("%%EOF")) {
+            std::cerr << "[FAIL] 48 saved file format invalid" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Underline, StrikeOut, Squiggly selection, undo/redo, and saveDocument in PdfViewerWidget verified." << std::endl;
+    }
+
+    std::cout << " ALL 48 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

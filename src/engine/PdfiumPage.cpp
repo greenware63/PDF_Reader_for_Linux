@@ -635,20 +635,38 @@ bool PdfiumPage::hitTestAnnotation(double xPoints, double yPoints, AnnotationIte
     return false;
 }
 
-bool PdfiumPage::addHighlightAnnotation(const AnnotationItem& item) {
+bool PdfiumPage::addMarkupAnnotation(const AnnotationItem& item) {
     if (!m_page || !item.isValid()) {
         return false;
+    }
+
+    FPDF_ANNOTATION_SUBTYPE pdfiumSubtype = FPDF_ANNOT_UNKNOWN;
+    switch (item.subtype) {
+        case AnnotationSubtype::Highlight:
+            pdfiumSubtype = FPDF_ANNOT_HIGHLIGHT;
+            break;
+        case AnnotationSubtype::Underline:
+            pdfiumSubtype = FPDF_ANNOT_UNDERLINE;
+            break;
+        case AnnotationSubtype::StrikeOut:
+            pdfiumSubtype = FPDF_ANNOT_STRIKEOUT;
+            break;
+        case AnnotationSubtype::Squiggly:
+            pdfiumSubtype = FPDF_ANNOT_SQUIGGLY;
+            break;
+        default:
+            return false;
     }
 
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
 
     // 1. Create the annotation in PDFium
-    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, FPDF_ANNOT_HIGHLIGHT);
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, pdfiumSubtype);
     if (!annot) {
         return false;
     }
     const int annotIndex = FPDFPage_GetAnnotCount(m_page) - 1;
-    auto failHighlight = [&]() {
+    auto failMarkup = [&]() {
         FPDFPage_CloseAnnot(annot);
         FPDFPage_RemoveAnnot(m_page, annotIndex);
         return false;
@@ -661,10 +679,10 @@ bool PdfiumPage::addHighlightAnnotation(const AnnotationItem& item) {
     rect.right = static_cast<float>(item.right);
     rect.bottom = static_cast<float>(item.bottom);
     if (!FPDFAnnot_SetRect(annot, &rect)) {
-        return failHighlight();
+        return failMarkup();
     }
 
-    // 3. Set QuadPoints (Rule 3: Poppler requires quadpoints for Highlight)
+    // 3. Set QuadPoints (Rule 3: Poppler requires quadpoints for text markup)
     if (!item.quadPoints.empty()) {
         for (const auto& q : item.quadPoints) {
             FS_QUADPOINTSF qp{};
@@ -676,7 +694,7 @@ bool PdfiumPage::addHighlightAnnotation(const AnnotationItem& item) {
             qp.y3 = static_cast<float>(q.y3);
             qp.x4 = static_cast<float>(q.x4);
             qp.y4 = static_cast<float>(q.y4);
-            if (!FPDFAnnot_AppendAttachmentPoints(annot, &qp)) return failHighlight();
+            if (!FPDFAnnot_AppendAttachmentPoints(annot, &qp)) return failMarkup();
         }
     } else {
         FS_QUADPOINTSF qp{};
@@ -684,53 +702,75 @@ bool PdfiumPage::addHighlightAnnotation(const AnnotationItem& item) {
         qp.x2 = rect.right; qp.y2 = rect.top;
         qp.x3 = rect.left;  qp.y3 = rect.bottom;
         qp.x4 = rect.right; qp.y4 = rect.bottom;
-        if (!FPDFAnnot_AppendAttachmentPoints(annot, &qp)) return failHighlight();
+        if (!FPDFAnnot_AppendAttachmentPoints(annot, &qp)) return failMarkup();
     }
 
-    // 4. Set Color (/C) (Rule 3: Highlight additionally requires /C)
+    // 4. Set Color (/C)
     uint32_t a = (item.colorArgb >> 24) & 0xFF;
     uint32_t r = (item.colorArgb >> 16) & 0xFF;
     uint32_t g = (item.colorArgb >> 8) & 0xFF;
     uint32_t b = item.colorArgb & 0xFF;
     if (a == 0 && item.colorArgb == 0) {
-        r = 255; g = 255; b = 0; a = 128;
+        switch (item.subtype) {
+            case AnnotationSubtype::Highlight:
+                r = 255; g = 255; b = 0; a = 128; // Yellow, 50% opacity
+                break;
+            case AnnotationSubtype::Underline:
+                r = 0; g = 170; b = 0; a = 255; // Green, 100% opacity
+                break;
+            case AnnotationSubtype::StrikeOut:
+                r = 255; g = 0; b = 0; a = 255; // Red, 100% opacity
+                break;
+            case AnnotationSubtype::Squiggly:
+                r = 255; g = 0; b = 0; a = 255; // Red, 100% opacity
+                break;
+            default:
+                r = 255; g = 255; b = 0; a = 128;
+                break;
+        }
     }
-    if (!FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, a)) return failHighlight();
+    if (!FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, a)) return failMarkup();
 
     // 5. Set Flags (/F)
     uint32_t flags = item.flags ? item.flags : FPDF_ANNOT_FLAG_PRINT;
-    if (!FPDFAnnot_SetFlags(annot, flags)) return failHighlight();
+    if (!FPDFAnnot_SetFlags(annot, flags)) return failMarkup();
 
     // 6. Set /NM (unique identifier string)
     if (!item.name.isEmpty()) {
         const std::u16string u16 = item.name.toStdU16String();
-        if (!FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) return failHighlight();
+        if (!FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) return failMarkup();
     }
 
     // 7. Set /Contents
     if (!item.contents.isEmpty()) {
         const std::u16string u16 = item.contents.toStdU16String();
-        if (!FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) return failHighlight();
+        if (!FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) return failMarkup();
     }
 
     // 8. Set /T (Author)
     if (!item.author.isEmpty()) {
         const std::u16string u16 = item.author.toStdU16String();
-        if (!FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) return failHighlight();
+        if (!FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) return failMarkup();
     }
 
     // Rendering the annotation list makes PDFium synthesize a translucent appearance stream
     // from /QuadPoints, /C and /CA, even when the user saves before the viewport renders.
     FPDF_BITMAP appearanceBitmap = FPDFBitmap_Create(1, 1, 0);
-    if (!appearanceBitmap) return failHighlight();
+    if (!appearanceBitmap) return failMarkup();
     FPDF_RenderPageBitmap(appearanceBitmap, m_page, 0, 0, 1, 1, 0, FPDF_ANNOT);
     FPDFBitmap_Destroy(appearanceBitmap);
     if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
-        return failHighlight();
+        return failMarkup();
     }
 
     FPDFPage_CloseAnnot(annot);
     return true;
+}
+
+bool PdfiumPage::addHighlightAnnotation(const AnnotationItem& item) {
+    AnnotationItem copy = item;
+    copy.subtype = AnnotationSubtype::Highlight;
+    return addMarkupAnnotation(copy);
 }
 
 int PdfiumPage::removeAnnotationByName(const QString& name) {
