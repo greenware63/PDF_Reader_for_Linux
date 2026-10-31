@@ -4681,6 +4681,7 @@ int main(int argc, char* argv[]) {
                 if (n.startsWith(QStringLiteral("save_")) || n == QStringLiteral("doc.pdf.bak.bak")) return fail("47b leftover temp file");
             }
         }
+#ifndef _WIN32
         {
             const QString real = tmp.filePath(QStringLiteral("real.pdf"));
             const QString link = tmp.filePath(QStringLiteral("link.pdf"));
@@ -4693,6 +4694,9 @@ int main(int argc, char* argv[]) {
             if (!QFileInfo(link).isSymLink()) return fail("47b symlink was replaced by a regular file");
             if (countHighlights(real) != 1) return fail("47b symlink target was not updated");
         }
+#else
+        std::cout << "  -> 47b symlink subtest SKIPPED on Windows (POSIX symlink semantics require Linux/UNIX)." << std::endl;
+#endif
 
 #ifdef PDF_WORKER_TEST_HOOKS
         // 47c: bytes written by the worker AFTER validation must not reach the destination.
