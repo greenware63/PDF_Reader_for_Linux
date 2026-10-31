@@ -5210,6 +5210,42 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] 48 saved file format invalid" << std::endl;
             return 1;
         }
+        savedFile.close();
+
+        // Verify the saved file actually contains the Underline, StrikeOut, and Squiggly annotations
+        static int64_t nextId48 = 4800;
+        pdf::ipc::WorkerClient client;
+        const int64_t id48 = ++nextId48;
+        if (client.openDocumentSync(id48, savedPath.toStdString()).error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 48 cannot reopen saved file in worker" << std::endl;
+            return 1;
+        }
+        const auto r = client.listAnnotationsSync(id48, 0, 15000);
+        int underlineCount = 0;
+        int strikeOutCount = 0;
+        int squigglyCount = 0;
+        for (const auto& a : r.annotations) {
+            if (a.subtype == pdf::AnnotationSubtype::Underline) {
+                ++underlineCount;
+            } else if (a.subtype == pdf::AnnotationSubtype::StrikeOut) {
+                ++strikeOutCount;
+            } else if (a.subtype == pdf::AnnotationSubtype::Squiggly) {
+                ++squigglyCount;
+            }
+        }
+        client.closeDocumentSync();
+        client.stop();
+
+        if (!r.success) {
+            std::cerr << "[FAIL] 48 listing annotations on saved file failed" << std::endl;
+            return 1;
+        }
+        if (underlineCount != 1 || strikeOutCount != 1 || squigglyCount != 1) {
+            std::cerr << "[FAIL] 48 saved file annotation counts mismatch: underline=" << underlineCount
+                      << " strikeout=" << strikeOutCount << " squiggly=" << squigglyCount
+                      << " (expected 1 of each)" << std::endl;
+            return 1;
+        }
 
         std::cout << "  -> Passed: Underline, StrikeOut, Squiggly selection, undo/redo, and saveDocument in PdfViewerWidget verified." << std::endl;
     }
