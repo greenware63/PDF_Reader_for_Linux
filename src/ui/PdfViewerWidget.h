@@ -170,6 +170,9 @@ public:
     bool deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item);
     bool deleteAnnotationByName(int pageIndex, const QString& annotationName);
     bool modifyTextAnnotation(int pageIndex, const pdf::AnnotationItem& before, const QString& newContents);
+    /// Rich-text tooltip for an annotation. Qt auto-detects HTML in tooltip text, and the author and contents come
+    /// from the (untrusted) PDF, so both are escaped and length-capped: markup in a note is shown literally.
+    static QString annotationTooltipHtml(const QString& author, const QString& contents);
     bool saveDocument(const QString& targetPath = QString());
     bool saveDocumentAs(const QString& targetPath) { return saveDocument(targetPath); }
 
