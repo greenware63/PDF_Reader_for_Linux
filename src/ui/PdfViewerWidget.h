@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <QPixmap>
+#include <QDateTime>
 #include "ColorMode.h"
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
@@ -46,7 +47,7 @@ public:
      * @brief Opens a document synchronously (blocks the caller until the worker has loaded it).
      * Cancels any pending openDocumentAsync(). Prefer openDocumentAsync() for interactive use.
      */
-    pdf::DocumentError openDocument(const QString& filePath);
+    pdf::DocumentError openDocument(const QString& filePath, const QString& password = QString());
 
     /**
      * @brief Opens a document without blocking the UI thread.
@@ -171,6 +172,7 @@ public:
     void simulateWorkerCrashForTesting() { m_renderWorker.killWorkerForTesting(); }
     /// Called with the worker-written temp file's path after validation and before the destination is written.
     void setBeforeCommitHookForTesting(std::function<void(const QString&)> hook) { m_beforeCommitHook = std::move(hook); }
+    void setBeforeValidationHookForTesting(std::function<void(const QString&)> hook) { m_beforeValidationHook = std::move(hook); }
 #endif
 
     // Text selection & copy APIs
@@ -291,7 +293,7 @@ private:
                                int64_t scrollDocX, int64_t scrollDocY, double effScale);
 
     QString openErrorMessage(pdf::DocumentError error, const QString& filePath) const;
-    void applyOpenedDocument(int64_t newDocumentId, const QString& filePath, const pdf::OpenResult& result);
+    void applyOpenedDocument(int64_t newDocumentId, const QString& filePath, const QString& password, const pdf::OpenResult& result);
     void startAsyncOpen(const QString& filePath, const QString& password);
     void cancelPendingOpen();
 
@@ -304,6 +306,7 @@ private:
     bool m_loading{false};
     int64_t m_pendingOpenId{0};
     QString m_pendingOpenPath;
+    QString m_pendingOpenPassword;
     bool m_hasQueuedOpen{false};
     QString m_queuedOpenPath;
     QString m_queuedOpenPassword;
@@ -357,6 +360,9 @@ private:
     QString m_workerErrorMessage;
     std::vector<QString> m_pageLabels;
     QString m_currentFilePath;
+    QString m_currentPassword;
+    qint64 m_sourceFileSize{-1};
+    QDateTime m_sourceFileModified;
 
     // Color mode / dark mode / night inversion state
     ColorMode m_colorMode{ColorMode::Normal};
@@ -380,6 +386,7 @@ private:
     bool m_preserveEditLogOnOpen{false};
 #ifdef PDF_WORKER_TEST_HOOKS
     std::function<void(const QString&)> m_beforeCommitHook;
+    std::function<void(const QString&)> m_beforeValidationHook;
 #endif
 };
 

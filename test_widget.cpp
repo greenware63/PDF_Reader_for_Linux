@@ -4655,6 +4655,25 @@ int main(int argc, char* argv[]) {
             if (countHighlights(redone) != 1) return fail("47a redone highlight is missing from the saved file");
         }
 
+        // 47b0: in-place save refuses to overwrite a source changed by another process since open.
+        {
+            const QString doc = tmp.filePath(QStringLiteral("externally_changed.pdf"));
+            QFile::remove(doc);
+            if (!QFile::copy(QString::fromStdString(textPath), doc)) return fail("47b0 cannot copy fixture");
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, doc)) return fail("47b0 cannot open document");
+            QFile changed(doc);
+            if (!changed.open(QIODevice::Append) || changed.write("\nexternal change\n") < 0) return fail("47b0 cannot change source");
+            changed.close();
+            QFile before(doc);
+            if (!before.open(QIODevice::ReadOnly)) return fail("47b0 cannot read changed source");
+            const QByteArray originalChangedBytes = before.readAll();
+            before.close();
+            if (v.saveDocument()) return fail("47b0 overwrote an externally changed source");
+            QFile after(doc);
+            if (!after.open(QIODevice::ReadOnly) || after.readAll() != originalChangedBytes) return fail("47b0 changed source despite refusing save");
+        }
+
         // 47b: in-place save must not create/delete .bak files, must keep permissions, must keep a symlink.
         {
             const QString doc = tmp.filePath(QStringLiteral("doc.pdf"));
@@ -4699,6 +4718,27 @@ int main(int argc, char* argv[]) {
 #endif
 
 #ifdef PDF_WORKER_TEST_HOOKS
+        // 47c0: reject a same-size output with a PDF envelope but invalid contents before it reaches the destination.
+        {
+            ui::PdfViewerWidget v;
+            if (!openViewer(v, QString::fromStdString(textPath))) return fail("47c0 cannot open document");
+            const QString dest = tmp.filePath(QStringLiteral("invalid-save.pdf"));
+            QFile::remove(dest);
+            v.setBeforeValidationHookForTesting([](const QString& tempPath) {
+                QFile f(tempPath);
+                if (!f.open(QIODevice::ReadWrite)) return;
+                const qint64 size = f.size();
+                if (size < 32) return;
+                QByteArray malformed(static_cast<int>(size), 'x');
+                malformed.replace(0, 5, "%PDF-");
+                malformed.replace(malformed.size() - 6, 5, "%%EOF");
+                f.resize(0);
+                f.write(malformed);
+            });
+            if (v.saveDocument(dest)) return fail("47c0 accepted unparsable PDF bytes");
+            if (QFileInfo::exists(dest)) return fail("47c0 committed an invalid PDF");
+        }
+
         // 47c: bytes written by the worker AFTER validation must not reach the destination.
         {
             ui::PdfViewerWidget v;
@@ -4778,7 +4818,7 @@ int main(int argc, char* argv[]) {
 #else
         std::cout << "  -> 47c/47d/47e SKIPPED: need test hooks (build with -DENABLE_TEST_HOOKS=ON)." << std::endl;
 #endif
-        std::cout << "  -> Passed: undo/redo reach the saved file; in-place save keeps .bak/mode/symlink (+ hooks builds: late worker writes ignored; crash recovery re-applies only unsaved edits)." << std::endl;
+        std::cout << "  -> Passed: undo/redo reach the saved file; in-place save keeps .bak/mode/symlink (+ hooks builds: invalid output rejected, late worker writes ignored, crash recovery re-applies only unsaved edits)." << std::endl;
     }
     std::cout << " ALL 47 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;

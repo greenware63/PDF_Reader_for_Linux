@@ -1,7 +1,18 @@
 #include "PdfViewerWidget.h"
 #include "ImageUtils.h"
+#include <QFileInfo>
 
 namespace {
+
+constexpr qint64 MAX_VALIDATED_PDF_BYTES = 512LL * 1024 * 1024;
+
+bool refersToSameFile(const QString& left, const QString& right) {
+    const QFileInfo l(left), r(right);
+    const QString lc = l.canonicalFilePath();
+    const QString rc = r.canonicalFilePath();
+    if (!lc.isEmpty() && !rc.isEmpty()) return lc == rc;
+    return l.absoluteFilePath() == r.absoluteFilePath();
+}
 
 // Rotates a page-point rectangle into displayed page-point coordinates [px, py, pw, ph]
 void rotateRectPointsForDisplay(const pdf::PageCharBox& r, double pageW, double pageH, int rotation,
@@ -110,6 +121,7 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
             m_loading = false;
             m_pendingOpenId = 0;
             m_pendingOpenPath.clear();
+            m_pendingOpenPassword.clear();
             Q_EMIT loadingChanged(false, QFileInfo(failedPath).fileName());
             Q_EMIT documentOpenFailed(failedPath, pdf::DocumentError::InvalidFormat);
         }
@@ -174,7 +186,7 @@ QString PdfViewerWidget::openErrorMessage(pdf::DocumentError error, const QStrin
     }
 }
 
-void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& filePath, const pdf::OpenResult& openResult) {
+void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& filePath, const QString& password, const pdf::OpenResult& openResult) {
     m_workerErrorMessage.clear();
     // Success: atomically cancel worker work, flush previous cache, and advance epochs
     m_renderWorker.cancelAll();
@@ -193,6 +205,10 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
 
     m_hasDocument = true;
     m_currentFilePath = filePath;
+    m_currentPassword = password;
+    const QFileInfo sourceInfo(filePath);
+    m_sourceFileSize = sourceInfo.exists() ? sourceInfo.size() : -1;
+    m_sourceFileModified = sourceInfo.exists() ? sourceInfo.lastModified() : QDateTime();
     m_pageCount = openResult.pageCount;
     m_layout.setFocusPage(0);
     m_layout.setPageSizes(openResult.pageSizes);
@@ -232,7 +248,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     viewport()->update();
 }
 
-pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
+pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath, const QString& password) {
     if (filePath.isEmpty()) {
         return pdf::DocumentError::FileNotFound;
     }
@@ -242,13 +258,13 @@ pdf::DocumentError PdfViewerWidget::openDocument(const QString& filePath) {
 
     const int64_t nextDocId = m_currentDocumentId + 1;
     // Open serially on the engine worker thread - 0 PDFium calls on UI thread!
-    auto openResult = m_renderWorker.openDocumentSync(nextDocId, filePath.toStdString());
+    auto openResult = m_renderWorker.openDocumentSync(nextDocId, filePath.toStdString(), password.toStdString());
     if (openResult.error != pdf::DocumentError::None) {
         Q_EMIT loadError(openErrorMessage(openResult.error, filePath));
         return openResult.error; // Existing document state remains intact on failure
     }
 
-    applyOpenedDocument(nextDocId, filePath, openResult);
+    applyOpenedDocument(nextDocId, filePath, password, openResult);
     return pdf::DocumentError::None;
 }
 
@@ -272,6 +288,7 @@ void PdfViewerWidget::startAsyncOpen(const QString& filePath, const QString& pas
     m_loading = true;
     m_pendingOpenId = m_currentDocumentId + 1;
     m_pendingOpenPath = filePath;
+    m_pendingOpenPassword = password;
     Q_EMIT loadingChanged(true, QFileInfo(filePath).fileName());
     viewport()->update();
     m_renderWorker.openDocumentAsync(m_pendingOpenId, filePath.toStdString(), password.toStdString());
@@ -283,6 +300,7 @@ void PdfViewerWidget::cancelPendingOpen() {
     m_loading = false;
     m_pendingOpenId = 0; // any result still in flight is ignored by onDocumentOpened()
     m_pendingOpenPath.clear();
+    m_pendingOpenPassword.clear();
     m_hasQueuedOpen = false;
     m_queuedOpenPath.clear();
     m_queuedOpenPassword.clear();
@@ -298,15 +316,17 @@ void PdfViewerWidget::onDocumentOpened(int64_t documentId, pdf::OpenResult resul
     }
 
     const QString path = m_pendingOpenPath;
+    const QString password = m_pendingOpenPassword;
     m_loading = false;
     m_pendingOpenId = 0;
     m_pendingOpenPath.clear();
+    m_pendingOpenPassword.clear();
 
     if (result.error != pdf::DocumentError::None) {
         Q_EMIT documentOpenFailed(path, result.error);
         Q_EMIT loadError(openErrorMessage(result.error, path));
     } else {
-        applyOpenedDocument(documentId, path, result);
+        applyOpenedDocument(documentId, path, password, result);
     }
 
     if (m_hasQueuedOpen) {
@@ -347,6 +367,9 @@ void PdfViewerWidget::closeDocument() {
 
     m_hasDocument = false;
     m_currentFilePath.clear();
+    m_currentPassword.clear();
+    m_sourceFileSize = -1;
+    m_sourceFileModified = QDateTime();
     m_fallbackScales.clear();
     m_pageCount = 0;
     m_layout.setPageSizes({});
@@ -2403,7 +2426,7 @@ void PdfViewerWidget::recoverAfterWorkerFailure() {
     m_recoveryPath.clear();
 
     m_preserveEditLogOnOpen = true;
-    const pdf::DocumentError err = openDocument(path);   // restarts the worker; the file on disk is the saved state
+    const pdf::DocumentError err = openDocument(path, m_currentPassword);   // restarts the worker; the file on disk is the saved state
     m_preserveEditLogOnOpen = false;
     if (err != pdf::DocumentError::None) {
         m_recovering = false;
@@ -2455,41 +2478,72 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
     tempFile.close();
 #endif
 
-    QFile origFile(m_currentFilePath);
+    const bool incremental = refersToSameFile(destPath, m_currentFilePath);
     QByteArray origBytes;
-    if (origFile.open(QIODevice::ReadOnly)) {
+    if (incremental) {
+        const QFileInfo currentSourceInfo(m_currentFilePath);
+        if (!currentSourceInfo.exists() || currentSourceInfo.size() != m_sourceFileSize ||
+            currentSourceInfo.lastModified() != m_sourceFileModified) {
+            tempFile.remove();
+            return false;
+        }
+        QFile origFile(m_currentFilePath);
+        if (!origFile.open(QIODevice::ReadOnly) || origFile.size() <= 0 || origFile.size() > MAX_VALIDATED_PDF_BYTES) {
+            tempFile.remove();
+            return false;
+        }
         origBytes = origFile.readAll();
         origFile.close();
+        if (origBytes.isEmpty()) {
+            tempFile.remove();
+            return false;
+        }
     }
-
-    bool incremental = !origBytes.isEmpty() && (destPath == m_currentFilePath);
     auto saveResp = m_renderWorker.saveDocumentSync(m_currentDocumentId, tempFd, incremental, tempPath);
     if (!saveResp.success || saveResp.bytesWritten == 0) {
         tempFile.remove();
         return false;
     }
 
+#ifdef PDF_WORKER_TEST_HOOKS
+    if (m_beforeValidationHook) {
+        m_beforeValidationHook(tempPath);
+    }
+#endif
+
     QFile checkFile(tempPath);
     if (!checkFile.open(QIODevice::ReadOnly)) {
         tempFile.remove();
         return false;
     }
+    const qint64 outputSize = checkFile.size();
+    if (outputSize <= 0 || outputSize > MAX_VALIDATED_PDF_BYTES ||
+        static_cast<uint64_t>(outputSize) != saveResp.bytesWritten) {
+        checkFile.close();
+        tempFile.remove();
+        return false;
+    }
     QByteArray checkBytes = checkFile.readAll();
+    const bool completeRead = checkBytes.size() == outputSize && checkFile.error() == QFileDevice::NoError;
     checkFile.close();
+    if (!completeRead) {
+        tempFile.remove();
+        return false;
+    }
 
     if (!checkBytes.startsWith("%PDF-")) {
         tempFile.remove();
         return false;
     }
 
-    if (incremental && !origBytes.isEmpty()) {
+    if (incremental) {
         if (!checkBytes.startsWith(origBytes)) {
             tempFile.remove();
             return false;
         }
     }
 
-    // Fresh document verification: verify written PDF is non-empty, has PDF header and valid EOF marker
+    // Reject malformed envelopes cheaply before spending time starting the independent parser worker.
     if (checkBytes.size() < 16) {
         tempFile.remove();
         return false;
@@ -2498,6 +2552,55 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
     if (eofIdx == -1 || checkBytes.size() - eofIdx > 1024) {
         tempFile.remove();
         return false;
+    }
+
+    // Reopen the exact byte snapshot in a new confined worker before committing. This proves the
+    // output parses independently and that persisted annotations survived serialization.
+    std::vector<size_t> expectedAnnotationCounts;
+    expectedAnnotationCounts.reserve(static_cast<size_t>(m_pageCount));
+    for (int page = 0; page < m_pageCount; ++page) {
+        const auto response = m_renderWorker.listAnnotationsSync(m_currentDocumentId, page, 15000);
+        if (!response.success || response.truncated) {
+            tempFile.remove();
+            return false;
+        }
+        expectedAnnotationCounts.push_back(response.annotations.size());
+    }
+
+    QTemporaryFile snapshot;
+    if (!snapshot.open() || snapshot.write(checkBytes) != checkBytes.size() || !snapshot.flush()) {
+        tempFile.remove();
+        return false;
+    }
+    const QString snapshotPath = snapshot.fileName();
+    snapshot.close();
+    pdf::ipc::WorkerClient verifier;
+    const auto reopened = verifier.openDocumentSync(1, snapshotPath.toStdString(), m_currentPassword.toStdString());
+    bool verified = reopened.error == pdf::DocumentError::None && reopened.pageCount == m_pageCount;
+    if (verified) {
+        for (int page = 0; page < m_pageCount; ++page) {
+            const auto response = verifier.listAnnotationsSync(1, page, 15000);
+            if (!response.success || response.truncated ||
+                response.annotations.size() != expectedAnnotationCounts[static_cast<size_t>(page)]) {
+                verified = false;
+                break;
+            }
+        }
+    }
+    verifier.stop();
+    if (!verified) {
+        tempFile.remove();
+        return false;
+    }
+
+    // Refuse a commit if another process replaced or changed the source while validation ran.
+    if (incremental) {
+        const QFileInfo currentSourceInfo(m_currentFilePath);
+        if (!currentSourceInfo.exists() || currentSourceInfo.size() != m_sourceFileSize ||
+            currentSourceInfo.lastModified() != m_sourceFileModified) {
+            tempFile.remove();
+            return false;
+        }
     }
 
 #ifdef PDF_WORKER_TEST_HOOKS
@@ -2520,6 +2623,9 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
     tempFile.remove();
 
     m_currentFilePath = destPath;
+    const QFileInfo savedInfo(destPath);
+    m_sourceFileSize = savedInfo.exists() ? savedInfo.size() : -1;
+    m_sourceFileModified = savedInfo.exists() ? savedInfo.lastModified() : QDateTime();
     m_editLog.markSaved();
     return true;
 }
