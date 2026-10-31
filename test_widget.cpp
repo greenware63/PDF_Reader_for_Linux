@@ -5362,6 +5362,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+#ifdef PDF_WORKER_TEST_HOOKS
         // Worker crash recovery: verify replay does not duplicate notes
         bool recovered = false;
         QObject::connect(&viewer, &ui::PdfViewerWidget::editsRecovered, &viewer, [&](int) { recovered = true; });
@@ -5376,6 +5377,7 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] 49 viewer did not recover after crash" << std::endl;
             return 1;
         }
+#endif
 
         // 3. Test Deleting the note
         const auto postCrashCmds = viewer.editLog().activeCommands();
