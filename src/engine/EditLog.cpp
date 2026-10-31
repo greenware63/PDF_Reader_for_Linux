@@ -38,6 +38,63 @@ uint64_t EditLog::recordAddAnnotation(int pageIndex, const AnnotationItem& item)
     return cmd.id;
 }
 
+uint64_t EditLog::recordDeleteAnnotation(int pageIndex, const AnnotationItem& item) {
+    if (m_cursor < m_commands.size()) {
+        const size_t savedBase = m_savedValid ? m_savedCursor : m_savedPrefix;
+        if (savedBase > m_cursor) {
+            for (size_t i = m_cursor; i < savedBase && i < m_commands.size(); ++i) {
+                m_savedExtra.push_back(m_commands[i]);
+            }
+            m_savedPrefix = m_cursor;
+            m_savedValid = false;
+        }
+        m_commands.erase(m_commands.begin() + static_cast<std::ptrdiff_t>(m_cursor), m_commands.end());
+    }
+
+    EditCommand cmd;
+    cmd.id = m_nextCommandId++;
+    cmd.pageIndex = pageIndex;
+    cmd.type = EditCommandType::DeleteAnnotation;
+    cmd.before = item;
+
+    m_commands.push_back(std::move(cmd));
+    m_cursor = m_commands.size();
+
+    Q_EMIT stateChanged();
+    Q_EMIT dirtyChanged(isDirty());
+
+    return cmd.id;
+}
+
+uint64_t EditLog::recordModifyAnnotation(int pageIndex, const AnnotationItem& before, const AnnotationItem& after) {
+    if (m_cursor < m_commands.size()) {
+        const size_t savedBase = m_savedValid ? m_savedCursor : m_savedPrefix;
+        if (savedBase > m_cursor) {
+            for (size_t i = m_cursor; i < savedBase && i < m_commands.size(); ++i) {
+                m_savedExtra.push_back(m_commands[i]);
+            }
+            m_savedPrefix = m_cursor;
+            m_savedValid = false;
+        }
+        m_commands.erase(m_commands.begin() + static_cast<std::ptrdiff_t>(m_cursor), m_commands.end());
+    }
+
+    EditCommand cmd;
+    cmd.id = m_nextCommandId++;
+    cmd.pageIndex = pageIndex;
+    cmd.type = EditCommandType::ModifyAnnotation;
+    cmd.before = before;
+    cmd.after = after;
+
+    m_commands.push_back(std::move(cmd));
+    m_cursor = m_commands.size();
+
+    Q_EMIT stateChanged();
+    Q_EMIT dirtyChanged(isDirty());
+
+    return cmd.id;
+}
+
 bool EditLog::canUndo() const {
     return m_cursor > 0;
 }
@@ -109,20 +166,37 @@ std::vector<EditOp> EditLog::opsSinceSave() const {
     // Saved annotations that are no longer part of the log.
     for (auto it = m_savedExtra.rbegin(); it != m_savedExtra.rend(); ++it) {
         if (it->type == EditCommandType::AddAnnotation) {
-            ops.push_back({false, *it});
+            ops.push_back({false, it->pageIndex, {}, it->after.name});
+        } else if (it->type == EditCommandType::DeleteAnnotation) {
+            ops.push_back({true, it->pageIndex, it->before, it->before.name});
+        } else if (it->type == EditCommandType::ModifyAnnotation) {
+            ops.push_back({false, it->pageIndex, {}, it->after.name});
+            ops.push_back({true, it->pageIndex, it->before, it->before.name});
         }
     }
     const size_t base = m_savedValid ? m_savedCursor : m_savedPrefix;
     if (m_cursor > base) {
         for (size_t i = base; i < m_cursor && i < m_commands.size(); ++i) {
-            if (m_commands[i].type == EditCommandType::AddAnnotation) {
-                ops.push_back({true, m_commands[i]});
+            const auto& cmd = m_commands[i];
+            if (cmd.type == EditCommandType::AddAnnotation) {
+                ops.push_back({true, cmd.pageIndex, cmd.after, cmd.after.name});
+            } else if (cmd.type == EditCommandType::DeleteAnnotation) {
+                ops.push_back({false, cmd.pageIndex, {}, cmd.before.name});
+            } else if (cmd.type == EditCommandType::ModifyAnnotation) {
+                ops.push_back({false, cmd.pageIndex, {}, cmd.before.name});
+                ops.push_back({true, cmd.pageIndex, cmd.after, cmd.after.name});
             }
         }
     } else if (m_cursor < base) {
         for (size_t i = std::min(base, m_commands.size()); i > m_cursor; --i) {
-            if (m_commands[i - 1].type == EditCommandType::AddAnnotation) {
-                ops.push_back({false, m_commands[i - 1]});
+            const auto& cmd = m_commands[i - 1];
+            if (cmd.type == EditCommandType::AddAnnotation) {
+                ops.push_back({false, cmd.pageIndex, {}, cmd.after.name});
+            } else if (cmd.type == EditCommandType::DeleteAnnotation) {
+                ops.push_back({true, cmd.pageIndex, cmd.before, cmd.before.name});
+            } else if (cmd.type == EditCommandType::ModifyAnnotation) {
+                ops.push_back({false, cmd.pageIndex, {}, cmd.after.name});
+                ops.push_back({true, cmd.pageIndex, cmd.before, cmd.before.name});
             }
         }
     }
@@ -135,11 +209,13 @@ bool EditLog::replay(ipc::WorkerClient* client, int64_t documentId) {
     }
     for (const auto& op : opsSinceSave()) {
         if (op.add) {
-            if (!client->addAnnotationSync(documentId, op.command.pageIndex, op.command.after).success) {
+            if (!client->addAnnotationSync(documentId, op.pageIndex, op.item).success) {
                 return false;
             }
-        } else if (!client->removeAnnotationSync(documentId, op.command.pageIndex, op.command.after.name).success) {
-            return false;
+        } else {
+            if (!client->removeAnnotationSync(documentId, op.pageIndex, op.name).success) {
+                return false;
+            }
         }
     }
     return true;

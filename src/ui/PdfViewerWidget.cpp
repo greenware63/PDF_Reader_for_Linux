@@ -2479,6 +2479,26 @@ bool PdfViewerWidget::addTextAnnotation(int pageIndex, double userX, double user
     return true;
 }
 
+bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (item.name.isEmpty() || pageIndex < 0 || pageIndex >= m_pageCount) {
+        return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, pageIndex, item.name);
+    if (!response.success || response.removedCount == 0) {
+        Q_EMIT loadError(tr("Could not delete annotation: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordDeleteAnnotation(pageIndex, item);
+    refreshAfterEdit();
+    return true;
+}
+
 bool PdfViewerWidget::deleteAnnotationByName(int pageIndex, const QString& annotationName) {
     if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
@@ -2486,14 +2506,63 @@ bool PdfViewerWidget::deleteAnnotationByName(int pageIndex, const QString& annot
     if (annotationName.isEmpty() || pageIndex < 0 || pageIndex >= m_pageCount) {
         return false;
     }
+
+    pdf::AnnotationItem item;
+    for (const auto& cmd : m_editLog.activeCommands()) {
+        if (cmd.pageIndex == pageIndex) {
+            if (cmd.type == pdf::EditCommandType::AddAnnotation && cmd.after.name == annotationName) {
+                item = cmd.after;
+                break;
+            } else if (cmd.type == pdf::EditCommandType::ModifyAnnotation && cmd.after.name == annotationName) {
+                item = cmd.after;
+                break;
+            }
+        }
+    }
+    if (item.name.isEmpty()) {
+        const auto list = m_renderWorker.listAnnotationsSync(m_currentDocumentId, pageIndex);
+        for (const auto& a : list.annotations) {
+            if (a.name == annotationName) {
+                item = a;
+                break;
+            }
+        }
+    }
+    if (item.name.isEmpty()) {
+        item.name = annotationName;
+        item.pageIndex = pageIndex;
+    }
+
+    return deleteAnnotation(pageIndex, item);
+}
+
+bool PdfViewerWidget::modifyTextAnnotation(int pageIndex, const pdf::AnnotationItem& before, const QString& newContents) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (pageIndex < 0 || pageIndex >= m_pageCount || before.name.isEmpty()) {
+        return false;
+    }
     QScopedValueRollback<bool> editGuard(m_editInProgress, true);
 
-    const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, pageIndex, annotationName);
-    if (!response.success) {
-        Q_EMIT loadError(tr("Could not delete annotation: %1").arg(response.errorMessage));
+    pdf::AnnotationItem after = before;
+    after.contents = newContents;
+    after.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+
+    const auto remResp = m_renderWorker.removeAnnotationSync(m_currentDocumentId, pageIndex, before.name);
+    if (!remResp.success || remResp.removedCount == 0) {
+        Q_EMIT loadError(tr("Could not update note: %1").arg(remResp.errorMessage));
         return false;
     }
 
+    const auto addResp = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, after);
+    if (!addResp.success) {
+        m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, before);
+        Q_EMIT loadError(tr("Could not add updated note: %1").arg(addResp.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordModifyAnnotation(pageIndex, before, after);
     refreshAfterEdit();
     return true;
 }
@@ -2530,9 +2599,9 @@ void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
 
             auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY);
             if (hit.hit && !hit.annotation.name.isEmpty()) {
-                const QString annotName = hit.annotation.name;
-                menu.addAction(tr("&Delete Annotation"), this, [this, clickPage, annotName]() {
-                    deleteAnnotationByName(clickPage, annotName);
+                const auto hitItem = hit.annotation;
+                menu.addAction(tr("&Delete Annotation"), this, [this, clickPage, hitItem]() {
+                    deleteAnnotation(clickPage, hitItem);
                 });
                 menu.addSeparator();
             }
@@ -2573,8 +2642,7 @@ void PdfViewerWidget::mouseDoubleClickEvent(QMouseEvent* event) {
                     const QString newText = QInputDialog::getMultiLineText(
                         this, title, tr("Note Content:"), hit.annotation.contents, &ok);
                     if (ok && newText != hit.annotation.contents) {
-                        deleteAnnotationByName(clickPage, hit.annotation.name);
-                        addTextAnnotation(clickPage, hit.annotation.left, hit.annotation.top, newText, hit.annotation.colorArgb);
+                        modifyTextAnnotation(clickPage, hit.annotation, newText);
                     }
                     event->accept();
                     return;
@@ -2641,6 +2709,23 @@ bool PdfViewerWidget::undoEdit() {
             Q_EMIT loadError(tr("Could not undo the annotation: %1").arg(response.errorMessage));
             return false;
         }
+    } else if (cmd.type == pdf::EditCommandType::DeleteAnnotation) {
+        const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.before);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.redo(restored);
+            Q_EMIT loadError(tr("Could not undo deletion: %1").arg(response.errorMessage));
+            return false;
+        }
+    } else if (cmd.type == pdf::EditCommandType::ModifyAnnotation) {
+        m_renderWorker.removeAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.after.name);
+        const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.before);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.redo(restored);
+            Q_EMIT loadError(tr("Could not undo modification: %1").arg(response.errorMessage));
+            return false;
+        }
     }
     refreshAfterEdit();
     return true;
@@ -2661,6 +2746,23 @@ bool PdfViewerWidget::redoEdit() {
             pdf::EditCommand restored;
             m_editLog.undo(restored);
             Q_EMIT loadError(tr("Could not redo the annotation: %1").arg(response.errorMessage));
+            return false;
+        }
+    } else if (cmd.type == pdf::EditCommandType::DeleteAnnotation) {
+        const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.before.name);
+        if (!response.success || response.removedCount == 0) {
+            pdf::EditCommand restored;
+            m_editLog.undo(restored);
+            Q_EMIT loadError(tr("Could not redo deletion: %1").arg(response.errorMessage));
+            return false;
+        }
+    } else if (cmd.type == pdf::EditCommandType::ModifyAnnotation) {
+        m_renderWorker.removeAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.before.name);
+        const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, cmd.pageIndex, cmd.after);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.undo(restored);
+            Q_EMIT loadError(tr("Could not redo modification: %1").arg(response.errorMessage));
             return false;
         }
     }
@@ -2692,9 +2794,9 @@ void PdfViewerWidget::recoverAfterWorkerFailure() {
     for (const auto& op : m_editLog.opsSinceSave()) {
         bool done = false;
         if (op.add) {
-            done = m_renderWorker.addAnnotationSync(m_currentDocumentId, op.command.pageIndex, op.command.after).success;
+            done = m_renderWorker.addAnnotationSync(m_currentDocumentId, op.pageIndex, op.item).success;
         } else {
-            const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, op.command.pageIndex, op.command.after.name);
+            const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, op.pageIndex, op.name);
             done = response.success && response.removedCount > 0;
         }
         if (!done) {
