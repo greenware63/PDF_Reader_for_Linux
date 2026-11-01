@@ -368,6 +368,7 @@ QDataStream& operator<<(QDataStream& out, const AnnotationItem& item) {
         out << q;
     }
     out << item.uri;
+    out << item.borderWidth;
     return out;
 }
 
@@ -420,6 +421,11 @@ QDataStream& operator>>(QDataStream& in, AnnotationItem& item) {
     if (item.uri.size() > 4096) {
         in.setStatus(QDataStream::ReadCorruptData);
         return in;
+    }
+
+    in >> item.borderWidth;
+    if (std::isnan(item.borderWidth) || std::isinf(item.borderWidth) || item.borderWidth < 0.0 || item.borderWidth > 100.0) {
+        item.borderWidth = 0.0;
     }
     return in;
 }

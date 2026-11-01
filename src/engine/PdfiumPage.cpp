@@ -539,6 +539,13 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations(bool* truncated) {
                              (static_cast<uint32_t>(b));
         }
 
+        float hRadius = 0.0f, vRadius = 0.0f, bWidth = 0.0f;
+        if (FPDFAnnot_GetBorder(annot, &hRadius, &vRadius, &bWidth)) {
+            if (std::isfinite(bWidth) && bWidth >= 0.0f && bWidth <= 100.0f) {
+                item.borderWidth = static_cast<double>(bWidth);
+            }
+        }
+
         auto readStringKey = [&](const char* key, size_t maxChars) -> QString {
             unsigned long reqLen = FPDFAnnot_GetStringValue(annot, key, nullptr, 0);
             if (reqLen <= 2) {
@@ -856,6 +863,129 @@ bool PdfiumPage::addTextAnnotation(const AnnotationItem& item) {
     FPDFBitmap_Destroy(appearanceBitmap);
     if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
         return failText();
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
+}
+
+bool PdfiumPage::addGeometricAnnotation(const AnnotationItem& item, double borderWidth) {
+    if (!m_page || !item.isValid()) {
+        return false;
+    }
+
+    FPDF_ANNOTATION_SUBTYPE pdfiumSubtype = FPDF_ANNOT_UNKNOWN;
+    if (item.subtype == AnnotationSubtype::Square) {
+        pdfiumSubtype = FPDF_ANNOT_SQUARE;
+    } else if (item.subtype == AnnotationSubtype::Circle) {
+        pdfiumSubtype = FPDF_ANNOT_CIRCLE;
+    } else {
+        return false;
+    }
+
+    // /Rect is stored as floats and drives the generated appearance stream. A value that is non-finite as a float
+    // (1e39), absurdly large, or a degenerate box would write nan/inf/1e+30 tokens into the /AP and /Rect and
+    // corrupt the saved file, so reject it before touching the document.
+    constexpr double kMaxCoord = 1.0e6;
+    constexpr double kMinExtent = 0.5;
+    const double coords[4] = {item.left, item.top, item.right, item.bottom};
+    for (const double v : coords) {
+        if (!std::isfinite(v) || std::fabs(v) > kMaxCoord) {
+            return false;
+        }
+    }
+    // Reject reversed rectangles (right < left or top < bottom) and degenerate/hairline boxes (< 0.5 pt)
+    if (item.right < item.left || item.top < item.bottom) {
+        return false;
+    }
+    if ((item.right - item.left) < kMinExtent || (item.top - item.bottom) < kMinExtent) {
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    // 1. Create the annotation in PDFium
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, pdfiumSubtype);
+    if (!annot) {
+        return false;
+    }
+    const int annotIndex = FPDFPage_GetAnnotCount(m_page) - 1;
+    auto failGeometric = [&]() {
+        FPDFPage_CloseAnnot(annot);
+        FPDFPage_RemoveAnnot(m_page, annotIndex);
+        return false;
+    };
+
+    // 2. Set /Rect
+    FS_RECTF rect{};
+    rect.left = static_cast<float>(item.left);
+    rect.top = static_cast<float>(item.top);
+    rect.right = static_cast<float>(item.right);
+    rect.bottom = static_cast<float>(item.bottom);
+    if (!FPDFAnnot_SetRect(annot, &rect)) {
+        return failGeometric();
+    }
+
+    // 3. Set Stroke Color (/C)
+    uint32_t a = (item.colorArgb >> 24) & 0xFF;
+    uint32_t r = (item.colorArgb >> 16) & 0xFF;
+    uint32_t g = (item.colorArgb >> 8) & 0xFF;
+    uint32_t b = item.colorArgb & 0xFF;
+    if (a == 0 && item.colorArgb == 0) {
+        if (item.subtype == AnnotationSubtype::Square) {
+            r = 255; g = 0; b = 0; a = 255; // Default Red
+        } else {
+            r = 0; g = 0; b = 255; a = 255; // Default Blue
+        }
+    }
+    if (!FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, a)) {
+        return failGeometric();
+    }
+
+    // 4. Set Border (/BS)
+    double effectiveBorderWidth = (item.borderWidth > 0.0) ? item.borderWidth : borderWidth;
+    if (effectiveBorderWidth <= 0.0 || effectiveBorderWidth > 100.0 || !std::isfinite(effectiveBorderWidth)) {
+        effectiveBorderWidth = 2.0;
+    }
+    FPDFAnnot_SetBorder(annot, 0.0f, 0.0f, static_cast<float>(effectiveBorderWidth));
+
+    // 5. Set Flags (/F)
+    uint32_t flags = item.flags ? item.flags : FPDF_ANNOT_FLAG_PRINT;
+    if (!FPDFAnnot_SetFlags(annot, flags)) {
+        return failGeometric();
+    }
+
+    // 6. Set /NM (unique identifier string)
+    if (!item.name.isEmpty()) {
+        const std::u16string u16 = item.name.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failGeometric();
+        }
+    }
+
+    // 7. Set /Contents
+    if (!item.contents.isEmpty()) {
+        const std::u16string u16 = item.contents.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failGeometric();
+        }
+    }
+
+    // 8. Set /T (Author)
+    if (!item.author.isEmpty()) {
+        const std::u16string u16 = item.author.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failGeometric();
+        }
+    }
+
+    // 9. Generate appearance stream (/AP)
+    FPDF_BITMAP appearanceBitmap = FPDFBitmap_Create(1, 1, 0);
+    if (!appearanceBitmap) return failGeometric();
+    FPDF_RenderPageBitmap(appearanceBitmap, m_page, 0, 0, 1, 1, 0, FPDF_ANNOT);
+    FPDFBitmap_Destroy(appearanceBitmap);
+    if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
+        return failGeometric();
     }
 
     FPDFPage_CloseAnnot(annot);

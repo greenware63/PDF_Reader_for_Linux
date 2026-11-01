@@ -3220,8 +3220,206 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Text Note (/Text) creation, listing, hit-test, incremental save, and removal verified." << std::endl;
     }
 
+    // --- Test 35: Geometric Annotations (/Square and /Circle) ---
+    std::cout << "Test 35: Geometric Annotations (/Square and /Circle)..." << std::endl;
+    {
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] Test 35: Failed to create tempDir" << std::endl;
+            return 1;
+        }
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 35: loadFromFile failed" << std::endl;
+            return 1;
+        }
+
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 35: getPage(0) failed" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem square;
+        square.subtype = pdf::AnnotationSubtype::Square;
+        square.pageIndex = 0;
+        square.left = 100.0; square.bottom = 600.0; square.right = 200.0; square.top = 700.0;
+        square.colorArgb = 0xFFFF0000; // Red
+        square.hasColor = true;
+        square.flags = 4;
+        square.name = QStringLiteral("square-test-35");
+        square.contents = QStringLiteral("Square annotation contents");
+        square.author = QStringLiteral("GeometryTester");
+
+        if (!page->addGeometricAnnotation(square, 2.0)) {
+            std::cerr << "[FAIL] Test 35: addGeometricAnnotation (Square) failed" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem circle;
+        circle.subtype = pdf::AnnotationSubtype::Circle;
+        circle.pageIndex = 0;
+        circle.left = 250.0; circle.bottom = 600.0; circle.right = 350.0; circle.top = 700.0;
+        circle.colorArgb = 0xFF0000FF; // Blue
+        circle.hasColor = true;
+        circle.flags = 4;
+        circle.borderWidth = 3.5;
+        circle.name = QStringLiteral("circle-test-35");
+        circle.contents = QStringLiteral("Circle annotation contents");
+        circle.author = QStringLiteral("GeometryTester");
+
+        if (!page->addGeometricAnnotation(circle, 3.5)) {
+            std::cerr << "[FAIL] Test 35: addGeometricAnnotation (Circle) failed" << std::endl;
+            return 1;
+        }
+
+        // Verify listed
+        auto annots = page->listAnnotations();
+        if (annots.size() != 2) {
+            std::cerr << "[FAIL] Test 35: Expected 2 annotations listed, got " << annots.size() << std::endl;
+            return 1;
+        }
+        bool foundSquare = false, foundCircle = false;
+        for (const auto& a : annots) {
+            if (a.subtype == pdf::AnnotationSubtype::Square && a.name == "square-test-35") {
+                foundSquare = true;
+                if (std::abs(a.borderWidth - 2.0) > 0.01) {
+                    std::cerr << "[FAIL] Test 35: Square borderWidth mismatch" << std::endl;
+                    return 1;
+                }
+            } else if (a.subtype == pdf::AnnotationSubtype::Circle && a.name == "circle-test-35") {
+                foundCircle = true;
+                if (std::abs(a.borderWidth - 3.5) > 0.01) {
+                    std::cerr << "[FAIL] Test 35: Circle borderWidth mismatch" << std::endl;
+                    return 1;
+                }
+            }
+        }
+        if (!foundSquare || !foundCircle) {
+            std::cerr << "[FAIL] Test 35: Square or Circle missing in listed annotations" << std::endl;
+            return 1;
+        }
+
+        // Hit testing
+        pdf::AnnotationItem hit;
+        if (!page->hitTestAnnotation(150.0, 650.0, hit) || hit.subtype != pdf::AnnotationSubtype::Square || hit.name != "square-test-35") {
+            std::cerr << "[FAIL] Test 35: Hit test inside square rect failed" << std::endl;
+            return 1;
+        }
+        if (!page->hitTestAnnotation(300.0, 650.0, hit) || hit.subtype != pdf::AnnotationSubtype::Circle || hit.name != "circle-test-35") {
+            std::cerr << "[FAIL] Test 35: Hit test inside circle rect failed" << std::endl;
+            return 1;
+        }
+        if (page->hitTestAnnotation(50.0, 50.0, hit)) {
+            std::cerr << "[FAIL] Test 35: Hit test outside rects unexpectedly succeeded" << std::endl;
+            return 1;
+        }
+
+        // Incremental save and verify preservation
+        const std::string savedPath = tempDir.filePath("geometric_saved.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (saveFd < 0) {
+            std::cerr << "[FAIL] Test 35: Failed to open saveFd" << std::endl;
+            return 1;
+        }
+        uint64_t written = 0;
+        if (!doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
+            std::cerr << "[FAIL] Test 35: saveAsCopy failed" << std::endl;
+            return 1;
+        }
+
+        // Reopen saved file in fresh document and check annotations
+        auto freshDoc = pdf::createDocument();
+        if (freshDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 35: Failed to reopen saved file" << std::endl;
+            return 1;
+        }
+        auto freshPage = freshDoc->getPage(0);
+        if (!freshPage) {
+            std::cerr << "[FAIL] Test 35: Failed to get page 0 in fresh document" << std::endl;
+            return 1;
+        }
+        auto freshAnnots = freshPage->listAnnotations();
+        if (freshAnnots.size() != 2) {
+            std::cerr << "[FAIL] Test 35: Reopened annotations size mismatch, expected 2, got " << freshAnnots.size() << std::endl;
+            return 1;
+        }
+
+        // Verify removeAnnotationByName
+        int removedSquare = page->removeAnnotationByName(QStringLiteral("square-test-35"));
+        int removedCircle = page->removeAnnotationByName(QStringLiteral("circle-test-35"));
+        if (removedSquare != 1 || removedCircle != 1) {
+            std::cerr << "[FAIL] Test 35: removeAnnotationByName did not remove expected counts" << std::endl;
+            return 1;
+        }
+        auto afterRemove = page->listAnnotations();
+        if (!afterRemove.empty()) {
+            std::cerr << "[FAIL] Test 35: Expected 0 annotations after removal, got " << afterRemove.size() << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Geometric annotations (/Square and /Circle) add, list, hit-test, save, and removal verified." << std::endl;
+    }
+
+    // --- Test 36: Square/Circle reject non-finite, oversized and degenerate rectangles ---
+    std::cout << "Test 36: Geometric annotations reject hostile rectangles..." << std::endl;
+    {
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 36: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 36: getPage(0) failed" << std::endl;
+            return 1;
+        }
+        struct Rc { const char* label; double l, b, r, t; };
+        const Rc bad[] = {
+            {"float overflow", -1e39, -1e39, 1e39, 1e39},
+            {"huge", -1e30, -1e30, 1e30, 1e30},
+            {"zero size", 50, 50, 50, 50},
+            {"hairline", 50, 50, 50.1, 90},
+            {"reversed x", 100, 50, 50, 90},
+            {"reversed y", 50, 90, 100, 50},
+            {"reversed both", 100, 90, 50, 50},
+        };
+        for (const auto& rc : bad) {
+            pdf::AnnotationItem a;
+            a.subtype = pdf::AnnotationSubtype::Circle;
+            a.pageIndex = 0;
+            a.left = rc.l; a.bottom = rc.b; a.right = rc.r; a.top = rc.t;
+            a.colorArgb = 0xFF00FF00; a.hasColor = true; a.flags = 4;
+            a.name = QStringLiteral("hostile-36");
+            if (page->addGeometricAnnotation(a, 2.0)) {
+                std::cerr << "[FAIL] Test 36: accepted hostile rectangle: " << rc.label << std::endl;
+                return 1;
+            }
+        }
+        if (!page->listAnnotations().empty()) {
+            std::cerr << "[FAIL] Test 36: a rejected rectangle left an annotation behind" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem good;
+        good.subtype = pdf::AnnotationSubtype::Square;
+        good.pageIndex = 0;
+        good.left = 100; good.bottom = 600; good.right = 200; good.top = 700;
+        good.colorArgb = 0xFFFF0000; good.hasColor = true; good.flags = 4;
+        good.name = QStringLiteral("good-36");
+        if (!page->addGeometricAnnotation(good, 2.0)) {
+            std::cerr << "[FAIL] Test 36: a normal rectangle was rejected" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: hostile rectangles rejected, normal rectangle accepted." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 34 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 36 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

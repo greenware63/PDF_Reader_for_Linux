@@ -41,6 +41,7 @@ public:
     bool addMarkupAnnotation(const AnnotationItem& item) override;
     bool addHighlightAnnotation(const AnnotationItem& item) override;
     bool addTextAnnotation(const AnnotationItem& item) override;
+    bool addGeometricAnnotation(const AnnotationItem& item, double borderWidth = 2.0) override;
     int removeAnnotationByName(const QString& name) override;
 
     static void setSimulateGetTextFailureForTesting(bool simulate) noexcept;

@@ -2736,6 +2736,111 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Text Note (/Text) add, list, hit-test, and remove over IPC verified." << std::endl;
     }
 
+    // --- Test 31: Geometric Annotations (/Square and /Circle) over IPC ---
+    std::cout << "Test 31: Geometric Annotations (/Square and /Circle) over IPC..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto openRes = client.openDocumentSync(31, samplePdf.toStdString());
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 31: openDocumentSync failed" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem square;
+        square.subtype = pdf::AnnotationSubtype::Square;
+        square.pageIndex = 0;
+        square.left = 100.0; square.bottom = 600.0; square.right = 200.0; square.top = 700.0;
+        square.colorArgb = 0xFFFF0000;
+        square.hasColor = true;
+        square.flags = 4;
+        square.borderWidth = 2.5;
+        square.contents = QStringLiteral("Square over IPC");
+        square.author = QStringLiteral("IpcTester");
+        square.name = QStringLiteral("square-ipc-31");
+
+        auto respSq = client.addAnnotationSync(31, 0, square);
+        if (!respSq.success || respSq.annotationName != "square-ipc-31") {
+            std::cerr << "[FAIL] 31: addAnnotationSync failed for Square" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem circle;
+        circle.subtype = pdf::AnnotationSubtype::Circle;
+        circle.pageIndex = 0;
+        circle.left = 250.0; circle.bottom = 600.0; circle.right = 350.0; circle.top = 700.0;
+        circle.colorArgb = 0xFF0000FF;
+        circle.hasColor = true;
+        circle.flags = 4;
+        circle.borderWidth = 4.0;
+        circle.contents = QStringLiteral("Circle over IPC");
+        circle.author = QStringLiteral("IpcTester");
+        circle.name = QStringLiteral("circle-ipc-31");
+
+        auto respCr = client.addAnnotationSync(31, 0, circle);
+        if (!respCr.success || respCr.annotationName != "circle-ipc-31") {
+            std::cerr << "[FAIL] 31: addAnnotationSync failed for Circle" << std::endl;
+            return 1;
+        }
+
+        // List annotations
+        auto listResp = client.listAnnotationsSync(31, 0);
+        if (!listResp.success || listResp.annotations.size() != 2) {
+            std::cerr << "[FAIL] 31: listAnnotationsSync failed, expected 2, got " << listResp.annotations.size() << std::endl;
+            return 1;
+        }
+        bool foundSq = false, foundCr = false;
+        for (const auto& a : listResp.annotations) {
+            if (a.subtype == pdf::AnnotationSubtype::Square && a.name == "square-ipc-31") {
+                foundSq = true;
+                if (std::abs(a.borderWidth - 2.5) > 0.01) {
+                    std::cerr << "[FAIL] 31: Square borderWidth mismatch over IPC" << std::endl;
+                    return 1;
+                }
+            }
+            if (a.subtype == pdf::AnnotationSubtype::Circle && a.name == "circle-ipc-31") {
+                foundCr = true;
+                if (std::abs(a.borderWidth - 4.0) > 0.01) {
+                    std::cerr << "[FAIL] 31: Circle borderWidth mismatch over IPC" << std::endl;
+                    return 1;
+                }
+            }
+        }
+        if (!foundSq || !foundCr) {
+            std::cerr << "[FAIL] 31: Listed annotations mismatch" << std::endl;
+            return 1;
+        }
+
+        // Hit testing
+        auto hitSq = client.hitTestAnnotationSync(31, 0, 150.0, 650.0);
+        if (!hitSq.hit || hitSq.annotation.subtype != pdf::AnnotationSubtype::Square || hitSq.annotation.name != "square-ipc-31") {
+            std::cerr << "[FAIL] 31: Hit test inside square rect failed" << std::endl;
+            return 1;
+        }
+        auto hitCr = client.hitTestAnnotationSync(31, 0, 300.0, 650.0);
+        if (!hitCr.hit || hitCr.annotation.subtype != pdf::AnnotationSubtype::Circle || hitCr.annotation.name != "circle-ipc-31") {
+            std::cerr << "[FAIL] 31: Hit test inside circle rect failed" << std::endl;
+            return 1;
+        }
+
+        // Remove annotations
+        auto remSq = client.removeAnnotationSync(31, 0, "square-ipc-31");
+        auto remCr = client.removeAnnotationSync(31, 0, "circle-ipc-31");
+        if (!remSq.success || remSq.removedCount != 1 || !remCr.success || remCr.removedCount != 1) {
+            std::cerr << "[FAIL] 31: removeAnnotationSync failed" << std::endl;
+            return 1;
+        }
+
+        auto listAfter = client.listAnnotationsSync(31, 0);
+        if (!listAfter.success || !listAfter.annotations.empty()) {
+            std::cerr << "[FAIL] 31: Annotations still present after removal" << std::endl;
+            return 1;
+        }
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: Geometric annotations (/Square and /Circle) add, list, hit-test, and remove over IPC verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

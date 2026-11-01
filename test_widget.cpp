@@ -5524,7 +5524,84 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: action enabled only when the active tab has an open document." << std::endl;
     }
 
-    std::cout << " ALL 51 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- Test 52: Geometric Annotations (/Square and /Circle) on PdfViewerWidget ---
+    std::cout << "Test 52: Geometric Annotations on PdfViewerWidget..." << std::endl;
+    {
+        QTemporaryDir tmp;
+        if (!tmp.isValid()) {
+            std::cerr << "[FAIL] 52 could not create temp directory" << std::endl;
+            return 1;
+        }
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(samplePath));
+
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 52 document did not finish opening" << std::endl;
+            return 1;
+        }
+
+        // Add Square annotation with custom 2.5 pt border
+        if (!viewer.addSquareAnnotation(0, QRectF(100.0, 600.0, 100.0, 100.0), 0xFFFF0000, 2.5)) {
+            std::cerr << "[FAIL] 52 addSquareAnnotation returned false" << std::endl;
+            return 1;
+        }
+
+        // Add Circle annotation with custom 3.5 pt border
+        if (!viewer.addCircleAnnotation(0, QRectF(250.0, 600.0, 100.0, 100.0), 0xFF0000FF, 3.5)) {
+            std::cerr << "[FAIL] 52 addCircleAnnotation returned false" << std::endl;
+            return 1;
+        }
+
+        const auto cmds = viewer.editLog().activeCommands();
+        if (cmds.size() != 2 ||
+            std::abs(cmds[0].after.borderWidth - 2.5) > 0.01 ||
+            std::abs(cmds[1].after.borderWidth - 3.5) > 0.01) {
+            std::cerr << "[FAIL] 52 EditLog did not record specified borderWidth" << std::endl;
+            return 1;
+        }
+
+        if (!viewer.editLog().isDirty() || !viewer.editLog().canUndo()) {
+            std::cerr << "[FAIL] 52 EditLog state incorrect after adding geometric annotations" << std::endl;
+            return 1;
+        }
+
+        // Undo Circle
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 52 undoEdit failed" << std::endl;
+            return 1;
+        }
+
+        // Redo Circle
+        if (!viewer.redoEdit()) {
+            std::cerr << "[FAIL] 52 redoEdit failed" << std::endl;
+            return 1;
+        }
+
+        // Save document with geometric annotations
+        const QString savedPath = tmp.filePath(QStringLiteral("geometric_saved.pdf"));
+        if (!viewer.saveDocument(savedPath)) {
+            std::cerr << "[FAIL] 52 saveDocument failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 52 EditLog is dirty after save" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Geometric annotations creation, undo/redo, and save verified." << std::endl;
+    }
+
+    std::cout << " ALL 52 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

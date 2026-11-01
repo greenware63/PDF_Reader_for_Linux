@@ -554,6 +554,14 @@ void MainWindow::setupActions() {
     m_addNoteAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N));
     m_addNoteAction->setEnabled(false);
 
+    m_addRectangleAction = editMenu->addAction(tr("Add &Rectangle"), this, &MainWindow::addRectangle);
+    m_addRectangleAction->setObjectName(QStringLiteral("addRectangleAction"));
+    m_addRectangleAction->setEnabled(false);
+
+    m_addCircleAction = editMenu->addAction(tr("Add &Circle"), this, &MainWindow::addCircle);
+    m_addCircleAction->setObjectName(QStringLiteral("addCircleAction"));
+    m_addCircleAction->setEnabled(false);
+
     editMenu->addSeparator();
     QAction* copyAction = editMenu->addAction(tr("&Copy"), this, [this]() {
         if (auto* v = currentViewer()) {
@@ -1453,11 +1461,18 @@ void MainWindow::onLoadError(const QString& errorMessage) {
 }
 
 void MainWindow::updateStickyNoteAction() {
+    const auto* viewer = (m_docTabs && m_docTabs->currentIndex() >= 0)
+        ? qobject_cast<PdfViewerWidget*>(m_docTabs->currentWidget())
+        : nullptr;
+    const bool open = (viewer && viewer->isDocumentOpen());
     if (m_addNoteAction) {
-        const auto* viewer = (m_docTabs && m_docTabs->currentIndex() >= 0)
-            ? qobject_cast<PdfViewerWidget*>(m_docTabs->currentWidget())
-            : nullptr;
-        m_addNoteAction->setEnabled(viewer && viewer->isDocumentOpen());
+        m_addNoteAction->setEnabled(open);
+    }
+    if (m_addRectangleAction) {
+        m_addRectangleAction->setEnabled(open);
+    }
+    if (m_addCircleAction) {
+        m_addCircleAction->setEnabled(open);
     }
 }
 
@@ -1812,6 +1827,26 @@ void MainWindow::addStickyNote() {
     const double userX = 72.0;
     const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
     v->addTextAnnotation(page, userX, userY, text);
+}
+
+void MainWindow::addRectangle() {
+    auto* v = currentViewer();
+    if (!v || !v->isDocumentOpen()) return;
+    const int page = v->currentPage();
+    const auto& pl = v->layout().getPageLayout(page);
+    const double userX = 72.0;
+    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
+    v->addSquareAnnotation(page, QRectF(userX, userY - 60.0, 100.0, 60.0));
+}
+
+void MainWindow::addCircle() {
+    auto* v = currentViewer();
+    if (!v || !v->isDocumentOpen()) return;
+    const int page = v->currentPage();
+    const auto& pl = v->layout().getPageLayout(page);
+    const double userX = 72.0;
+    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
+    v->addCircleAnnotation(page, QRectF(userX, userY - 60.0, 100.0, 60.0));
 }
 
 void MainWindow::undoEdit() {
