@@ -3357,8 +3357,57 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Geometric annotations (/Square and /Circle) add, list, hit-test, save, and removal verified." << std::endl;
     }
 
+    // --- Test 36: Square/Circle reject non-finite, oversized and degenerate rectangles ---
+    std::cout << "Test 36: Geometric annotations reject hostile rectangles..." << std::endl;
+    {
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 36: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 36: getPage(0) failed" << std::endl;
+            return 1;
+        }
+        struct Rc { const char* label; double l, b, r, t; };
+        const Rc bad[] = {
+            {"float overflow", -1e39, -1e39, 1e39, 1e39},
+            {"huge", -1e30, -1e30, 1e30, 1e30},
+            {"zero size", 50, 50, 50, 50},
+            {"hairline", 50, 50, 50.1, 90},
+        };
+        for (const auto& rc : bad) {
+            pdf::AnnotationItem a;
+            a.subtype = pdf::AnnotationSubtype::Circle;
+            a.pageIndex = 0;
+            a.left = rc.l; a.bottom = rc.b; a.right = rc.r; a.top = rc.t;
+            a.colorArgb = 0xFF00FF00; a.hasColor = true; a.flags = 4;
+            a.name = QStringLiteral("hostile-36");
+            if (page->addGeometricAnnotation(a, 2.0)) {
+                std::cerr << "[FAIL] Test 36: accepted hostile rectangle: " << rc.label << std::endl;
+                return 1;
+            }
+        }
+        if (!page->listAnnotations().empty()) {
+            std::cerr << "[FAIL] Test 36: a rejected rectangle left an annotation behind" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem good;
+        good.subtype = pdf::AnnotationSubtype::Square;
+        good.pageIndex = 0;
+        good.left = 100; good.bottom = 600; good.right = 200; good.top = 700;
+        good.colorArgb = 0xFFFF0000; good.hasColor = true; good.flags = 4;
+        good.name = QStringLiteral("good-36");
+        if (!page->addGeometricAnnotation(good, 2.0)) {
+            std::cerr << "[FAIL] Test 36: a normal rectangle was rejected" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: hostile rectangles rejected, normal rectangle accepted." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 35 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 36 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

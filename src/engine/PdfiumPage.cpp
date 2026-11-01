@@ -876,6 +876,21 @@ bool PdfiumPage::addGeometricAnnotation(const AnnotationItem& item, double borde
         return false;
     }
 
+    // /Rect is stored as floats and drives the generated appearance stream. A value that is non-finite as a float
+    // (1e39), absurdly large, or a degenerate box would write nan/inf/1e+30 tokens into the /AP and /Rect and
+    // corrupt the saved file, so reject it before touching the document.
+    constexpr double kMaxCoord = 1.0e6;
+    constexpr double kMinExtent = 0.5;
+    const double coords[4] = {item.left, item.top, item.right, item.bottom};
+    for (const double v : coords) {
+        if (!std::isfinite(v) || std::fabs(v) > kMaxCoord) {
+            return false;
+        }
+    }
+    if (std::fabs(item.right - item.left) < kMinExtent || std::fabs(item.top - item.bottom) < kMinExtent) {
+        return false;
+    }
+
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
 
     // 1. Create the annotation in PDFium
