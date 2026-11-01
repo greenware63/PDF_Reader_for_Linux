@@ -2864,13 +2864,8 @@ void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
             menu.addAction(tr("Add &Circle Here"), this, [this, clickPage, userX, userY]() {
                 addCircleAnnotation(clickPage, QRectF(userX, userY - 60.0, 100.0, 60.0));
             });
-            menu.addAction(tr("Draw &Ink Here"), this, [this, clickPage, userX, userY]() {
-                std::vector<pdf::AnnotationPoint> stroke = {
-                    {userX - 15.0, userY},
-                    {userX - 5.0, userY - 10.0},
-                    {userX + 15.0, userY + 15.0}
-                };
-                addInkAnnotation(clickPage, {stroke}, m_inkColorArgb, m_inkBorderWidth);
+            menu.addAction(tr("&Draw Freehand Ink"), this, [this]() {
+                setInkDrawingMode(true);
             });
         }
     }

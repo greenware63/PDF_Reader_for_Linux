@@ -31,7 +31,7 @@ public:
     void requestPageText(int64_t documentId, int pageIndex);
     void requestListAnnotations(int64_t documentId, int pageIndex);
     void requestHitTestAnnotation(int64_t documentId, int pageIndex, double xPoints, double yPoints);
-    ListAnnotationsResponse listAnnotationsSync(int64_t documentId, int pageIndex, int timeoutMs = 5000);
+    ListAnnotationsResponse listAnnotationsSync(int64_t documentId, int pageIndex, int timeoutMs = 10000);
     HitTestAnnotationResponse hitTestAnnotationSync(int64_t documentId, int pageIndex, double xPoints, double yPoints, int timeoutMs = 5000);
     std::shared_ptr<const PageText> getPageTextSync(int64_t documentId, int pageIndex);
     void startSearch(int64_t documentId, int64_t searchId, const QString& query,
