@@ -1,4 +1,5 @@
 ﻿#include "MainWindow.h"
+#include "AppSettings.h"
 #include "ThumbnailListWidget.h"
 #include <QCoreApplication>
 #include <QDockWidget>
@@ -204,7 +205,7 @@ QString MainWindow::documentFingerprint(const QString& filePath) {
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent) {
-    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    QSettings settings = makeAppSettings();
     if (settings.contains(QStringLiteral("colorMode"))) {
         const int savedColorMode = settings.value(QStringLiteral("colorMode"), 0).toInt();
         if (savedColorMode >= 0 && savedColorMode <= static_cast<int>(ColorMode::HighContrast)) {
@@ -768,7 +769,7 @@ void MainWindow::setColorMode(ColorMode mode) {
     if (idx >= 0 && idx < 4 && m_colorModeActions[idx] && !m_colorModeActions[idx]->isChecked()) {
         m_colorModeActions[idx]->setChecked(true);
     }
-    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    QSettings settings = makeAppSettings();
     settings.setValue(QStringLiteral("colorMode"), static_cast<int>(m_colorMode));
     settings.setValue(QStringLiteral("darkMode"), m_darkMode);
 
@@ -789,7 +790,7 @@ void MainWindow::setViewMode(layout::ViewMode mode) {
     if (idx >= 0 && idx < 4 && m_viewModeActions[idx] && !m_viewModeActions[idx]->isChecked()) {
         m_viewModeActions[idx]->setChecked(true);
     }
-    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    QSettings settings = makeAppSettings();
     settings.setValue(QStringLiteral("viewMode"), idx);
     for (int i = 0; i < tabCount(); ++i) {
         if (auto* v = viewerAt(i)) {
@@ -815,7 +816,7 @@ void MainWindow::saveReadingPosition(PdfViewerWidget* viewer) {
 
     const QString fingerprint = documentFingerprint(filePath);
 
-    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    QSettings settings = makeAppSettings();
     settings.beginGroup(QStringLiteral("readingHistory/") + key);
     settings.setValue(QStringLiteral("filePath"), filePath);
     settings.setValue(QStringLiteral("page"), savedPage);
@@ -845,7 +846,7 @@ void MainWindow::restoreReadingPosition(PdfViewerWidget* viewer, const QString& 
     if (key.isEmpty()) {
         return;
     }
-    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    QSettings settings = makeAppSettings();
     QString group = QStringLiteral("readingHistory/") + key;
 
     // If path-based entry doesn't exist, try fingerprint-based lookup (e.g. moved or renamed file)
@@ -886,7 +887,7 @@ void MainWindow::restoreReadingPosition(PdfViewerWidget* viewer, const QString& 
 }
 
 void MainWindow::clearReadingHistory() {
-    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    QSettings settings = makeAppSettings();
     settings.remove(QStringLiteral("readingHistory"));
     settings.remove(QStringLiteral("readingHistoryByFingerprint"));
 }
@@ -1096,7 +1097,7 @@ void MainWindow::onCurrentTabChanged(int index) {
 }
 
 void MainWindow::loadRecentFiles() {
-    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    QSettings settings = makeAppSettings();
     m_recentFiles = settings.value(QStringLiteral("recentFiles")).toStringList();
     m_recentFiles.erase(std::remove_if(m_recentFiles.begin(), m_recentFiles.end(),
         [](const QString& path) {
@@ -1118,14 +1119,14 @@ void MainWindow::addRecentFile(const QString& filePath) {
     while (m_recentFiles.size() > MAX_RECENT_FILES) {
         m_recentFiles.removeLast();
     }
-    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    QSettings settings = makeAppSettings();
     settings.setValue(QStringLiteral("recentFiles"), m_recentFiles);
     updateRecentFilesMenu();
 }
 
 void MainWindow::clearRecentFiles() {
     m_recentFiles.clear();
-    QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+    QSettings settings = makeAppSettings();
     settings.setValue(QStringLiteral("recentFiles"), m_recentFiles);
     updateRecentFilesMenu();
 }
