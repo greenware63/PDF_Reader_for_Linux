@@ -1079,6 +1079,20 @@ bool PdfiumPage::addInkAnnotation(const AnnotationItem& item, double borderWidth
         rTop = rBottom + 1.0;
     }
 
+    // Validate the final rectangle before converting it to floats for PDFium. Ink strokes may
+    // be valid while a caller-supplied /Rect is finite but enormous; casting such bounds can
+    // produce infinities in the PDF object. This also checks stroke-derived bounds after padding.
+    const double rectCoords[4] = {rLeft, rBottom, rRight, rTop};
+    for (const double v : rectCoords) {
+        if (!std::isfinite(v) || std::fabs(v) > kMaxCoord) {
+            return false;
+        }
+    }
+    if (rRight <= rLeft || rTop <= rBottom ||
+        (rRight - rLeft) < 0.5 || (rTop - rBottom) < 0.5) {
+        return false;
+    }
+
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
 
     // 1. Create annotation

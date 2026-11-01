@@ -3513,6 +3513,21 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
+            // H. Valid strokes with a finite but oversized caller-supplied /Rect
+            pdf::AnnotationItem badRect;
+            badRect.subtype = pdf::AnnotationSubtype::Ink;
+            badRect.pageIndex = 0;
+            badRect.name = QStringLiteral("bad-rect");
+            badRect.left = -1.0e30;
+            badRect.bottom = 90.0;
+            badRect.right = 1.0e30;
+            badRect.top = 110.0;
+            badRect.inkStrokes = {{{100.0, 100.0}, {120.0, 110.0}}};
+            if (page->addInkAnnotation(badRect, 2.0)) {
+                std::cerr << "[FAIL] Test 37: Accepted valid strokes with oversized /Rect" << std::endl;
+                return 1;
+            }
+
             // Verify none of the hostile attempts created an annotation
             if (!page->listAnnotations().empty()) {
                 std::cerr << "[FAIL] Test 37: Rejected hostile input left orphan annotations behind!" << std::endl;
