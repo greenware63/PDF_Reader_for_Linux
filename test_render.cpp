@@ -3875,8 +3875,61 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: FreeText annotations (/FreeText) add, list, hit-test, save, reload, removal and hostile bounds verified." << std::endl;
     }
 
+    // --- Test 39: FreeText must not paint an opaque block (its /C is the background fill, not the text colour) ---
+    std::cout << "Test 39: FreeText box leaves the page visible and draws text..." << std::endl;
+    {
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 39: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 39: getPage(0) failed" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem ft;
+        ft.subtype = pdf::AnnotationSubtype::FreeText;
+        ft.pageIndex = 0;
+        ft.left = 50; ft.bottom = 600; ft.right = 300; ft.top = 640;
+        ft.contents = QStringLiteral("Hello FreeText");
+        ft.colorArgb = 0xFF000000; ft.hasColor = true; ft.flags = 4;
+        ft.name = QStringLiteral("freetext-39");
+        if (!page->addFreeTextAnnotation(ft, 12.0)) {
+            std::cerr << "[FAIL] Test 39: addFreeTextAnnotation failed" << std::endl;
+            return 1;
+        }
+        pdf::PixelBuffer buf = page->renderWholePage(1.0, 1.0);
+        if (!buf.isValid() || buf.data() == nullptr) {
+            std::cerr << "[FAIL] Test 39: render failed" << std::endl;
+            return 1;
+        }
+        // Interior of the box (inset 4 px), in device pixels with the origin at the top-left.
+        const int x0 = 54, x1 = 296;
+        const int y0 = buf.height() - 640 + 4, y1 = buf.height() - 600 - 4;
+        int dark = 0, light = 0;
+        for (int y = y0; y < y1; ++y) {
+            const uint32_t* row = reinterpret_cast<const uint32_t*>(buf.data() + y * buf.stride());
+            for (int x = x0; x < x1; ++x) {
+                const uint32_t px = row[x];
+                const int lum = (static_cast<int>(px & 0xFF) + static_cast<int>((px >> 8) & 0xFF) + static_cast<int>((px >> 16) & 0xFF)) / 3;
+                (lum < 100 ? dark : light)++;
+            }
+        }
+        const int total = dark + light;
+        if (total <= 0 || dark > total / 2) {
+            std::cerr << "[FAIL] Test 39: FreeText painted an opaque block over its text (dark=" << dark << " of " << total << ")" << std::endl;
+            return 1;
+        }
+        if (dark < 20) {
+            std::cerr << "[FAIL] Test 39: no text pixels were drawn inside the FreeText box (dark=" << dark << ")" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: FreeText shows its text over a transparent background." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 38 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 39 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
