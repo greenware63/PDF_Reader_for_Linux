@@ -1,4 +1,5 @@
 #include "TestIsolation.h"
+#include "ui/AppSettings.h"
 #include "ui/PdfViewerWidget.h"
 #include "ui/ImageUtils.h"
 #include "ui/MainWindow.h"
@@ -3057,6 +3058,13 @@ int main(int argc, char* argv[]) {
 
     // Test 39: Reading Position Memory persistence across documents/sessions in QSettings
     std::cout << "[TEST 39] Testing Reading Position Memory persistence across documents/sessions in QSettings..." << std::endl;
+    {   // The app's settings must live in the isolated INI file, never the real (registry) store.
+        QSettings probe = ui::makeAppSettings();
+        if (probe.format() != QSettings::IniFormat) {
+            std::cerr << "[FAIL] 39pre app settings are not isolated INI: " << probe.fileName().toStdString() << std::endl;
+            return 1;
+        }
+    }
     {
         ui::MainWindow window;
         window.resize(1024, 768);
@@ -3277,7 +3285,7 @@ int main(int argc, char* argv[]) {
         // 7. Test backward compatibility fallback with legacy QSettings (scrollX/scrollY integers only)
         {
             const QString legacyKey = ui::MainWindow::readingPositionKey(QString::fromStdString(sampleDoc));
-            QSettings legacySettings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+            QSettings legacySettings = ui::makeAppSettings();
             legacySettings.beginGroup(QStringLiteral("readingHistory/") + legacyKey);
             legacySettings.setValue(QStringLiteral("filePath"), QString::fromStdString(sampleDoc));
             legacySettings.setValue(QStringLiteral("page"), 1);
@@ -3623,7 +3631,7 @@ int main(int argc, char* argv[]) {
 
         // --- MainWindow: mode applies to open and future tabs and is remembered ---
         {
-            QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+            QSettings settings = ui::makeAppSettings();
             const QVariant previous = settings.value(QStringLiteral("viewMode"));
             {
                 ui::MainWindow window;
@@ -3648,7 +3656,7 @@ int main(int argc, char* argv[]) {
                     return fail("Open tab did not follow the window view mode");
                 }
             }
-            QSettings reread(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+            QSettings reread = ui::makeAppSettings();
             if (reread.value(QStringLiteral("viewMode")).toInt() != static_cast<int>(layout::ViewMode::SinglePage)) {
                 return fail("View mode was not persisted");
             }
@@ -4068,7 +4076,7 @@ int main(int argc, char* argv[]) {
 
         // 4. MainWindow integration, new tab inheritance & QSettings hygiene
         {
-            QSettings settings(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+            QSettings settings = ui::makeAppSettings();
             const QVariant prevColor = settings.value(QStringLiteral("colorMode"));
             const QVariant prevDark = settings.value(QStringLiteral("darkMode"));
             {
@@ -4087,7 +4095,7 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
             }
-            QSettings reread(QStringLiteral("PDFReader"), QStringLiteral("PDFReader"));
+            QSettings reread = ui::makeAppSettings();
             if (reread.value(QStringLiteral("colorMode")).toInt() != static_cast<int>(ui::ColorMode::Sepia)) {
                 std::cerr << "[FAIL] ColorMode was not persisted in QSettings" << std::endl;
                 return 1;

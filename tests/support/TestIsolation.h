@@ -24,6 +24,9 @@ public:
             std::fprintf(stderr, "[FAIL] cannot create an isolated settings directory\n");
             std::abort();
         }
+        // The app builds its settings through ui::makeAppSettings(), which honours this default format. Without it
+        // Windows would use the registry and the redirected path below would be ignored.
+        QSettings::setDefaultFormat(QSettings::IniFormat);
         for (const auto format : {QSettings::NativeFormat, QSettings::IniFormat}) {
             for (const auto scope : {QSettings::UserScope, QSettings::SystemScope}) {
                 QSettings::setPath(format, scope, m_dir.path());
