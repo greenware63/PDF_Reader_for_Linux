@@ -5478,7 +5478,53 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: tooltip text is escaped and capped." << std::endl;
     }
 
-    std::cout << " ALL 50 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- Test 51: the Sticky Note action follows document-open and active-tab state ---
+    std::cout << "Test 51: Sticky Note action tracks the active document..." << std::endl;
+    {
+        ui::MainWindow window;
+        window.resize(900, 700);
+        window.show();
+        auto* action = window.findChild<QAction*>(QStringLiteral("addStickyNoteAction"));
+        if (!action) {
+            std::cerr << "[FAIL] 51 could not find Add Sticky Note action" << std::endl;
+            return 1;
+        }
+        if (action->isEnabled()) {
+            std::cerr << "[FAIL] 51 action should be disabled without an open document" << std::endl;
+            return 1;
+        }
+        if (!window.openFile(QString::fromStdString(samplePath))) {
+            std::cerr << "[FAIL] 51 could not start opening the fixture" << std::endl;
+            return 1;
+        }
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && (!window.currentViewer() || !window.currentViewer()->isDocumentOpen())) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        QApplication::processEvents();
+        if (!window.currentViewer() || !window.currentViewer()->isDocumentOpen() || !action->isEnabled()) {
+            std::cerr << "[FAIL] 51 action was not enabled after document load" << std::endl;
+            return 1;
+        }
+
+        const int blankTab = window.addNewTab();
+        QApplication::processEvents();
+        if (blankTab < 0 || action->isEnabled()) {
+            std::cerr << "[FAIL] 51 action remained enabled on a blank tab" << std::endl;
+            return 1;
+        }
+        window.documentTabs()->setCurrentIndex(0);
+        QApplication::processEvents();
+        if (!action->isEnabled()) {
+            std::cerr << "[FAIL] 51 action was not restored when switching back to the open document" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: action enabled only when the active tab has an open document." << std::endl;
+    }
+
+    std::cout << " ALL 51 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

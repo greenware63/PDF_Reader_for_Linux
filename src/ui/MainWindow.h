@@ -143,6 +143,7 @@ private:
     void loadRecentFiles();
     void updateRecentFilesMenu();
     void connectViewer(PdfViewerWidget* viewer);
+    void updateStickyNoteAction();
 
     FindBar* m_findBar{nullptr};
     QTabWidget* m_docTabs{nullptr};
