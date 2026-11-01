@@ -133,6 +133,20 @@ public:
     }
 
     /**
+     * @brief Creates an ink annotation (/Ink) on this page.
+     * Generates ink strokes (/InkList), bounding box (/Rect), stroke color (/C),
+     * border width (/BS), flags, /NM identifier, contents, author, and normal appearance stream (/AP).
+     * @param item Annotation properties with inkStrokes populated.
+     * @param borderWidth Stroke border width in points (default: 2.0).
+     * @return true if successfully created, false otherwise.
+     */
+    virtual bool addInkAnnotation(const AnnotationItem& item, double borderWidth = 2.0) {
+        (void)item;
+        (void)borderWidth;
+        return false;
+    }
+
+    /**
      * @brief Removes every annotation on this page whose /NM equals `name` (undo of an added annotation).
      * @return the number removed (0 if none matched or the name is empty).
      */

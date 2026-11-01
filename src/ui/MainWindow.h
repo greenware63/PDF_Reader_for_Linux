@@ -117,6 +117,7 @@ public Q_SLOTS:
     void addStickyNote();
     void addRectangle();
     void addCircle();
+    void toggleInkDrawing();
     void undoEdit();
     void redoEdit();
 
@@ -193,6 +194,7 @@ private:
     QAction* m_addNoteAction{nullptr};
     QAction* m_addRectangleAction{nullptr};
     QAction* m_addCircleAction{nullptr};
+    QAction* m_drawInkAction{nullptr};
 };
 
 } // namespace ui

@@ -5601,7 +5601,134 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Geometric annotations creation, undo/redo, and save verified." << std::endl;
     }
 
-    std::cout << " ALL 52 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- Test 53: Ink Annotations (/Ink) on PdfViewerWidget (Programmatic & Mouse-drawing UI) ---
+    std::cout << "Test 53: Ink Annotations on PdfViewerWidget (Programmatic & Mouse-drawing UI)..." << std::endl;
+    {
+        QTemporaryDir tmp;
+        if (!tmp.isValid()) {
+            std::cerr << "[FAIL] 53 could not create temp directory" << std::endl;
+            return 1;
+        }
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(samplePath));
+
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 53 document did not finish opening" << std::endl;
+            return 1;
+        }
+
+        // 1. Programmatic multi-stroke Ink annotation
+        std::vector<std::vector<pdf::AnnotationPoint>> strokes = {
+            {{100.0, 500.0}, {120.0, 550.0}, {140.0, 500.0}},
+            {{200.0, 500.0}, {250.0, 550.0}}
+        };
+        if (!viewer.addInkAnnotation(0, strokes, 0xFF8A2BE2, 3.5)) {
+            std::cerr << "[FAIL] 53 addInkAnnotation returned false" << std::endl;
+            return 1;
+        }
+
+        auto cmds = viewer.editLog().activeCommands();
+        if (cmds.size() != 1 ||
+            cmds[0].after.subtype != pdf::AnnotationSubtype::Ink ||
+            std::abs(cmds[0].after.borderWidth - 3.5) > 0.01 ||
+            cmds[0].after.inkStrokes.size() != 2) {
+            std::cerr << "[FAIL] 53 EditLog did not record ink annotation properly" << std::endl;
+            return 1;
+        }
+
+        // Test Undo & Redo
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 53 undoEdit failed" << std::endl;
+            return 1;
+        }
+        if (!viewer.editLog().activeCommands().empty()) {
+            std::cerr << "[FAIL] 53 EditLog activeCommands not empty after undo" << std::endl;
+            return 1;
+        }
+        if (!viewer.redoEdit()) {
+            std::cerr << "[FAIL] 53 redoEdit failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().activeCommands().size() != 1) {
+            std::cerr << "[FAIL] 53 EditLog activeCommands not restored after redo" << std::endl;
+            return 1;
+        }
+
+        // 2. Mouse-drawing UI interaction
+        viewer.setInkDrawingMode(true);
+        if (!viewer.isInkDrawingMode()) {
+            std::cerr << "[FAIL] 53 isInkDrawingMode returned false after enabling" << std::endl;
+            return 1;
+        }
+        viewer.setInkColor(0xFF00AA00);
+        viewer.setInkBorderWidth(2.5);
+
+        // Map viewport point to document/page
+        // Send mouse press at (150, 150)
+        QMouseEvent pressEv(QEvent::MouseButtonPress, QPointF(150, 150), QPointF(150, 150), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pressEv);
+        QApplication::processEvents();
+
+        // Send mouse move to (170, 180)
+        QMouseEvent moveEv1(QEvent::MouseMove, QPointF(170, 180), QPointF(170, 180), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &moveEv1);
+        QApplication::processEvents();
+
+        // Send mouse move to (190, 210)
+        QMouseEvent moveEv2(QEvent::MouseMove, QPointF(190, 210), QPointF(190, 210), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &moveEv2);
+        QApplication::processEvents();
+
+        // Send mouse release
+        QMouseEvent releaseEv(QEvent::MouseButtonRelease, QPointF(190, 210), QPointF(190, 210), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &releaseEv);
+        QApplication::processEvents();
+
+        cmds = viewer.editLog().activeCommands();
+        if (cmds.size() != 2) {
+            std::cerr << "[FAIL] 53 Mouse drawing did not create second annotation, got count " << cmds.size() << std::endl;
+            return 1;
+        }
+        if (cmds[1].after.subtype != pdf::AnnotationSubtype::Ink || cmds[1].after.inkStrokes.empty()) {
+            std::cerr << "[FAIL] 53 Drawn annotation is not valid ink" << std::endl;
+            return 1;
+        }
+
+        // Undo the drawn stroke
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 53 undoEdit of drawn stroke failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().activeCommands().size() != 1) {
+            std::cerr << "[FAIL] 53 EditLog command count after undoing drawn stroke mismatch" << std::endl;
+            return 1;
+        }
+
+        // Save document with ink annotations
+        const QString savedPath = tmp.filePath(QStringLiteral("ink_saved.pdf"));
+        if (!viewer.saveDocument(savedPath)) {
+            std::cerr << "[FAIL] 53 saveDocument failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 53 EditLog is dirty after save" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Ink annotations programmatic creation, mouse drawing UI, undo/redo, and save verified." << std::endl;
+    }
+
+    std::cout << " ALL 53 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

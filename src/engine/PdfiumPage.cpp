@@ -577,6 +577,39 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations(bool* truncated) {
         item.name = readStringKey("NM", 1024);
         item.modificationDate = readStringKey("M", 256);
 
+        if (item.subtype == AnnotationSubtype::Ink) {
+            unsigned long sCount = FPDFAnnot_GetInkListCount(annot);
+            if (sCount > kMaxInkStrokes) {
+                sCount = static_cast<unsigned long>(kMaxInkStrokes);
+                clippedAny = true;
+            }
+            size_t totalPts = 0;
+            item.inkStrokes.reserve(sCount);
+            for (unsigned long s = 0; s < sCount; ++s) {
+                unsigned long pCount = FPDFAnnot_GetInkListPath(annot, s, nullptr, 0);
+                if (totalPts + pCount > kMaxInkPoints) {
+                    pCount = (kMaxInkPoints > totalPts) ? static_cast<unsigned long>(kMaxInkPoints - totalPts) : 0;
+                    clippedAny = true;
+                }
+                if (pCount > 0) {
+                    std::vector<FS_POINTF> ptBuf(pCount);
+                    unsigned long readCount = FPDFAnnot_GetInkListPath(annot, s, ptBuf.data(), pCount);
+                    if (readCount > pCount) readCount = pCount;
+                    std::vector<AnnotationPoint> stroke;
+                    stroke.reserve(readCount);
+                    for (unsigned long p = 0; p < readCount; ++p) {
+                        stroke.push_back({ptBuf[p].x, ptBuf[p].y});
+                    }
+                    totalPts += stroke.size();
+                    item.inkStrokes.push_back(std::move(stroke));
+                }
+                if (totalPts >= kMaxInkPoints) {
+                    clippedAny = true;
+                    break;
+                }
+            }
+        }
+
         if (FPDFAnnot_HasAttachmentPoints(annot)) {
             size_t qCount = FPDFAnnot_CountAttachmentPoints(annot);
             if (qCount > 4096) { qCount = 4096; clippedAny = true; }
@@ -986,6 +1019,169 @@ bool PdfiumPage::addGeometricAnnotation(const AnnotationItem& item, double borde
     FPDFBitmap_Destroy(appearanceBitmap);
     if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
         return failGeometric();
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
+}
+
+bool PdfiumPage::addInkAnnotation(const AnnotationItem& item, double borderWidth) {
+    if (!m_page || !item.isValid() || item.subtype != AnnotationSubtype::Ink) {
+        return false;
+    }
+    if (item.inkStrokes.empty() || item.inkStrokes.size() > kMaxInkStrokes) {
+        return false;
+    }
+
+    constexpr double kMaxCoord = 1.0e6;
+    size_t totalPoints = 0;
+    double minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+    bool hasAnyPoint = false;
+
+    for (const auto& stroke : item.inkStrokes) {
+        if (stroke.empty()) {
+            return false;
+        }
+        totalPoints += stroke.size();
+        if (totalPoints > kMaxInkPoints) {
+            return false;
+        }
+        for (const auto& pt : stroke) {
+            if (!pt.isValid() || std::fabs(pt.x) > kMaxCoord || std::fabs(pt.y) > kMaxCoord) {
+                return false;
+            }
+            hasAnyPoint = true;
+            minX = std::min(minX, pt.x);
+            maxX = std::max(maxX, pt.x);
+            minY = std::min(minY, pt.y);
+            maxY = std::max(maxY, pt.y);
+        }
+    }
+    if (!hasAnyPoint) {
+        return false;
+    }
+
+    double effBw = (item.borderWidth > 0.0) ? item.borderWidth : borderWidth;
+    if (effBw <= 0.0 || effBw > 100.0 || !std::isfinite(effBw)) {
+        effBw = 2.0;
+    }
+
+    // Determine rect: either user provided or computed from stroke bounding box
+    double rLeft = item.left, rBottom = item.bottom, rRight = item.right, rTop = item.top;
+    if (rRight <= rLeft || rTop <= rBottom || std::fabs(rRight - rLeft) < 0.5 || std::fabs(rTop - rBottom) < 0.5) {
+        rLeft = minX - effBw;
+        rRight = maxX + effBw;
+        rBottom = minY - effBw;
+        rTop = maxY + effBw;
+    }
+    if (rRight <= rLeft || rTop <= rBottom) {
+        rRight = rLeft + 1.0;
+        rTop = rBottom + 1.0;
+    }
+
+    // Validate the final rectangle before converting it to floats for PDFium. Ink strokes may
+    // be valid while a caller-supplied /Rect is finite but enormous; casting such bounds can
+    // produce infinities in the PDF object. This also checks stroke-derived bounds after padding.
+    const double rectCoords[4] = {rLeft, rBottom, rRight, rTop};
+    for (const double v : rectCoords) {
+        if (!std::isfinite(v) || std::fabs(v) > kMaxCoord) {
+            return false;
+        }
+    }
+    if (rRight <= rLeft || rTop <= rBottom ||
+        (rRight - rLeft) < 0.5 || (rTop - rBottom) < 0.5) {
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    // 1. Create annotation
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, FPDF_ANNOT_INK);
+    if (!annot) {
+        return false;
+    }
+    const int annotIndex = FPDFPage_GetAnnotCount(m_page) - 1;
+    auto failInk = [&]() {
+        FPDFPage_CloseAnnot(annot);
+        FPDFPage_RemoveAnnot(m_page, annotIndex);
+        return false;
+    };
+
+    // 2. Set /Rect
+    FS_RECTF rect{};
+    rect.left = static_cast<float>(rLeft);
+    rect.top = static_cast<float>(rTop);
+    rect.right = static_cast<float>(rRight);
+    rect.bottom = static_cast<float>(rBottom);
+    if (!FPDFAnnot_SetRect(annot, &rect)) {
+        return failInk();
+    }
+
+    // 3. Set Stroke Color (/C)
+    uint32_t a = (item.colorArgb >> 24) & 0xFF;
+    uint32_t r = (item.colorArgb >> 16) & 0xFF;
+    uint32_t g = (item.colorArgb >> 8) & 0xFF;
+    uint32_t b = item.colorArgb & 0xFF;
+    if (a == 0 && item.colorArgb == 0) {
+        // Default Ink color: Black
+        r = 0; g = 0; b = 0; a = 255;
+    }
+    if (!FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, a)) {
+        return failInk();
+    }
+
+    // 4. Set Border width (/BS)
+    FPDFAnnot_SetBorder(annot, 0.0f, 0.0f, static_cast<float>(effBw));
+
+    // 5. Add Ink strokes (/InkList)
+    for (const auto& stroke : item.inkStrokes) {
+        std::vector<FS_POINTF> pts;
+        pts.reserve(stroke.size());
+        for (const auto& pt : stroke) {
+            pts.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y)});
+        }
+        if (FPDFAnnot_AddInkStroke(annot, pts.data(), pts.size()) < 0) {
+            return failInk();
+        }
+    }
+
+    // 6. Set Flags (/F)
+    uint32_t flags = item.flags ? item.flags : FPDF_ANNOT_FLAG_PRINT;
+    if (!FPDFAnnot_SetFlags(annot, flags)) {
+        return failInk();
+    }
+
+    // 7. Set /NM (unique identifier string)
+    if (!item.name.isEmpty()) {
+        const std::u16string u16 = item.name.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failInk();
+        }
+    }
+
+    // 8. Set /Contents
+    if (!item.contents.isEmpty()) {
+        const std::u16string u16 = item.contents.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failInk();
+        }
+    }
+
+    // 9. Set /T (Author)
+    if (!item.author.isEmpty()) {
+        const std::u16string u16 = item.author.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failInk();
+        }
+    }
+
+    // 10. Generate appearance stream (/AP)
+    FPDF_BITMAP appearanceBitmap = FPDFBitmap_Create(1, 1, 0);
+    if (!appearanceBitmap) return failInk();
+    FPDF_RenderPageBitmap(appearanceBitmap, m_page, 0, 0, 1, 1, 0, FPDF_ANNOT);
+    FPDFBitmap_Destroy(appearanceBitmap);
+    if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
+        return failInk();
     }
 
     FPDFPage_CloseAnnot(annot);

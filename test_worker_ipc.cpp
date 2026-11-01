@@ -2841,6 +2841,138 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Geometric annotations (/Square and /Circle) add, list, hit-test, and remove over IPC verified." << std::endl;
     }
 
+    // --- Test 32: Ink Annotations (/Ink) and hostile bounds over IPC ---
+    std::cout << "Test 32: Ink Annotations (/Ink) and hostile bounds over IPC..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto openRes = client.openDocumentSync(32, samplePdf.toStdString());
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 32: openDocumentSync failed" << std::endl;
+            return 1;
+        }
+
+        // 1. Normal Ink lifecycle over IPC
+        pdf::AnnotationItem ink;
+        ink.subtype = pdf::AnnotationSubtype::Ink;
+        ink.pageIndex = 0;
+        ink.colorArgb = 0xFF8A2BE2; // BlueViolet
+        ink.hasColor = true;
+        ink.flags = 4;
+        ink.borderWidth = 3.5;
+        ink.contents = QStringLiteral("Ink annotation over IPC");
+        ink.author = QStringLiteral("IpcTester");
+        ink.name = QStringLiteral("ink-ipc-32");
+        ink.inkStrokes = {
+            {{120.0, 120.0}, {140.0, 160.0}, {160.0, 120.0}},
+            {{220.0, 220.0}, {260.0, 260.0}}
+        };
+
+        auto respInk = client.addAnnotationSync(32, 0, ink);
+        if (!respInk.success || respInk.annotationName != "ink-ipc-32") {
+            std::cerr << "[FAIL] 32: addAnnotationSync failed for Ink" << std::endl;
+            return 1;
+        }
+
+        // List annotations
+        auto listResp = client.listAnnotationsSync(32, 0);
+        if (!listResp.success || listResp.annotations.size() != 1) {
+            std::cerr << "[FAIL] 32: listAnnotationsSync failed, expected 1, got " << listResp.annotations.size() << std::endl;
+            return 1;
+        }
+        const auto& listed = listResp.annotations[0];
+        if (listed.subtype != pdf::AnnotationSubtype::Ink || listed.name != "ink-ipc-32") {
+            std::cerr << "[FAIL] 32: Listed annotation subtype or name mismatch" << std::endl;
+            return 1;
+        }
+        if (std::abs(listed.borderWidth - 3.5) > 0.01) {
+            std::cerr << "[FAIL] 32: Listed borderWidth mismatch over IPC" << std::endl;
+            return 1;
+        }
+        if (listed.inkStrokes.size() != 2) {
+            std::cerr << "[FAIL] 32: Listed inkStrokes count mismatch over IPC" << std::endl;
+            return 1;
+        }
+
+        // Hit testing over IPC
+        // Proximity hit near stroke segment (130, 140)
+        auto hitNear = client.hitTestAnnotationSync(32, 0, 130.0, 140.0);
+        if (!hitNear.hit || hitNear.annotation.subtype != pdf::AnnotationSubtype::Ink || hitNear.annotation.name != "ink-ipc-32") {
+            std::cerr << "[FAIL] 32: Hit test near ink stroke failed over IPC" << std::endl;
+            return 1;
+        }
+
+        // Miss in between strokes (190, 190)
+        auto hitFar = client.hitTestAnnotationSync(32, 0, 190.0, 190.0);
+        if (hitFar.hit) {
+            std::cerr << "[FAIL] 32: Hit test in empty space between strokes unexpectedly hit" << std::endl;
+            return 1;
+        }
+
+        // Remove annotation
+        auto rem = client.removeAnnotationSync(32, 0, "ink-ipc-32");
+        if (!rem.success || rem.removedCount != 1) {
+            std::cerr << "[FAIL] 32: removeAnnotationSync failed for Ink" << std::endl;
+            return 1;
+        }
+        auto listAfter = client.listAnnotationsSync(32, 0);
+        if (!listAfter.success || !listAfter.annotations.empty()) {
+            std::cerr << "[FAIL] 32: Ink annotation still present after removal" << std::endl;
+            return 1;
+        }
+
+        // 2. Hostile input tests over IPC
+        // A. Reject > 256 strokes
+        pdf::AnnotationItem badStrokes;
+        badStrokes.subtype = pdf::AnnotationSubtype::Ink;
+        badStrokes.pageIndex = 0;
+        badStrokes.name = QStringLiteral("bad-strokes-ipc");
+        badStrokes.inkStrokes.resize(pdf::kMaxInkStrokes + 1);
+        for (size_t s = 0; s < badStrokes.inkStrokes.size(); ++s) {
+            badStrokes.inkStrokes[s] = {{100.0, 100.0}};
+        }
+        auto badStrokesResp = client.addAnnotationSync(32, 0, badStrokes);
+        if (badStrokesResp.success) {
+            std::cerr << "[FAIL] 32: Worker accepted > 256 strokes over IPC" << std::endl;
+            return 1;
+        }
+
+        // B. Reject NaN coordinate
+        pdf::AnnotationItem badNan;
+        badNan.subtype = pdf::AnnotationSubtype::Ink;
+        badNan.pageIndex = 0;
+        badNan.name = QStringLiteral("bad-nan-ipc");
+        badNan.inkStrokes = {{{100.0, std::numeric_limits<double>::quiet_NaN()}}};
+        auto badNanResp = client.addAnnotationSync(32, 0, badNan);
+        if (badNanResp.success) {
+            std::cerr << "[FAIL] 32: Worker accepted NaN coordinate over IPC" << std::endl;
+            return 1;
+        }
+
+        // C. Reject > 100,000 points
+        pdf::AnnotationItem badPts;
+        badPts.subtype = pdf::AnnotationSubtype::Ink;
+        badPts.pageIndex = 0;
+        badPts.name = QStringLiteral("bad-pts-ipc");
+        badPts.inkStrokes = {std::vector<pdf::AnnotationPoint>(pdf::kMaxInkPoints + 1, {10.0, 10.0})};
+        auto badPtsResp = client.addAnnotationSync(32, 0, badPts);
+        if (badPtsResp.success) {
+            std::cerr << "[FAIL] 32: Worker accepted > 100,000 points over IPC" << std::endl;
+            return 1;
+        }
+
+        // Verify worker process is still alive and responsive after hostile packets
+        auto healthCheck = client.addAnnotationSync(32, 0, ink);
+        if (!healthCheck.success || healthCheck.annotationName != "ink-ipc-32") {
+            std::cerr << "[FAIL] 32: Worker became unresponsive or errored after hostile inputs" << std::endl;
+            return 1;
+        }
+        client.removeAnnotationSync(32, 0, "ink-ipc-32");
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: Ink annotations (/Ink) add, list, hit-test, remove, and hostile input rejection over IPC verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;
