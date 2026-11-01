@@ -170,6 +170,7 @@ public:
     bool addSquareAnnotation(int pageIndex, const QRectF& pagePointsRect, uint32_t colorArgb = 0xFFFF0000, double borderWidth = 2.0);
     bool addCircleAnnotation(int pageIndex, const QRectF& pagePointsRect, uint32_t colorArgb = 0xFF0000FF, double borderWidth = 2.0);
     bool addInkAnnotation(int pageIndex, const std::vector<std::vector<pdf::AnnotationPoint>>& strokes, uint32_t colorArgb = 0xFF000000, double borderWidth = 2.0);
+    bool addFreeTextAnnotation(int pageIndex, const QRectF& pagePointsRect, const QString& contents, uint32_t colorArgb = 0xFF000000, double fontSize = 12.0);
     bool deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item);
     bool deleteAnnotationByName(int pageIndex, const QString& annotationName);
     bool modifyTextAnnotation(int pageIndex, const pdf::AnnotationItem& before, const QString& newContents);

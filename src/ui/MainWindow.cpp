@@ -572,6 +572,10 @@ void MainWindow::setupActions() {
     m_drawInkAction->setCheckable(true);
     m_drawInkAction->setEnabled(false);
 
+    m_addFreeTextAction = editMenu->addAction(tr("Add &Text Box..."), this, &MainWindow::addFreeText);
+    m_addFreeTextAction->setObjectName(QStringLiteral("addFreeTextAction"));
+    m_addFreeTextAction->setEnabled(false);
+
     editMenu->addSeparator();
     QAction* copyAction = editMenu->addAction(tr("&Copy"), this, [this]() {
         if (auto* v = currentViewer()) {
@@ -1488,6 +1492,9 @@ void MainWindow::updateStickyNoteAction() {
         m_drawInkAction->setEnabled(open);
         m_drawInkAction->setChecked(viewer && viewer->isInkDrawingMode());
     }
+    if (m_addFreeTextAction) {
+        m_addFreeTextAction->setEnabled(open);
+    }
 }
 
 void MainWindow::onDocumentOpenFailed(const QString& filePath, pdf::DocumentError error) {
@@ -1870,6 +1877,21 @@ void MainWindow::toggleInkDrawing() {
     if (m_drawInkAction) {
         m_drawInkAction->setChecked(v->isInkDrawingMode());
     }
+}
+
+void MainWindow::addFreeText() {
+    auto* v = currentViewer();
+    if (!v || !v->isDocumentOpen()) return;
+    bool ok = false;
+    const QString text = QInputDialog::getMultiLineText(
+        this, tr("Add Text Box"), tr("Text:"), QString(), &ok);
+    if (!ok || text.trimmed().isEmpty()) return;
+
+    const int page = v->currentPage();
+    const auto& pl = v->layout().getPageLayout(page);
+    const double userX = 72.0;
+    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
+    v->addFreeTextAnnotation(page, QRectF(userX, userY - 40.0, 150.0, 40.0), text);
 }
 
 void MainWindow::undoEdit() {
