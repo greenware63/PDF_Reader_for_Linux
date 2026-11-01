@@ -2704,6 +2704,46 @@ bool PdfViewerWidget::addInkAnnotation(int pageIndex, const std::vector<std::vec
     return true;
 }
 
+bool PdfViewerWidget::addFreeTextAnnotation(int pageIndex, const QRectF& pagePointsRect, const QString& contents, uint32_t colorArgb, double fontSize) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    const QRectF normalized = pagePointsRect.normalized();
+    if (pageIndex < 0 || pageIndex >= m_pageCount || normalized.isEmpty() || contents.trimmed().isEmpty()) {
+        return false;
+    }
+    const double fs = (fontSize > 0.0 && fontSize <= 144.0) ? fontSize : 12.0;
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    if (colorArgb == 0) {
+        colorArgb = 0xFF000000; // Black default text color
+    }
+
+    pdf::AnnotationItem item;
+    item.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    item.subtype = pdf::AnnotationSubtype::FreeText;
+    item.pageIndex = pageIndex;
+    item.left = normalized.left();
+    item.bottom = normalized.top();
+    item.right = normalized.right();
+    item.top = normalized.bottom();
+    item.borderWidth = fs; // carries fontSize
+    item.contents = contents;
+    item.colorArgb = colorArgb;
+    item.hasColor = true;
+    item.flags = 4; // FPDF_ANNOT_FLAG_PRINT
+
+    const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, item);
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not add text box: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordAddAnnotation(pageIndex, item);
+    refreshAfterEdit();
+    return true;
+}
+
 bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item) {
     if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
@@ -2863,6 +2903,14 @@ void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
             });
             menu.addAction(tr("Add &Circle Here"), this, [this, clickPage, userX, userY]() {
                 addCircleAnnotation(clickPage, QRectF(userX, userY - 60.0, 100.0, 60.0));
+            });
+            menu.addAction(tr("Add &Text Box Here"), this, [this, clickPage, userX, userY]() {
+                bool ok = false;
+                const QString text = QInputDialog::getMultiLineText(
+                    this, tr("Add Text Box"), tr("Text:"), QString(), &ok);
+                if (ok && !text.trimmed().isEmpty()) {
+                    addFreeTextAnnotation(clickPage, QRectF(userX, userY - 40.0, 150.0, 40.0), text);
+                }
             });
             menu.addAction(tr("&Draw Freehand Ink"), this, [this]() {
                 setInkDrawingMode(true);

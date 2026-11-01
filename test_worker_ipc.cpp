@@ -2973,6 +2973,116 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Ink annotations (/Ink) add, list, hit-test, remove, and hostile input rejection over IPC verified." << std::endl;
     }
 
+    // --- Test 33: FreeText Annotations (/FreeText) over IPC and hostile input rejection ---
+    std::cout << "Test 33: FreeText Annotations (/FreeText) over IPC and hostile input rejection..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto openRes = client.openDocumentSync(33, samplePdf.toStdString());
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 33: openDocumentSync failed" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem ft;
+        ft.subtype = pdf::AnnotationSubtype::FreeText;
+        ft.pageIndex = 0;
+        ft.left = 100.0; ft.bottom = 600.0; ft.right = 300.0; ft.top = 650.0;
+        ft.contents = QStringLiteral("FreeText over IPC");
+        ft.author = QStringLiteral("IpcTester");
+        ft.name = QStringLiteral("ft-ipc-33");
+        ft.colorArgb = 0xFF003366;
+        ft.hasColor = true;
+        ft.flags = 4;
+        ft.borderWidth = 14.0; // font size
+
+        auto respFt = client.addAnnotationSync(33, 0, ft);
+        if (!respFt.success || respFt.annotationName != "ft-ipc-33") {
+            std::cerr << "[FAIL] 33: addAnnotationSync failed for FreeText" << std::endl;
+            return 1;
+        }
+
+        // List annotations
+        auto listResp = client.listAnnotationsSync(33, 0);
+        if (!listResp.success || listResp.annotations.size() != 1) {
+            std::cerr << "[FAIL] 33: listAnnotationsSync failed, expected 1, got " << listResp.annotations.size() << std::endl;
+            return 1;
+        }
+        const auto& listed = listResp.annotations[0];
+        if (listed.subtype != pdf::AnnotationSubtype::FreeText || listed.name != "ft-ipc-33" ||
+            listed.contents != "FreeText over IPC") {
+            std::cerr << "[FAIL] 33: Listed FreeText annotation properties mismatch" << std::endl;
+            return 1;
+        }
+
+        // Hit testing over IPC
+        auto hit = client.hitTestAnnotationSync(33, 0, 150.0, 625.0);
+        if (!hit.hit || hit.annotation.subtype != pdf::AnnotationSubtype::FreeText || hit.annotation.name != "ft-ipc-33") {
+            std::cerr << "[FAIL] 33: Hit test inside FreeText rect failed over IPC" << std::endl;
+            return 1;
+        }
+
+        // Remove annotation
+        auto rem = client.removeAnnotationSync(33, 0, "ft-ipc-33");
+        if (!rem.success || rem.removedCount != 1) {
+            std::cerr << "[FAIL] 33: removeAnnotationSync failed for FreeText" << std::endl;
+            return 1;
+        }
+        auto listAfter = client.listAnnotationsSync(33, 0);
+        if (!listAfter.success || !listAfter.annotations.empty()) {
+            std::cerr << "[FAIL] 33: FreeText annotation still present after removal" << std::endl;
+            return 1;
+        }
+
+        // Hostile input tests over IPC
+        // A. Reject empty contents
+        pdf::AnnotationItem badEmpty;
+        badEmpty.subtype = pdf::AnnotationSubtype::FreeText;
+        badEmpty.pageIndex = 0;
+        badEmpty.left = 100.0; badEmpty.bottom = 600.0; badEmpty.right = 300.0; badEmpty.top = 650.0;
+        badEmpty.contents = QString();
+        auto badEmptyResp = client.addAnnotationSync(33, 0, badEmpty);
+        if (badEmptyResp.success) {
+            std::cerr << "[FAIL] 33: Worker accepted empty contents over IPC" << std::endl;
+            return 1;
+        }
+
+        // B. Reject inverted bounds
+        pdf::AnnotationItem badInv;
+        badInv.subtype = pdf::AnnotationSubtype::FreeText;
+        badInv.pageIndex = 0;
+        badInv.left = 300.0; badInv.bottom = 600.0; badInv.right = 100.0; badInv.top = 650.0;
+        badInv.contents = QStringLiteral("bad inverted");
+        auto badInvResp = client.addAnnotationSync(33, 0, badInv);
+        if (badInvResp.success) {
+            std::cerr << "[FAIL] 33: Worker accepted inverted bounds over IPC" << std::endl;
+            return 1;
+        }
+
+        // C. Reject NaN bounds
+        pdf::AnnotationItem badNan;
+        badNan.subtype = pdf::AnnotationSubtype::FreeText;
+        badNan.pageIndex = 0;
+        badNan.left = 100.0; badNan.bottom = std::numeric_limits<double>::quiet_NaN(); badNan.right = 300.0; badNan.top = 650.0;
+        badNan.contents = QStringLiteral("bad nan");
+        auto badNanResp = client.addAnnotationSync(33, 0, badNan);
+        if (badNanResp.success) {
+            std::cerr << "[FAIL] 33: Worker accepted NaN bounds over IPC" << std::endl;
+            return 1;
+        }
+
+        // Worker health check after hostile packets
+        auto healthResp = client.addAnnotationSync(33, 0, ft);
+        if (!healthResp.success || healthResp.annotationName != "ft-ipc-33") {
+            std::cerr << "[FAIL] 33: Worker unresponsive after hostile packets" << std::endl;
+            return 1;
+        }
+        client.removeAnnotationSync(33, 0, "ft-ipc-33");
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: FreeText annotations (/FreeText) add, list, hit-test, remove, and hostile input rejection over IPC verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

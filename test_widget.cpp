@@ -5728,7 +5728,79 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Ink annotations programmatic creation, mouse drawing UI, undo/redo, and save verified." << std::endl;
     }
 
-    std::cout << " ALL 53 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- Test 54: FreeText Annotations (/FreeText) on PdfViewerWidget ---
+    std::cout << "Test 54: FreeText Annotations on PdfViewerWidget..." << std::endl;
+    {
+        QTemporaryDir tmp;
+        if (!tmp.isValid()) {
+            std::cerr << "[FAIL] 54 could not create temp directory" << std::endl;
+            return 1;
+        }
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(samplePath));
+
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 54 document did not finish opening" << std::endl;
+            return 1;
+        }
+
+        if (!viewer.addFreeTextAnnotation(0, QRectF(100.0, 600.0, 200.0, 50.0), QStringLiteral("Widget FreeText Note"), 0xFF003366, 14.0)) {
+            std::cerr << "[FAIL] 54 addFreeTextAnnotation returned false" << std::endl;
+            return 1;
+        }
+
+        const auto cmds = viewer.editLog().activeCommands();
+        if (cmds.size() != 1 ||
+            cmds[0].after.subtype != pdf::AnnotationSubtype::FreeText ||
+            cmds[0].after.contents != "Widget FreeText Note" ||
+            std::abs(cmds[0].after.borderWidth - 14.0) > 0.01) {
+            std::cerr << "[FAIL] 54 EditLog did not record FreeText annotation properly" << std::endl;
+            return 1;
+        }
+
+        // Test Undo & Redo
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 54 undoEdit failed" << std::endl;
+            return 1;
+        }
+        if (!viewer.editLog().activeCommands().empty()) {
+            std::cerr << "[FAIL] 54 EditLog activeCommands not empty after undo" << std::endl;
+            return 1;
+        }
+        if (!viewer.redoEdit()) {
+            std::cerr << "[FAIL] 54 redoEdit failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().activeCommands().size() != 1) {
+            std::cerr << "[FAIL] 54 EditLog activeCommands not restored after redo" << std::endl;
+            return 1;
+        }
+
+        // Save document with FreeText annotation
+        const QString savedPath = tmp.filePath(QStringLiteral("freetext_saved.pdf"));
+        if (!viewer.saveDocument(savedPath)) {
+            std::cerr << "[FAIL] 54 saveDocument failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 54 EditLog is dirty after save" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: FreeText annotations creation, undo/redo, and save verified." << std::endl;
+    }
+
+    std::cout << " ALL 54 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

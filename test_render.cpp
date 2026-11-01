@@ -3669,8 +3669,267 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Ink annotations (/Ink) add, list, stroke proximity hit-test, save, reload, removal and hostile bounds verified." << std::endl;
     }
 
+    // --- Test 38: FreeText Annotations (/FreeText) lifecycle and hostile bounds ---
+    std::cout << "Test 38: FreeText Annotations (/FreeText) lifecycle and hostile bounds..." << std::endl;
+    {
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 38: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 38: getPage(0) failed" << std::endl;
+            return 1;
+        }
+
+        // 1. Hostile input tests
+        {
+            // A. NaN in bounds
+            pdf::AnnotationItem badNan;
+            badNan.subtype = pdf::AnnotationSubtype::FreeText;
+            badNan.pageIndex = 0;
+            badNan.left = 100.0; badNan.bottom = std::numeric_limits<double>::quiet_NaN(); badNan.right = 300.0; badNan.top = 650.0;
+            badNan.contents = QStringLiteral("bad nan");
+            if (page->addFreeTextAnnotation(badNan, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted NaN bounds" << std::endl;
+                return 1;
+            }
+
+            // B. Inf in bounds
+            pdf::AnnotationItem badInf;
+            badInf.subtype = pdf::AnnotationSubtype::FreeText;
+            badInf.pageIndex = 0;
+            badInf.left = 100.0; badInf.bottom = 600.0; badInf.right = std::numeric_limits<double>::infinity(); badInf.top = 650.0;
+            badInf.contents = QStringLiteral("bad inf");
+            if (page->addFreeTextAnnotation(badInf, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted Inf bounds" << std::endl;
+                return 1;
+            }
+
+            // C. Extreme bounds (> 1e6)
+            pdf::AnnotationItem badExt;
+            badExt.subtype = pdf::AnnotationSubtype::FreeText;
+            badExt.pageIndex = 0;
+            badExt.left = -1e30; badExt.bottom = 600.0; badExt.right = 1e30; badExt.top = 650.0;
+            badExt.contents = QStringLiteral("bad extreme");
+            if (page->addFreeTextAnnotation(badExt, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted extreme bounds > 1e6" << std::endl;
+                return 1;
+            }
+
+            // D. Inverted bounds (right <= left)
+            pdf::AnnotationItem badInvX;
+            badInvX.subtype = pdf::AnnotationSubtype::FreeText;
+            badInvX.pageIndex = 0;
+            badInvX.left = 300.0; badInvX.bottom = 600.0; badInvX.right = 100.0; badInvX.top = 650.0;
+            badInvX.contents = QStringLiteral("bad inverted x");
+            if (page->addFreeTextAnnotation(badInvX, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted inverted x bounds" << std::endl;
+                return 1;
+            }
+
+            // E. Inverted bounds (top <= bottom)
+            pdf::AnnotationItem badInvY;
+            badInvY.subtype = pdf::AnnotationSubtype::FreeText;
+            badInvY.pageIndex = 0;
+            badInvY.left = 100.0; badInvY.bottom = 650.0; badInvY.right = 300.0; badInvY.top = 600.0;
+            badInvY.contents = QStringLiteral("bad inverted y");
+            if (page->addFreeTextAnnotation(badInvY, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted inverted y bounds" << std::endl;
+                return 1;
+            }
+
+            // F. Hairline bounds (< 0.5 pt)
+            pdf::AnnotationItem badHairline;
+            badHairline.subtype = pdf::AnnotationSubtype::FreeText;
+            badHairline.pageIndex = 0;
+            badHairline.left = 100.0; badHairline.bottom = 600.0; badHairline.right = 100.2; badHairline.top = 650.0;
+            badHairline.contents = QStringLiteral("bad hairline");
+            if (page->addFreeTextAnnotation(badHairline, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted hairline bounds" << std::endl;
+                return 1;
+            }
+
+            // G. Empty contents
+            pdf::AnnotationItem badEmpty;
+            badEmpty.subtype = pdf::AnnotationSubtype::FreeText;
+            badEmpty.pageIndex = 0;
+            badEmpty.left = 100.0; badEmpty.bottom = 600.0; badEmpty.right = 300.0; badEmpty.top = 650.0;
+            badEmpty.contents = QString();
+            if (page->addFreeTextAnnotation(badEmpty, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted empty contents" << std::endl;
+                return 1;
+            }
+
+            // H. Oversized contents (> 32,768 UTF-16 code units)
+            pdf::AnnotationItem badOversized;
+            badOversized.subtype = pdf::AnnotationSubtype::FreeText;
+            badOversized.pageIndex = 0;
+            badOversized.left = 100.0; badOversized.bottom = 600.0; badOversized.right = 300.0; badOversized.top = 650.0;
+            badOversized.contents = QString(32769, QLatin1Char('A'));
+            if (page->addFreeTextAnnotation(badOversized, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted oversized contents > 32768 chars" << std::endl;
+                return 1;
+            }
+
+            // Verify none of the hostile attempts created an annotation
+            if (!page->listAnnotations().empty()) {
+                std::cerr << "[FAIL] Test 38: Rejected hostile input left orphan annotations behind!" << std::endl;
+                return 1;
+            }
+        }
+
+        // 2. Normal FreeText lifecycle
+        pdf::AnnotationItem ft;
+        ft.subtype = pdf::AnnotationSubtype::FreeText;
+        ft.pageIndex = 0;
+        ft.left = 100.0; ft.bottom = 600.0; ft.right = 300.0; ft.top = 650.0;
+        ft.contents = QStringLiteral("Sample FreeText Box");
+        ft.author = QStringLiteral("FreeTextTester");
+        ft.name = QStringLiteral("ft-test-38");
+        ft.colorArgb = 0xFF003366; // Dark blue
+        ft.hasColor = true;
+        ft.flags = 4;
+        ft.borderWidth = 14.0; // font size
+
+        if (!page->addFreeTextAnnotation(ft, 14.0)) {
+            std::cerr << "[FAIL] Test 38: addFreeTextAnnotation failed for valid FreeText" << std::endl;
+            return 1;
+        }
+
+        // Verify listed
+        auto annots = page->listAnnotations();
+        if (annots.size() != 1) {
+            std::cerr << "[FAIL] Test 38: Expected 1 annotation, got " << annots.size() << std::endl;
+            return 1;
+        }
+        const auto& listed = annots[0];
+        if (listed.subtype != pdf::AnnotationSubtype::FreeText || listed.name != "ft-test-38" ||
+            listed.contents != "Sample FreeText Box") {
+            std::cerr << "[FAIL] Test 38: Listed annotation properties mismatch" << std::endl;
+            return 1;
+        }
+
+        // Hit testing
+        pdf::AnnotationItem hit;
+        if (!page->hitTestAnnotation(150.0, 625.0, hit) || hit.subtype != pdf::AnnotationSubtype::FreeText || hit.name != "ft-test-38") {
+            std::cerr << "[FAIL] Test 38: Hit test inside FreeText rect failed" << std::endl;
+            return 1;
+        }
+        if (page->hitTestAnnotation(50.0, 50.0, hit)) {
+            std::cerr << "[FAIL] Test 38: Hit test outside rect unexpectedly succeeded" << std::endl;
+            return 1;
+        }
+
+        // Incremental save and verify persistence
+        QTemporaryDir tempDir;
+        const std::string savedPath = tempDir.filePath("freetext_saved.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (saveFd < 0) {
+            std::cerr << "[FAIL] Test 38: Failed to open saveFd" << std::endl;
+            return 1;
+        }
+        uint64_t written = 0;
+        if (!doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
+            std::cerr << "[FAIL] Test 38: saveAsCopy failed" << std::endl;
+            return 1;
+        }
+
+        // Reopen saved file in fresh document and check annotations
+        auto freshDoc = pdf::createDocument();
+        if (freshDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 38: Failed to reload saved FreeText PDF" << std::endl;
+            return 1;
+        }
+        auto freshPage = freshDoc->getPage(0);
+        if (!freshPage) {
+            std::cerr << "[FAIL] Test 38: Failed to get page 0 in fresh document" << std::endl;
+            return 1;
+        }
+        auto freshAnnots = freshPage->listAnnotations();
+        if (freshAnnots.size() != 1) {
+            std::cerr << "[FAIL] Test 38: Reopened annotations size mismatch: expected 1, got " << freshAnnots.size() << std::endl;
+            return 1;
+        }
+        if (freshAnnots[0].subtype != pdf::AnnotationSubtype::FreeText || freshAnnots[0].contents != "Sample FreeText Box") {
+            std::cerr << "[FAIL] Test 38: Reopened annotation content mismatch" << std::endl;
+            return 1;
+        }
+
+        // Verify removeAnnotationByName
+        int removedCount = page->removeAnnotationByName(QStringLiteral("ft-test-38"));
+        if (removedCount != 1) {
+            std::cerr << "[FAIL] Test 38: removeAnnotationByName returned " << removedCount << ", expected 1" << std::endl;
+            return 1;
+        }
+        if (!page->listAnnotations().empty()) {
+            std::cerr << "[FAIL] Test 38: Annotation still present after removal" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: FreeText annotations (/FreeText) add, list, hit-test, save, reload, removal and hostile bounds verified." << std::endl;
+    }
+
+    // --- Test 39: FreeText must not paint an opaque block (its /C is the background fill, not the text colour) ---
+    std::cout << "Test 39: FreeText box leaves the page visible and draws text..." << std::endl;
+    {
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 39: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 39: getPage(0) failed" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem ft;
+        ft.subtype = pdf::AnnotationSubtype::FreeText;
+        ft.pageIndex = 0;
+        ft.left = 50; ft.bottom = 600; ft.right = 300; ft.top = 640;
+        ft.contents = QStringLiteral("Hello FreeText");
+        ft.colorArgb = 0xFF000000; ft.hasColor = true; ft.flags = 4;
+        ft.name = QStringLiteral("freetext-39");
+        if (!page->addFreeTextAnnotation(ft, 12.0)) {
+            std::cerr << "[FAIL] Test 39: addFreeTextAnnotation failed" << std::endl;
+            return 1;
+        }
+        pdf::PixelBuffer buf = page->renderWholePage(1.0, 1.0);
+        if (!buf.isValid() || buf.data() == nullptr) {
+            std::cerr << "[FAIL] Test 39: render failed" << std::endl;
+            return 1;
+        }
+        // Interior of the box (inset 4 px), in device pixels with the origin at the top-left.
+        const int x0 = 54, x1 = 296;
+        const int y0 = buf.height() - 640 + 4, y1 = buf.height() - 600 - 4;
+        int dark = 0, light = 0;
+        for (int y = y0; y < y1; ++y) {
+            const uint32_t* row = reinterpret_cast<const uint32_t*>(buf.data() + y * buf.stride());
+            for (int x = x0; x < x1; ++x) {
+                const uint32_t px = row[x];
+                const int lum = (static_cast<int>(px & 0xFF) + static_cast<int>((px >> 8) & 0xFF) + static_cast<int>((px >> 16) & 0xFF)) / 3;
+                (lum < 100 ? dark : light)++;
+            }
+        }
+        const int total = dark + light;
+        if (total <= 0 || dark > total / 2) {
+            std::cerr << "[FAIL] Test 39: FreeText painted an opaque block over its text (dark=" << dark << " of " << total << ")" << std::endl;
+            return 1;
+        }
+        if (dark < 20) {
+            std::cerr << "[FAIL] Test 39: no text pixels were drawn inside the FreeText box (dark=" << dark << ")" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: FreeText shows its text over a transparent background." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 37 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 39 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

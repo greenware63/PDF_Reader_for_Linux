@@ -1188,6 +1188,126 @@ bool PdfiumPage::addInkAnnotation(const AnnotationItem& item, double borderWidth
     return true;
 }
 
+bool PdfiumPage::addFreeTextAnnotation(const AnnotationItem& item, double fontSize) {
+    if (!m_page || !item.isValid() || item.subtype != AnnotationSubtype::FreeText) {
+        return false;
+    }
+
+    constexpr double kMaxCoord = 1.0e6;
+    const double coords[4] = {item.left, item.bottom, item.right, item.top};
+    for (const double v : coords) {
+        if (!std::isfinite(v) || std::fabs(v) > kMaxCoord) {
+            return false;
+        }
+    }
+    if (item.right <= item.left || item.top <= item.bottom ||
+        (item.right - item.left) < 0.5 || (item.top - item.bottom) < 0.5) {
+        return false;
+    }
+
+    if (item.contents.isEmpty() || item.contents.size() > 32768) {
+        return false;
+    }
+
+    double effFontSize = (fontSize > 0.0 && fontSize <= 144.0 && std::isfinite(fontSize)) ? fontSize : 12.0;
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    // 1. Create annotation
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, FPDF_ANNOT_FREETEXT);
+    if (!annot) {
+        return false;
+    }
+    const int annotIndex = FPDFPage_GetAnnotCount(m_page) - 1;
+    auto failFreeText = [&]() {
+        FPDFPage_CloseAnnot(annot);
+        FPDFPage_RemoveAnnot(m_page, annotIndex);
+        return false;
+    };
+
+    // 2. Set /Rect
+    FS_RECTF rect{};
+    rect.left = static_cast<float>(item.left);
+    rect.bottom = static_cast<float>(item.bottom);
+    rect.right = static_cast<float>(item.right);
+    rect.top = static_cast<float>(item.top);
+    if (!FPDFAnnot_SetRect(annot, &rect)) {
+        return failFreeText();
+    }
+
+    // 3. Set Color (/C)
+    uint32_t a = (item.colorArgb >> 24) & 0xFF;
+    uint32_t r = (item.colorArgb >> 16) & 0xFF;
+    uint32_t g = (item.colorArgb >> 8) & 0xFF;
+    uint32_t b = item.colorArgb & 0xFF;
+    if (a == 0 && item.colorArgb == 0) {
+        // Default text color: Black
+        r = 0; g = 0; b = 0; a = 255;
+    }
+    // NOTE: /C on a FreeText annotation is the BACKGROUND fill, not the text colour (that lives in /DA below).
+    // Setting it to the text colour painted an opaque block of the same colour over the page and hid the text.
+    (void)a;
+
+    // 4. Set Default Appearance (/DA)
+    double rf = r / 255.0;
+    double gf = g / 255.0;
+    double bf = b / 255.0;
+    QString daString = QStringLiteral("/Helv %1 Tf %2 %3 %4 rg")
+        .arg(effFontSize)
+        .arg(rf, 0, 'f', 3)
+        .arg(gf, 0, 'f', 3)
+        .arg(bf, 0, 'f', 3);
+    const std::u16string daU16 = daString.toStdU16String();
+    if (!FPDFAnnot_SetStringValue(annot, "DA", reinterpret_cast<FPDF_WIDESTRING>(daU16.c_str()))) {
+        return failFreeText();
+    }
+
+    // 5. Set Border width (/BS) if specified
+    if (item.borderWidth > 0.0 && item.borderWidth <= 100.0 && std::isfinite(item.borderWidth)) {
+        FPDFAnnot_SetBorder(annot, 0.0f, 0.0f, static_cast<float>(item.borderWidth));
+    }
+
+    // 6. Set Flags (/F)
+    uint32_t flags = item.flags ? item.flags : FPDF_ANNOT_FLAG_PRINT;
+    if (!FPDFAnnot_SetFlags(annot, flags)) {
+        return failFreeText();
+    }
+
+    // 7. Set /NM (unique identifier string)
+    if (!item.name.isEmpty()) {
+        const std::u16string u16 = item.name.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failFreeText();
+        }
+    }
+
+    // 8. Set /Contents
+    const std::u16string contentsU16 = item.contents.toStdU16String();
+    if (!FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(contentsU16.c_str()))) {
+        return failFreeText();
+    }
+
+    // 9. Set /T (Author)
+    if (!item.author.isEmpty()) {
+        const std::u16string u16 = item.author.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failFreeText();
+        }
+    }
+
+    // 10. Generate appearance stream (/AP)
+    FPDF_BITMAP appearanceBitmap = FPDFBitmap_Create(1, 1, 0);
+    if (!appearanceBitmap) return failFreeText();
+    FPDF_RenderPageBitmap(appearanceBitmap, m_page, 0, 0, 1, 1, 0, FPDF_ANNOT);
+    FPDFBitmap_Destroy(appearanceBitmap);
+    if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
+        return failFreeText();
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
+}
+
 int PdfiumPage::removeAnnotationByName(const QString& name) {
     if (!m_page || name.isEmpty() || name.size() > 256) {
         return 0;

@@ -874,6 +874,9 @@ void RenderWorker::requestAddAnnotation(int64_t documentId, int pageIndex, const
         } else if (annotItem.subtype == AnnotationSubtype::Ink) {
             const double bw = (annotItem.borderWidth > 0.0) ? annotItem.borderWidth : 2.0;
             ok = page->addInkAnnotation(annotItem, bw);
+        } else if (annotItem.subtype == AnnotationSubtype::FreeText) {
+            const double fs = (annotItem.borderWidth > 0.0) ? annotItem.borderWidth : 12.0;
+            ok = page->addFreeTextAnnotation(annotItem, fs);
         } else {
             Q_EMIT annotationAddFailed(documentId, pageIndex, QStringLiteral("Unsupported annotation subtype"));
             return;
