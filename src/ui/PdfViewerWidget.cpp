@@ -2520,29 +2520,36 @@ bool PdfViewerWidget::deleteAnnotationByName(int pageIndex, const QString& annot
     }
 
     pdf::AnnotationItem item;
+    bool found = false;
     for (const auto& cmd : m_editLog.activeCommands()) {
         if (cmd.pageIndex == pageIndex) {
             if (cmd.type == pdf::EditCommandType::AddAnnotation && cmd.after.name == annotationName) {
                 item = cmd.after;
+                found = true;
                 break;
             } else if (cmd.type == pdf::EditCommandType::ModifyAnnotation && cmd.after.name == annotationName) {
                 item = cmd.after;
+                found = true;
                 break;
             }
         }
     }
-    if (item.name.isEmpty()) {
+    if (!found) {
         const auto list = m_renderWorker.listAnnotationsSync(m_currentDocumentId, pageIndex);
+        if (!list.success || list.truncated) {
+            Q_EMIT loadError(tr("Could not delete annotation because its complete details could not be loaded."));
+            return false;
+        }
         for (const auto& a : list.annotations) {
             if (a.name == annotationName) {
                 item = a;
+                found = true;
                 break;
             }
         }
     }
-    if (item.name.isEmpty()) {
-        item.name = annotationName;
-        item.pageIndex = pageIndex;
+    if (!found) {
+        return false;
     }
 
     return deleteAnnotation(pageIndex, item);

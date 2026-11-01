@@ -484,7 +484,7 @@ void MainWindow::connectViewer(PdfViewerWidget* viewer) {
         if (m_underlineAction) m_underlineAction->setEnabled(canMarkup);
         if (m_strikeOutAction) m_strikeOutAction->setEnabled(canMarkup);
         if (m_squigglyAction) m_squigglyAction->setEnabled(canMarkup);
-        if (m_addNoteAction) m_addNoteAction->setEnabled(v && v->isDocumentOpen());
+        updateStickyNoteAction();
     });
 }
 
@@ -550,6 +550,7 @@ void MainWindow::setupActions() {
     m_squigglyAction->setEnabled(false);
 
     m_addNoteAction = editMenu->addAction(tr("Add &Sticky Note..."), this, &MainWindow::addStickyNote);
+    m_addNoteAction->setObjectName(QStringLiteral("addStickyNoteAction"));
     m_addNoteAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_N));
     m_addNoteAction->setEnabled(false);
 
@@ -1026,6 +1027,7 @@ void MainWindow::selectPreviousTab() {
 
 void MainWindow::onCurrentTabChanged(int index) {
     if (index < 0 || !m_docTabs) {
+        updateStickyNoteAction();
         onEditLogDirtyChanged(false);
         return;
     }
@@ -1034,6 +1036,7 @@ void MainWindow::onCurrentTabChanged(int index) {
     }
     m_viewer = qobject_cast<PdfViewerWidget*>(m_docTabs->widget(index));
     if (!m_viewer) {
+        updateStickyNoteAction();
         onEditLogDirtyChanged(false);
         return;
     }
@@ -1089,6 +1092,7 @@ void MainWindow::onCurrentTabChanged(int index) {
     if (m_underlineAction) m_underlineAction->setEnabled(canMarkup);
     if (m_strikeOutAction) m_strikeOutAction->setEnabled(canMarkup);
     if (m_squigglyAction) m_squigglyAction->setEnabled(canMarkup);
+    updateStickyNoteAction();
 
     if (m_findBar && m_findBar->isVisible()) {
         m_findBar->clear();
@@ -1375,6 +1379,7 @@ void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
     }
 
     if (senderViewer == currentViewer()) {
+        updateStickyNoteAction();
         closePasswordDialog();
         if (m_findBar) {
             m_findBar->clear();
@@ -1440,10 +1445,20 @@ void MainWindow::onZoomChanged(double zoomRatio) {
 }
 
 void MainWindow::onLoadError(const QString& errorMessage) {
+    updateStickyNoteAction();
     if (m_passwordDialog) {
         return;
     }
     statusBar()->showMessage(errorMessage, 6000);
+}
+
+void MainWindow::updateStickyNoteAction() {
+    if (m_addNoteAction) {
+        const auto* viewer = (m_docTabs && m_docTabs->currentIndex() >= 0)
+            ? qobject_cast<PdfViewerWidget*>(m_docTabs->currentWidget())
+            : nullptr;
+        m_addNoteAction->setEnabled(viewer && viewer->isDocumentOpen());
+    }
 }
 
 void MainWindow::onDocumentOpenFailed(const QString& filePath, pdf::DocumentError error) {
