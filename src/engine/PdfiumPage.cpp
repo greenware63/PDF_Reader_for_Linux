@@ -1244,9 +1244,9 @@ bool PdfiumPage::addFreeTextAnnotation(const AnnotationItem& item, double fontSi
         // Default text color: Black
         r = 0; g = 0; b = 0; a = 255;
     }
-    if (!FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, a)) {
-        return failFreeText();
-    }
+    // NOTE: /C on a FreeText annotation is the BACKGROUND fill, not the text colour (that lives in /DA below).
+    // Setting it to the text colour painted an opaque block of the same colour over the page and hid the text.
+    (void)a;
 
     // 4. Set Default Appearance (/DA)
     double rf = r / 255.0;
