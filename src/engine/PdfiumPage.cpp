@@ -539,6 +539,13 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations(bool* truncated) {
                              (static_cast<uint32_t>(b));
         }
 
+        float hRadius = 0.0f, vRadius = 0.0f, bWidth = 0.0f;
+        if (FPDFAnnot_GetBorder(annot, &hRadius, &vRadius, &bWidth)) {
+            if (std::isfinite(bWidth) && bWidth >= 0.0f && bWidth <= 100.0f) {
+                item.borderWidth = static_cast<double>(bWidth);
+            }
+        }
+
         auto readStringKey = [&](const char* key, size_t maxChars) -> QString {
             unsigned long reqLen = FPDFAnnot_GetStringValue(annot, key, nullptr, 0);
             if (reqLen <= 2) {
@@ -887,7 +894,11 @@ bool PdfiumPage::addGeometricAnnotation(const AnnotationItem& item, double borde
             return false;
         }
     }
-    if (std::fabs(item.right - item.left) < kMinExtent || std::fabs(item.top - item.bottom) < kMinExtent) {
+    // Reject reversed rectangles (right < left or top < bottom) and degenerate/hairline boxes (< 0.5 pt)
+    if (item.right < item.left || item.top < item.bottom) {
+        return false;
+    }
+    if ((item.right - item.left) < kMinExtent || (item.top - item.bottom) < kMinExtent) {
         return false;
     }
 
@@ -932,11 +943,11 @@ bool PdfiumPage::addGeometricAnnotation(const AnnotationItem& item, double borde
     }
 
     // 4. Set Border (/BS)
-    float bw = 2.0f;
-    if (borderWidth > 0.0 && borderWidth <= 100.0) {
-        bw = static_cast<float>(borderWidth);
+    double effectiveBorderWidth = (item.borderWidth > 0.0) ? item.borderWidth : borderWidth;
+    if (effectiveBorderWidth <= 0.0 || effectiveBorderWidth > 100.0 || !std::isfinite(effectiveBorderWidth)) {
+        effectiveBorderWidth = 2.0;
     }
-    FPDFAnnot_SetBorder(annot, 0.0f, 0.0f, bw);
+    FPDFAnnot_SetBorder(annot, 0.0f, 0.0f, static_cast<float>(effectiveBorderWidth));
 
     // 5. Set Flags (/F)
     uint32_t flags = item.flags ? item.flags : FPDF_ANNOT_FLAG_PRINT;

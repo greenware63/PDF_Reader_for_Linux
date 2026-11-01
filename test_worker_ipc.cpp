@@ -2753,6 +2753,7 @@ int main(int argc, char* argv[]) {
         square.colorArgb = 0xFFFF0000;
         square.hasColor = true;
         square.flags = 4;
+        square.borderWidth = 2.5;
         square.contents = QStringLiteral("Square over IPC");
         square.author = QStringLiteral("IpcTester");
         square.name = QStringLiteral("square-ipc-31");
@@ -2770,6 +2771,7 @@ int main(int argc, char* argv[]) {
         circle.colorArgb = 0xFF0000FF;
         circle.hasColor = true;
         circle.flags = 4;
+        circle.borderWidth = 4.0;
         circle.contents = QStringLiteral("Circle over IPC");
         circle.author = QStringLiteral("IpcTester");
         circle.name = QStringLiteral("circle-ipc-31");
@@ -2788,8 +2790,20 @@ int main(int argc, char* argv[]) {
         }
         bool foundSq = false, foundCr = false;
         for (const auto& a : listResp.annotations) {
-            if (a.subtype == pdf::AnnotationSubtype::Square && a.name == "square-ipc-31") foundSq = true;
-            if (a.subtype == pdf::AnnotationSubtype::Circle && a.name == "circle-ipc-31") foundCr = true;
+            if (a.subtype == pdf::AnnotationSubtype::Square && a.name == "square-ipc-31") {
+                foundSq = true;
+                if (std::abs(a.borderWidth - 2.5) > 0.01) {
+                    std::cerr << "[FAIL] 31: Square borderWidth mismatch over IPC" << std::endl;
+                    return 1;
+                }
+            }
+            if (a.subtype == pdf::AnnotationSubtype::Circle && a.name == "circle-ipc-31") {
+                foundCr = true;
+                if (std::abs(a.borderWidth - 4.0) > 0.01) {
+                    std::cerr << "[FAIL] 31: Circle borderWidth mismatch over IPC" << std::endl;
+                    return 1;
+                }
+            }
         }
         if (!foundSq || !foundCr) {
             std::cerr << "[FAIL] 31: Listed annotations mismatch" << std::endl;

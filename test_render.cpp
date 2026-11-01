@@ -3264,11 +3264,12 @@ int main(int argc, char* argv[]) {
         circle.colorArgb = 0xFF0000FF; // Blue
         circle.hasColor = true;
         circle.flags = 4;
+        circle.borderWidth = 3.5;
         circle.name = QStringLiteral("circle-test-35");
         circle.contents = QStringLiteral("Circle annotation contents");
         circle.author = QStringLiteral("GeometryTester");
 
-        if (!page->addGeometricAnnotation(circle, 3.0)) {
+        if (!page->addGeometricAnnotation(circle, 3.5)) {
             std::cerr << "[FAIL] Test 35: addGeometricAnnotation (Circle) failed" << std::endl;
             return 1;
         }
@@ -3283,8 +3284,16 @@ int main(int argc, char* argv[]) {
         for (const auto& a : annots) {
             if (a.subtype == pdf::AnnotationSubtype::Square && a.name == "square-test-35") {
                 foundSquare = true;
+                if (std::abs(a.borderWidth - 2.0) > 0.01) {
+                    std::cerr << "[FAIL] Test 35: Square borderWidth mismatch" << std::endl;
+                    return 1;
+                }
             } else if (a.subtype == pdf::AnnotationSubtype::Circle && a.name == "circle-test-35") {
                 foundCircle = true;
+                if (std::abs(a.borderWidth - 3.5) > 0.01) {
+                    std::cerr << "[FAIL] Test 35: Circle borderWidth mismatch" << std::endl;
+                    return 1;
+                }
             }
         }
         if (!foundSquare || !foundCircle) {
@@ -3376,6 +3385,9 @@ int main(int argc, char* argv[]) {
             {"huge", -1e30, -1e30, 1e30, 1e30},
             {"zero size", 50, 50, 50, 50},
             {"hairline", 50, 50, 50.1, 90},
+            {"reversed x", 100, 50, 50, 90},
+            {"reversed y", 50, 90, 100, 50},
+            {"reversed both", 100, 90, 50, 50},
         };
         for (const auto& rc : bad) {
             pdf::AnnotationItem a;

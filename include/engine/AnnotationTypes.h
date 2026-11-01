@@ -140,12 +140,14 @@ struct AnnotationItem {
     // Subtype-specific payloads
     std::vector<AnnotationQuad> quadPoints; // For text markup or link attachment points (max 4096)
     QString uri;                            // For Link subtype (action URI)
+    double borderWidth{0.0};                // Border / stroke width in PDF points (0.0 = subtype default)
 
     bool isValid() const noexcept {
         return !std::isnan(left) && !std::isnan(top) &&
                !std::isnan(right) && !std::isnan(bottom) &&
                !std::isinf(left) && !std::isinf(top) &&
-               !std::isinf(right) && !std::isinf(bottom);
+               !std::isinf(right) && !std::isinf(bottom) &&
+               !std::isnan(borderWidth) && !std::isinf(borderWidth);
     }
 
     bool contains(double x, double y) const noexcept {

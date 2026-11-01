@@ -869,7 +869,8 @@ void RenderWorker::requestAddAnnotation(int64_t documentId, int pageIndex, const
             ok = page->addTextAnnotation(annotItem);
         } else if (annotItem.subtype == AnnotationSubtype::Square ||
                    annotItem.subtype == AnnotationSubtype::Circle) {
-            ok = page->addGeometricAnnotation(annotItem);
+            const double bw = (annotItem.borderWidth > 0.0) ? annotItem.borderWidth : 2.0;
+            ok = page->addGeometricAnnotation(annotItem, bw);
         } else {
             Q_EMIT annotationAddFailed(documentId, pageIndex, QStringLiteral("Unsupported annotation subtype"));
             return;

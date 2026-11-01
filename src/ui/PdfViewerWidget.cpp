@@ -2487,7 +2487,7 @@ bool PdfViewerWidget::addSquareAnnotation(int pageIndex, const QRectF& pagePoint
     if (pageIndex < 0 || pageIndex >= m_pageCount || normalized.isEmpty()) {
         return false;
     }
-    (void)borderWidth;
+    const double bw = (borderWidth > 0.0 && borderWidth <= 100.0) ? borderWidth : 2.0;
     QScopedValueRollback<bool> editGuard(m_editInProgress, true);
 
     if (colorArgb == 0) {
@@ -2502,6 +2502,7 @@ bool PdfViewerWidget::addSquareAnnotation(int pageIndex, const QRectF& pagePoint
     item.bottom = normalized.top();
     item.right = normalized.right();
     item.top = normalized.bottom();
+    item.borderWidth = bw;
     item.colorArgb = colorArgb;
     item.hasColor = true;
     item.flags = 4; // FPDF_ANNOT_FLAG_PRINT
@@ -2525,7 +2526,7 @@ bool PdfViewerWidget::addCircleAnnotation(int pageIndex, const QRectF& pagePoint
     if (pageIndex < 0 || pageIndex >= m_pageCount || normalized.isEmpty()) {
         return false;
     }
-    (void)borderWidth;
+    const double bw = (borderWidth > 0.0 && borderWidth <= 100.0) ? borderWidth : 2.0;
     QScopedValueRollback<bool> editGuard(m_editInProgress, true);
 
     if (colorArgb == 0) {
@@ -2540,6 +2541,7 @@ bool PdfViewerWidget::addCircleAnnotation(int pageIndex, const QRectF& pagePoint
     item.bottom = normalized.top();
     item.right = normalized.right();
     item.top = normalized.bottom();
+    item.borderWidth = bw;
     item.colorArgb = colorArgb;
     item.hasColor = true;
     item.flags = 4; // FPDF_ANNOT_FLAG_PRINT

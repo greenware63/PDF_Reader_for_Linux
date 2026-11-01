@@ -5550,15 +5550,23 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Add Square annotation
-        if (!viewer.addSquareAnnotation(0, QRectF(100.0, 600.0, 100.0, 100.0), 0xFFFF0000, 2.0)) {
+        // Add Square annotation with custom 2.5 pt border
+        if (!viewer.addSquareAnnotation(0, QRectF(100.0, 600.0, 100.0, 100.0), 0xFFFF0000, 2.5)) {
             std::cerr << "[FAIL] 52 addSquareAnnotation returned false" << std::endl;
             return 1;
         }
 
-        // Add Circle annotation
-        if (!viewer.addCircleAnnotation(0, QRectF(250.0, 600.0, 100.0, 100.0), 0xFF0000FF, 3.0)) {
+        // Add Circle annotation with custom 3.5 pt border
+        if (!viewer.addCircleAnnotation(0, QRectF(250.0, 600.0, 100.0, 100.0), 0xFF0000FF, 3.5)) {
             std::cerr << "[FAIL] 52 addCircleAnnotation returned false" << std::endl;
+            return 1;
+        }
+
+        const auto cmds = viewer.editLog().activeCommands();
+        if (cmds.size() != 2 ||
+            std::abs(cmds[0].after.borderWidth - 2.5) > 0.01 ||
+            std::abs(cmds[1].after.borderWidth - 3.5) > 0.01) {
+            std::cerr << "[FAIL] 52 EditLog did not record specified borderWidth" << std::endl;
             return 1;
         }
 
