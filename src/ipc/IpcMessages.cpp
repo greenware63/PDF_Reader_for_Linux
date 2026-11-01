@@ -339,6 +339,20 @@ QDataStream& operator>>(QDataStream& in, SearchMatch& match) {
 }
 
 
+// AnnotationPoint
+QDataStream& operator<<(QDataStream& out, const AnnotationPoint& p) {
+    out << p.x << p.y;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, AnnotationPoint& p) {
+    in >> p.x >> p.y;
+    if (!p.isValid()) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
 // AnnotationQuad
 QDataStream& operator<<(QDataStream& out, const AnnotationQuad& q) {
     out << q.x1 << q.y1 << q.x2 << q.y2 << q.x3 << q.y3 << q.x4 << q.y4;
@@ -369,6 +383,13 @@ QDataStream& operator<<(QDataStream& out, const AnnotationItem& item) {
     }
     out << item.uri;
     out << item.borderWidth;
+    out << static_cast<quint32>(item.inkStrokes.size());
+    for (const auto& stroke : item.inkStrokes) {
+        out << static_cast<quint32>(stroke.size());
+        for (const auto& pt : stroke) {
+            out << pt;
+        }
+    }
     return out;
 }
 
@@ -426,6 +447,37 @@ QDataStream& operator>>(QDataStream& in, AnnotationItem& item) {
     in >> item.borderWidth;
     if (std::isnan(item.borderWidth) || std::isinf(item.borderWidth) || item.borderWidth < 0.0 || item.borderWidth > 100.0) {
         item.borderWidth = 0.0;
+    }
+
+    quint32 strokeCount = 0;
+    in >> strokeCount;
+    if (strokeCount > kMaxInkStrokes || !validateCollection(in, strokeCount, kMaxInkStrokes, 4)) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    item.inkStrokes.clear();
+    item.inkStrokes.reserve(strokeCount);
+    uint64_t totalPoints = 0;
+    for (quint32 s = 0; s < strokeCount; ++s) {
+        quint32 ptCount = 0;
+        in >> ptCount;
+        totalPoints += ptCount;
+        if (totalPoints > kMaxInkPoints || !validateCollection(in, ptCount, kMaxInkPoints, 16)) {
+            in.setStatus(QDataStream::ReadCorruptData);
+            return in;
+        }
+        std::vector<AnnotationPoint> stroke;
+        stroke.reserve(ptCount);
+        for (quint32 p = 0; p < ptCount; ++p) {
+            AnnotationPoint pt;
+            in >> pt;
+            if (!pt.isValid() || std::fabs(pt.x) > 1.0e6 || std::fabs(pt.y) > 1.0e6) {
+                in.setStatus(QDataStream::ReadCorruptData);
+                return in;
+            }
+            stroke.push_back(pt);
+        }
+        item.inkStrokes.push_back(std::move(stroke));
     }
     return in;
 }

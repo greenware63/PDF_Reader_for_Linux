@@ -1599,6 +1599,23 @@ void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
         const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(event->position().x() * dpr));
         const int64_t docY = m_docScrollY + static_cast<int64_t>(std::round(event->position().y() * dpr));
 
+        if (m_inkDrawingMode) {
+            int page = m_layout.getPageAt(docX, docY);
+            if (page >= 0) {
+                double ax = 0.0, ay = 0.0;
+                if (m_layout.documentToPagePoints(page, docX, docY, ax, ay)) {
+                    const auto& pl = m_layout.getPageLayout(page);
+                    m_isDrawingInk = true;
+                    m_inkCurrentPage = page;
+                    m_currentInkStroke.clear();
+                    m_currentInkStroke.push_back({ax, pl.heightPoints - ay});
+                    viewport()->update();
+                    event->accept();
+                    return;
+                }
+            }
+        }
+
         if (m_redactionMode) {
             int page = m_layout.getPageAt(docX, docY);
             if (page >= 0) {
@@ -1637,6 +1654,30 @@ void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
+    if (m_isDrawingInk && isDocumentOpen() && m_inkCurrentPage >= 0) {
+        const double dpr = effectiveDpr();
+        const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(event->position().x() * dpr));
+        const int64_t docY = m_docScrollY + static_cast<int64_t>(std::round(event->position().y() * dpr));
+        double ax = 0.0, ay = 0.0;
+        if (m_layout.documentToPagePoints(m_inkCurrentPage, docX, docY, ax, ay)) {
+            const auto& pl = m_layout.getPageLayout(m_inkCurrentPage);
+            const double userX = ax;
+            const double userY = pl.heightPoints - ay;
+            if (m_currentInkStroke.empty()) {
+                m_currentInkStroke.push_back({userX, userY});
+            } else {
+                const auto& last = m_currentInkStroke.back();
+                const double dx = userX - last.x;
+                const double dy = userY - last.y;
+                if ((dx * dx + dy * dy >= 1.0) && m_currentInkStroke.size() < pdf::kMaxInkPoints) {
+                    m_currentInkStroke.push_back({userX, userY});
+                    viewport()->update();
+                }
+            }
+        }
+        event->accept();
+        return;
+    }
     if (m_isRedacting && isDocumentOpen()) {
         const double dpr = effectiveDpr();
         const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(event->position().x() * dpr));
@@ -1740,6 +1781,20 @@ void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void PdfViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton && m_isDrawingInk) {
+        m_isDrawingInk = false;
+        if (m_inkCurrentPage >= 0 && !m_currentInkStroke.empty()) {
+            if (m_currentInkStroke.size() == 1) {
+                m_currentInkStroke.push_back({m_currentInkStroke[0].x + 0.1, m_currentInkStroke[0].y});
+            }
+            addInkAnnotation(m_inkCurrentPage, {m_currentInkStroke}, m_inkColorArgb, m_inkBorderWidth);
+            m_currentInkStroke.clear();
+        }
+        m_inkCurrentPage = -1;
+        viewport()->update();
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::LeftButton && m_isRedacting) {
         m_isRedacting = false;
         const int page = m_redactStartPage;
@@ -2146,6 +2201,11 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
         drawRedactionOverlays(painter, visPages, scrollDocX, scrollDocY, effScale);
     }
 
+    // 8. Draw active ink drawing stroke
+    if (m_isDrawingInk && m_inkCurrentPage >= 0 && m_currentInkStroke.size() >= 2) {
+        drawActiveInkStroke(painter, scrollDocX, scrollDocY);
+    }
+
     painter.restore();
 
     drawLoadingOverlay(painter);
@@ -2157,11 +2217,63 @@ void PdfViewerWidget::setRedactionMode(bool enabled) {
     }
     m_redactionMode = enabled;
     if (m_redactionMode) {
+        if (m_inkDrawingMode) {
+            setInkDrawingMode(false);
+        }
         clearSelection();
     }
     viewport()->setCursor(m_redactionMode ? Qt::CrossCursor : Qt::IBeamCursor);
     viewport()->update();
     Q_EMIT redactionModeChanged(m_redactionMode);
+}
+
+void PdfViewerWidget::setInkDrawingMode(bool enabled) {
+    if (m_inkDrawingMode == enabled) {
+        return;
+    }
+    m_inkDrawingMode = enabled;
+    if (m_inkDrawingMode) {
+        if (m_redactionMode) {
+            setRedactionMode(false);
+        }
+        clearSelection();
+    } else {
+        if (m_isDrawingInk) {
+            m_isDrawingInk = false;
+            m_currentInkStroke.clear();
+            m_inkCurrentPage = -1;
+        }
+    }
+    viewport()->setCursor(m_inkDrawingMode ? Qt::CrossCursor : Qt::IBeamCursor);
+    viewport()->update();
+    Q_EMIT inkDrawingModeChanged(m_inkDrawingMode);
+}
+
+void PdfViewerWidget::drawActiveInkStroke(QPainter& painter, int64_t scrollDocX, int64_t scrollDocY) {
+    if (m_inkCurrentPage < 0 || m_inkCurrentPage >= m_pageCount || m_currentInkStroke.size() < 2) {
+        return;
+    }
+    const auto& pl = m_layout.getPageLayout(m_inkCurrentPage);
+    QPolygonF poly;
+    poly.reserve(static_cast<qsizetype>(m_currentInkStroke.size()));
+    for (const auto& pt : m_currentInkStroke) {
+        const double pageX = pt.x;
+        const double pageY = pl.heightPoints - pt.y;
+        int64_t docX = 0, docY = 0;
+        if (m_layout.pagePointsToDocument(m_inkCurrentPage, pageX, pageY, docX, docY)) {
+            poly.append(QPointF(static_cast<qreal>(docX - scrollDocX), static_cast<qreal>(docY - scrollDocY)));
+        }
+    }
+    if (poly.size() >= 2) {
+        const double ptsToDevPixels = (pl.widthPoints > 0.0) ? (static_cast<double>(pl.widthPixel) / pl.widthPoints) : 1.0;
+        const double effBw = std::max(1.0, m_inkBorderWidth * ptsToDevPixels);
+        QPen pen(QColor::fromRgba(static_cast<QRgb>(m_inkColorArgb)), static_cast<qreal>(effBw), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        painter.save();
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPolyline(poly);
+        painter.restore();
+    }
 }
 
 void PdfViewerWidget::clearStagedRedactions() {
@@ -2557,6 +2669,41 @@ bool PdfViewerWidget::addCircleAnnotation(int pageIndex, const QRectF& pagePoint
     return true;
 }
 
+bool PdfViewerWidget::addInkAnnotation(int pageIndex, const std::vector<std::vector<pdf::AnnotationPoint>>& strokes, uint32_t colorArgb, double borderWidth) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (pageIndex < 0 || pageIndex >= m_pageCount || strokes.empty()) {
+        return false;
+    }
+    const double bw = (borderWidth > 0.0 && borderWidth <= 100.0) ? borderWidth : 2.0;
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    if (colorArgb == 0) {
+        colorArgb = 0xFF000000; // Black default for ink
+    }
+
+    pdf::AnnotationItem item;
+    item.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    item.subtype = pdf::AnnotationSubtype::Ink;
+    item.pageIndex = pageIndex;
+    item.inkStrokes = strokes;
+    item.borderWidth = bw;
+    item.colorArgb = colorArgb;
+    item.hasColor = true;
+    item.flags = 4; // FPDF_ANNOT_FLAG_PRINT
+
+    const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, item);
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not add ink annotation: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordAddAnnotation(pageIndex, item);
+    refreshAfterEdit();
+    return true;
+}
+
 bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item) {
     if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
@@ -2716,6 +2863,14 @@ void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
             });
             menu.addAction(tr("Add &Circle Here"), this, [this, clickPage, userX, userY]() {
                 addCircleAnnotation(clickPage, QRectF(userX, userY - 60.0, 100.0, 60.0));
+            });
+            menu.addAction(tr("Draw &Ink Here"), this, [this, clickPage, userX, userY]() {
+                std::vector<pdf::AnnotationPoint> stroke = {
+                    {userX - 15.0, userY},
+                    {userX - 5.0, userY - 10.0},
+                    {userX + 15.0, userY + 15.0}
+                };
+                addInkAnnotation(clickPage, {stroke}, m_inkColorArgb, m_inkBorderWidth);
             });
         }
     }

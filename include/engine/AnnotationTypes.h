@@ -41,6 +41,18 @@ enum class AnnotationSubtype : uint32_t {
     Redact = 28
 };
 
+struct AnnotationPoint {
+    double x{0.0};
+    double y{0.0};
+
+    bool isValid() const noexcept {
+        return !std::isnan(x) && !std::isnan(y) && !std::isinf(x) && !std::isinf(y);
+    }
+};
+
+constexpr size_t kMaxInkStrokes = 256;
+constexpr size_t kMaxInkPoints = 100000;
+
 // Represents 4 vertices (8 coordinates) for text markup or link attachment points in PDF points:
 // (x1, y1) top-left, (x2, y2) top-right, (x3, y3) bottom-left, (x4, y4) bottom-right
 struct AnnotationQuad {
@@ -141,6 +153,7 @@ struct AnnotationItem {
     std::vector<AnnotationQuad> quadPoints; // For text markup or link attachment points (max 4096)
     QString uri;                            // For Link subtype (action URI)
     double borderWidth{0.0};                // Border / stroke width in PDF points (0.0 = subtype default)
+    std::vector<std::vector<AnnotationPoint>> inkStrokes; // For Ink subtype (max 256 strokes, max 100,000 points total)
 
     bool isValid() const noexcept {
         return !std::isnan(left) && !std::isnan(top) &&
@@ -159,7 +172,9 @@ struct AnnotationItem {
         const double minY = std::min(bottom, top);
         const double maxY = std::max(bottom, top);
 
-        if (x < minX || x > maxX || y < minY || y > maxY) {
+        // For Ink annotations, allow a tolerance margin around the bounding box
+        const double hitMargin = (subtype == AnnotationSubtype::Ink) ? std::max(5.0, borderWidth / 2.0) : 0.0;
+        if (x < minX - hitMargin || x > maxX + hitMargin || y < minY - hitMargin || y > maxY + hitMargin) {
             return false;
         }
 
@@ -172,6 +187,39 @@ struct AnnotationItem {
             }
             return false;
         }
+
+        // If ink strokes are defined, hit-test proximity to any line segment
+        if (subtype == AnnotationSubtype::Ink && !inkStrokes.empty()) {
+            const double thresholdSq = hitMargin * hitMargin;
+            for (const auto& stroke : inkStrokes) {
+                if (stroke.empty()) continue;
+                if (stroke.size() == 1) {
+                    const double dx = x - stroke[0].x;
+                    const double dy = y - stroke[0].y;
+                    if (dx * dx + dy * dy <= thresholdSq) return true;
+                    continue;
+                }
+                for (size_t i = 0; i + 1 < stroke.size(); ++i) {
+                    const double x1 = stroke[i].x, y1 = stroke[i].y;
+                    const double x2 = stroke[i + 1].x, y2 = stroke[i + 1].y;
+                    const double dx = x2 - x1;
+                    const double dy = y2 - y1;
+                    const double l2 = dx * dx + dy * dy;
+                    double t = 0.0;
+                    if (l2 > 1e-9) {
+                        t = std::clamp(((x - x1) * dx + (y - y1) * dy) / l2, 0.0, 1.0);
+                    }
+                    const double projX = x1 + t * dx;
+                    const double projY = y1 + t * dy;
+                    const double distSq = (x - projX) * (x - projX) + (y - projY) * (y - projY);
+                    if (distSq <= thresholdSq) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
         return true;
     }
 };
@@ -188,8 +236,16 @@ inline uint64_t annotationBudgetCost(const AnnotationItem& a) noexcept {
     const uint64_t chars = static_cast<uint64_t>(a.contents.size()) + static_cast<uint64_t>(a.author.size()) +
                            static_cast<uint64_t>(a.name.size()) + static_cast<uint64_t>(a.modificationDate.size()) +
                            static_cast<uint64_t>(a.uri.size());
-    return 192ull + 2ull * chars + 64ull * static_cast<uint64_t>(a.quadPoints.size());
+    uint64_t inkPointCount = 0;
+    for (const auto& s : a.inkStrokes) {
+        inkPointCount += static_cast<uint64_t>(s.size());
+    }
+    return 192ull + 2ull * chars + 64ull * static_cast<uint64_t>(a.quadPoints.size()) +
+           16ull * inkPointCount + 32ull * static_cast<uint64_t>(a.inkStrokes.size());
 }
+
+QDataStream& operator<<(QDataStream& out, const AnnotationPoint& p);
+QDataStream& operator>>(QDataStream& in, AnnotationPoint& p);
 
 QDataStream& operator<<(QDataStream& out, const AnnotationQuad& q);
 QDataStream& operator>>(QDataStream& in, AnnotationQuad& q);

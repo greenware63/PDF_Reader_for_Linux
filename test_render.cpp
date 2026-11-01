@@ -3418,8 +3418,244 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: hostile rectangles rejected, normal rectangle accepted." << std::endl;
     }
 
+    // --- Test 37: Ink Annotations (/Ink) add, list, hit-test, save, reload and hostile bounds ---
+    std::cout << "Test 37: Ink Annotations (/Ink) normal lifecycle and hostile bounds..." << std::endl;
+    {
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 37: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 37: getPage(0) failed" << std::endl;
+            return 1;
+        }
+
+        // 1. Hostile bounds verification
+        {
+            // A. Non-finite points (NaN)
+            pdf::AnnotationItem badNan;
+            badNan.subtype = pdf::AnnotationSubtype::Ink;
+            badNan.pageIndex = 0;
+            badNan.name = QStringLiteral("bad-nan");
+            badNan.inkStrokes = {{{100.0, 100.0}, {std::numeric_limits<double>::quiet_NaN(), 150.0}}};
+            if (page->addInkAnnotation(badNan, 2.0)) {
+                std::cerr << "[FAIL] Test 37: Accepted stroke with NaN coordinate" << std::endl;
+                return 1;
+            }
+
+            // B. Non-finite points (Inf)
+            pdf::AnnotationItem badInf;
+            badInf.subtype = pdf::AnnotationSubtype::Ink;
+            badInf.pageIndex = 0;
+            badInf.name = QStringLiteral("bad-inf");
+            badInf.inkStrokes = {{{100.0, 100.0}, {std::numeric_limits<double>::infinity(), 150.0}}};
+            if (page->addInkAnnotation(badInf, 2.0)) {
+                std::cerr << "[FAIL] Test 37: Accepted stroke with Inf coordinate" << std::endl;
+                return 1;
+            }
+
+            // C. Extreme coordinates (> 1e6)
+            pdf::AnnotationItem badExt;
+            badExt.subtype = pdf::AnnotationSubtype::Ink;
+            badExt.pageIndex = 0;
+            badExt.name = QStringLiteral("bad-ext");
+            badExt.inkStrokes = {{{100.0, 100.0}, {1.5e6, 150.0}}};
+            if (page->addInkAnnotation(badExt, 2.0)) {
+                std::cerr << "[FAIL] Test 37: Accepted stroke with coordinate > 1e6" << std::endl;
+                return 1;
+            }
+
+            // D. Empty stroke inside inkStrokes
+            pdf::AnnotationItem badEmptyStroke;
+            badEmptyStroke.subtype = pdf::AnnotationSubtype::Ink;
+            badEmptyStroke.pageIndex = 0;
+            badEmptyStroke.name = QStringLiteral("bad-empty-stroke");
+            badEmptyStroke.inkStrokes = {{{100.0, 100.0}}, {}};
+            if (page->addInkAnnotation(badEmptyStroke, 2.0)) {
+                std::cerr << "[FAIL] Test 37: Accepted empty stroke in stroke list" << std::endl;
+                return 1;
+            }
+
+            // E. Over 256 strokes (> kMaxInkStrokes)
+            pdf::AnnotationItem badTooManyStrokes;
+            badTooManyStrokes.subtype = pdf::AnnotationSubtype::Ink;
+            badTooManyStrokes.pageIndex = 0;
+            badTooManyStrokes.name = QStringLiteral("bad-strokes-count");
+            badTooManyStrokes.inkStrokes.resize(pdf::kMaxInkStrokes + 1);
+            for (size_t s = 0; s < badTooManyStrokes.inkStrokes.size(); ++s) {
+                badTooManyStrokes.inkStrokes[s] = {{100.0 + static_cast<double>(s), 100.0}};
+            }
+            if (page->addInkAnnotation(badTooManyStrokes, 2.0)) {
+                std::cerr << "[FAIL] Test 37: Accepted > 256 strokes" << std::endl;
+                return 1;
+            }
+
+            // F. Over 100,000 points total (> kMaxInkPoints)
+            pdf::AnnotationItem badTooManyPts;
+            badTooManyPts.subtype = pdf::AnnotationSubtype::Ink;
+            badTooManyPts.pageIndex = 0;
+            badTooManyPts.name = QStringLiteral("bad-pts-count");
+            badTooManyPts.inkStrokes.push_back(std::vector<pdf::AnnotationPoint>(pdf::kMaxInkPoints + 1, {100.0, 100.0}));
+            if (page->addInkAnnotation(badTooManyPts, 2.0)) {
+                std::cerr << "[FAIL] Test 37: Accepted > 100,000 points" << std::endl;
+                return 1;
+            }
+
+            // G. Empty inkStrokes list
+            pdf::AnnotationItem badNoStrokes;
+            badNoStrokes.subtype = pdf::AnnotationSubtype::Ink;
+            badNoStrokes.pageIndex = 0;
+            badNoStrokes.name = QStringLiteral("bad-no-strokes");
+            if (page->addInkAnnotation(badNoStrokes, 2.0)) {
+                std::cerr << "[FAIL] Test 37: Accepted empty inkStrokes" << std::endl;
+                return 1;
+            }
+
+            // Verify none of the hostile attempts created an annotation
+            if (!page->listAnnotations().empty()) {
+                std::cerr << "[FAIL] Test 37: Rejected hostile input left orphan annotations behind!" << std::endl;
+                return 1;
+            }
+        }
+
+        // 2. Normal Ink lifecycle
+        pdf::AnnotationItem ink;
+        ink.subtype = pdf::AnnotationSubtype::Ink;
+        ink.pageIndex = 0;
+        ink.colorArgb = 0xFFFF00FF; // Magenta
+        ink.hasColor = true;
+        ink.flags = 4;
+        ink.borderWidth = 3.0;
+        ink.name = QStringLiteral("ink-test-37");
+        ink.contents = QStringLiteral("Handwritten signature note");
+        ink.author = QStringLiteral("InkTester");
+
+        // Stroke 1: triangle-ish path (100, 100) -> (120, 150) -> (140, 100)
+        // Stroke 2: straight segment (200, 200) -> (250, 250)
+        ink.inkStrokes = {
+            {{100.0, 100.0}, {120.0, 150.0}, {140.0, 100.0}},
+            {{200.0, 200.0}, {250.0, 250.0}}
+        };
+
+        if (!page->addInkAnnotation(ink, 3.0)) {
+            std::cerr << "[FAIL] Test 37: addInkAnnotation failed for valid multi-stroke ink" << std::endl;
+            return 1;
+        }
+
+        // Verify listed
+        auto annots = page->listAnnotations();
+        if (annots.size() != 1) {
+            std::cerr << "[FAIL] Test 37: Expected 1 annotation, got " << annots.size() << std::endl;
+            return 1;
+        }
+        const auto& listed = annots[0];
+        if (listed.subtype != pdf::AnnotationSubtype::Ink || listed.name != "ink-test-37") {
+            std::cerr << "[FAIL] Test 37: Listed annotation subtype or name mismatch" << std::endl;
+            return 1;
+        }
+        if (std::abs(listed.borderWidth - 3.0) > 0.01) {
+            std::cerr << "[FAIL] Test 37: Listed borderWidth mismatch: expected 3.0, got " << listed.borderWidth << std::endl;
+            return 1;
+        }
+        if (listed.inkStrokes.size() != 2) {
+            std::cerr << "[FAIL] Test 37: Listed inkStrokes count mismatch: expected 2, got " << listed.inkStrokes.size() << std::endl;
+            return 1;
+        }
+        if (listed.inkStrokes[0].size() != 3 || listed.inkStrokes[1].size() != 2) {
+            std::cerr << "[FAIL] Test 37: Listed stroke points count mismatch" << std::endl;
+            return 1;
+        }
+        if (std::abs(listed.inkStrokes[0][1].x - 120.0) > 0.01 || std::abs(listed.inkStrokes[0][1].y - 150.0) > 0.01) {
+            std::cerr << "[FAIL] Test 37: Listed stroke point coordinate mismatch" << std::endl;
+            return 1;
+        }
+
+        // Proximity Hit Testing:
+        // Hit margin is max(5.0, 3.0/2.0) = 5.0 pt
+        pdf::AnnotationItem hit;
+        // On stroke 1 vertex (120, 150)
+        if (!page->hitTestAnnotation(120.0, 150.0, hit) || hit.name != "ink-test-37") {
+            std::cerr << "[FAIL] Test 37: Proximity hit test on stroke vertex failed" << std::endl;
+            return 1;
+        }
+        // Near stroke 1 segment (110.0, 125.0) - mid of (100, 100) and (120, 150)
+        if (!page->hitTestAnnotation(110.0, 125.0, hit) || hit.name != "ink-test-37") {
+            std::cerr << "[FAIL] Test 37: Proximity hit test on stroke midpoint failed" << std::endl;
+            return 1;
+        }
+        // Slightly offset by 3pt from segment -> within 5pt margin -> HIT
+        if (!page->hitTestAnnotation(113.0, 125.0, hit) || hit.name != "ink-test-37") {
+            std::cerr << "[FAIL] Test 37: Proximity hit test within 3pt of stroke segment failed" << std::endl;
+            return 1;
+        }
+        // Offset by 20pt from segment -> MISS
+        if (page->hitTestAnnotation(135.0, 140.0, hit)) {
+            std::cerr << "[FAIL] Test 37: Hit test 20pt away from stroke unexpectedly hit" << std::endl;
+            return 1;
+        }
+        // Far away inside bounding box gap between strokes (170, 170) -> MISS
+        if (page->hitTestAnnotation(170.0, 170.0, hit)) {
+            std::cerr << "[FAIL] Test 37: Hit test in gap between strokes unexpectedly hit" << std::endl;
+            return 1;
+        }
+
+        // Incremental save and verify persistence
+        QTemporaryDir tempDir;
+        const std::string savedPath = tempDir.filePath("ink_saved.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (saveFd < 0) {
+            std::cerr << "[FAIL] Test 37: Failed to open saveFd" << std::endl;
+            return 1;
+        }
+        uint64_t written = 0;
+        if (!doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
+            std::cerr << "[FAIL] Test 37: saveAsCopy failed" << std::endl;
+            return 1;
+        }
+
+        // Reopen saved file in fresh document and check annotations
+        auto freshDoc = pdf::createDocument();
+        if (freshDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 37: Failed to reload saved ink PDF" << std::endl;
+            return 1;
+        }
+        auto freshPage = freshDoc->getPage(0);
+        if (!freshPage) {
+            std::cerr << "[FAIL] Test 37: Failed to get page 0 in fresh document" << std::endl;
+            return 1;
+        }
+        auto freshAnnots = freshPage->listAnnotations();
+        if (freshAnnots.size() != 1) {
+            std::cerr << "[FAIL] Test 37: Reopened annotations size mismatch: expected 1, got " << freshAnnots.size() << std::endl;
+            return 1;
+        }
+        if (freshAnnots[0].subtype != pdf::AnnotationSubtype::Ink || freshAnnots[0].inkStrokes.size() != 2) {
+            std::cerr << "[FAIL] Test 37: Reopened annotation content mismatch" << std::endl;
+            return 1;
+        }
+
+        // Verify removeAnnotationByName
+        int removedCount = page->removeAnnotationByName(QStringLiteral("ink-test-37"));
+        if (removedCount != 1) {
+            std::cerr << "[FAIL] Test 37: removeAnnotationByName returned " << removedCount << ", expected 1" << std::endl;
+            return 1;
+        }
+        if (!page->listAnnotations().empty()) {
+            std::cerr << "[FAIL] Test 37: Annotation still present after removal" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Ink annotations (/Ink) add, list, stroke proximity hit-test, save, reload, removal and hostile bounds verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 36 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 37 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

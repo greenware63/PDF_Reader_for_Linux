@@ -457,6 +457,11 @@ void MainWindow::connectViewer(PdfViewerWidget* viewer) {
             onRedactionModeChanged(enabled);
         }
     });
+    connect(viewer, &PdfViewerWidget::inkDrawingModeChanged, this, [this, viewer](bool enabled) {
+        if (viewer == currentViewer() && m_drawInkAction) {
+            m_drawInkAction->setChecked(enabled);
+        }
+    });
     connect(viewer, &PdfViewerWidget::redactionMarksChanged, this, [this, viewer]() {
         if (viewer == currentViewer()) {
             onRedactionMarksChanged();
@@ -561,6 +566,11 @@ void MainWindow::setupActions() {
     m_addCircleAction = editMenu->addAction(tr("Add &Circle"), this, &MainWindow::addCircle);
     m_addCircleAction->setObjectName(QStringLiteral("addCircleAction"));
     m_addCircleAction->setEnabled(false);
+
+    m_drawInkAction = editMenu->addAction(tr("Draw &Ink"), this, &MainWindow::toggleInkDrawing);
+    m_drawInkAction->setObjectName(QStringLiteral("drawInkAction"));
+    m_drawInkAction->setCheckable(true);
+    m_drawInkAction->setEnabled(false);
 
     editMenu->addSeparator();
     QAction* copyAction = editMenu->addAction(tr("&Copy"), this, [this]() {
@@ -1474,6 +1484,10 @@ void MainWindow::updateStickyNoteAction() {
     if (m_addCircleAction) {
         m_addCircleAction->setEnabled(open);
     }
+    if (m_drawInkAction) {
+        m_drawInkAction->setEnabled(open);
+        m_drawInkAction->setChecked(viewer && viewer->isInkDrawingMode());
+    }
 }
 
 void MainWindow::onDocumentOpenFailed(const QString& filePath, pdf::DocumentError error) {
@@ -1847,6 +1861,15 @@ void MainWindow::addCircle() {
     const double userX = 72.0;
     const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
     v->addCircleAnnotation(page, QRectF(userX, userY - 60.0, 100.0, 60.0));
+}
+
+void MainWindow::toggleInkDrawing() {
+    auto* v = currentViewer();
+    if (!v || !v->isDocumentOpen()) return;
+    v->toggleInkDrawingMode();
+    if (m_drawInkAction) {
+        m_drawInkAction->setChecked(v->isInkDrawingMode());
+    }
 }
 
 void MainWindow::undoEdit() {
