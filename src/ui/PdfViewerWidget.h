@@ -167,6 +167,8 @@ public:
     bool strikeOutSelection(uint32_t colorArgb = 0xFFFF0000);
     bool squigglySelection(uint32_t colorArgb = 0xFFFF0000);
     bool addTextAnnotation(int pageIndex, double userX, double userY, const QString& contents, uint32_t colorArgb = 0xFFFFD700);
+    bool addSquareAnnotation(int pageIndex, const QRectF& pagePointsRect, uint32_t colorArgb = 0xFFFF0000, double borderWidth = 2.0);
+    bool addCircleAnnotation(int pageIndex, const QRectF& pagePointsRect, uint32_t colorArgb = 0xFF0000FF, double borderWidth = 2.0);
     bool deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item);
     bool deleteAnnotationByName(int pageIndex, const QString& annotationName);
     bool modifyTextAnnotation(int pageIndex, const pdf::AnnotationItem& before, const QString& newContents);

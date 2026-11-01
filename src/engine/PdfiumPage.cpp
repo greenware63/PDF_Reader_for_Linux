@@ -862,6 +862,110 @@ bool PdfiumPage::addTextAnnotation(const AnnotationItem& item) {
     return true;
 }
 
+bool PdfiumPage::addGeometricAnnotation(const AnnotationItem& item, double borderWidth) {
+    if (!m_page || !item.isValid()) {
+        return false;
+    }
+
+    FPDF_ANNOTATION_SUBTYPE pdfiumSubtype = FPDF_ANNOT_UNKNOWN;
+    if (item.subtype == AnnotationSubtype::Square) {
+        pdfiumSubtype = FPDF_ANNOT_SQUARE;
+    } else if (item.subtype == AnnotationSubtype::Circle) {
+        pdfiumSubtype = FPDF_ANNOT_CIRCLE;
+    } else {
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    // 1. Create the annotation in PDFium
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, pdfiumSubtype);
+    if (!annot) {
+        return false;
+    }
+    const int annotIndex = FPDFPage_GetAnnotCount(m_page) - 1;
+    auto failGeometric = [&]() {
+        FPDFPage_CloseAnnot(annot);
+        FPDFPage_RemoveAnnot(m_page, annotIndex);
+        return false;
+    };
+
+    // 2. Set /Rect
+    FS_RECTF rect{};
+    rect.left = static_cast<float>(item.left);
+    rect.top = static_cast<float>(item.top);
+    rect.right = static_cast<float>(item.right);
+    rect.bottom = static_cast<float>(item.bottom);
+    if (!FPDFAnnot_SetRect(annot, &rect)) {
+        return failGeometric();
+    }
+
+    // 3. Set Stroke Color (/C)
+    uint32_t a = (item.colorArgb >> 24) & 0xFF;
+    uint32_t r = (item.colorArgb >> 16) & 0xFF;
+    uint32_t g = (item.colorArgb >> 8) & 0xFF;
+    uint32_t b = item.colorArgb & 0xFF;
+    if (a == 0 && item.colorArgb == 0) {
+        if (item.subtype == AnnotationSubtype::Square) {
+            r = 255; g = 0; b = 0; a = 255; // Default Red
+        } else {
+            r = 0; g = 0; b = 255; a = 255; // Default Blue
+        }
+    }
+    if (!FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, a)) {
+        return failGeometric();
+    }
+
+    // 4. Set Border (/BS)
+    float bw = 2.0f;
+    if (borderWidth > 0.0 && borderWidth <= 100.0) {
+        bw = static_cast<float>(borderWidth);
+    }
+    FPDFAnnot_SetBorder(annot, 0.0f, 0.0f, bw);
+
+    // 5. Set Flags (/F)
+    uint32_t flags = item.flags ? item.flags : FPDF_ANNOT_FLAG_PRINT;
+    if (!FPDFAnnot_SetFlags(annot, flags)) {
+        return failGeometric();
+    }
+
+    // 6. Set /NM (unique identifier string)
+    if (!item.name.isEmpty()) {
+        const std::u16string u16 = item.name.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failGeometric();
+        }
+    }
+
+    // 7. Set /Contents
+    if (!item.contents.isEmpty()) {
+        const std::u16string u16 = item.contents.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failGeometric();
+        }
+    }
+
+    // 8. Set /T (Author)
+    if (!item.author.isEmpty()) {
+        const std::u16string u16 = item.author.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failGeometric();
+        }
+    }
+
+    // 9. Generate appearance stream (/AP)
+    FPDF_BITMAP appearanceBitmap = FPDFBitmap_Create(1, 1, 0);
+    if (!appearanceBitmap) return failGeometric();
+    FPDF_RenderPageBitmap(appearanceBitmap, m_page, 0, 0, 1, 1, 0, FPDF_ANNOT);
+    FPDFBitmap_Destroy(appearanceBitmap);
+    if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
+        return failGeometric();
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
+}
+
 int PdfiumPage::removeAnnotationByName(const QString& name) {
     if (!m_page || name.isEmpty() || name.size() > 256) {
         return 0;

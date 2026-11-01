@@ -2479,6 +2479,82 @@ bool PdfViewerWidget::addTextAnnotation(int pageIndex, double userX, double user
     return true;
 }
 
+bool PdfViewerWidget::addSquareAnnotation(int pageIndex, const QRectF& pagePointsRect, uint32_t colorArgb, double borderWidth) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    const QRectF normalized = pagePointsRect.normalized();
+    if (pageIndex < 0 || pageIndex >= m_pageCount || normalized.isEmpty()) {
+        return false;
+    }
+    (void)borderWidth;
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    if (colorArgb == 0) {
+        colorArgb = 0xFFFF0000; // Red
+    }
+
+    pdf::AnnotationItem item;
+    item.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    item.subtype = pdf::AnnotationSubtype::Square;
+    item.pageIndex = pageIndex;
+    item.left = normalized.left();
+    item.bottom = normalized.top();
+    item.right = normalized.right();
+    item.top = normalized.bottom();
+    item.colorArgb = colorArgb;
+    item.hasColor = true;
+    item.flags = 4; // FPDF_ANNOT_FLAG_PRINT
+
+    const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, item);
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not add square annotation: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordAddAnnotation(pageIndex, item);
+    refreshAfterEdit();
+    return true;
+}
+
+bool PdfViewerWidget::addCircleAnnotation(int pageIndex, const QRectF& pagePointsRect, uint32_t colorArgb, double borderWidth) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    const QRectF normalized = pagePointsRect.normalized();
+    if (pageIndex < 0 || pageIndex >= m_pageCount || normalized.isEmpty()) {
+        return false;
+    }
+    (void)borderWidth;
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    if (colorArgb == 0) {
+        colorArgb = 0xFF0000FF; // Blue
+    }
+
+    pdf::AnnotationItem item;
+    item.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    item.subtype = pdf::AnnotationSubtype::Circle;
+    item.pageIndex = pageIndex;
+    item.left = normalized.left();
+    item.bottom = normalized.top();
+    item.right = normalized.right();
+    item.top = normalized.bottom();
+    item.colorArgb = colorArgb;
+    item.hasColor = true;
+    item.flags = 4; // FPDF_ANNOT_FLAG_PRINT
+
+    const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, item);
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not add circle annotation: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordAddAnnotation(pageIndex, item);
+    refreshAfterEdit();
+    return true;
+}
+
 bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item) {
     if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
@@ -2632,6 +2708,12 @@ void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
                 if (ok && !text.trimmed().isEmpty()) {
                     addTextAnnotation(clickPage, userX, userY, text);
                 }
+            });
+            menu.addAction(tr("Add &Rectangle Here"), this, [this, clickPage, userX, userY]() {
+                addSquareAnnotation(clickPage, QRectF(userX, userY - 60.0, 100.0, 60.0));
+            });
+            menu.addAction(tr("Add &Circle Here"), this, [this, clickPage, userX, userY]() {
+                addCircleAnnotation(clickPage, QRectF(userX, userY - 60.0, 100.0, 60.0));
             });
         }
     }
