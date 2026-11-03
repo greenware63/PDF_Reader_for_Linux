@@ -5797,10 +5797,71 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+
         std::cout << "  -> Passed: FreeText annotations creation, undo/redo, and save verified." << std::endl;
     }
 
-    std::cout << " ALL 54 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+#ifdef PDF_WORKER_TEST_HOOKS
+    // --- Test 55: a tooltip hit test gives up quickly on a busy worker and is never stacked ---
+    // Hovering used to wait up to 5 s for the worker inside a nested event loop, once per tooltip event, so a
+    // worker that was busy (or hung) kept the viewer in repeated multi-second waits.
+    std::cout << "Test 55: Tooltip hit test is bounded and not stacked on a busy worker..." << std::endl;
+    {
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(samplePath));
+        QElapsedTimer opened;
+        opened.start();
+        while (opened.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 55 document did not finish opening" << std::endl;
+            return 1;
+        }
+        const QPoint pos = viewer.viewport()->rect().center();
+        const QPoint globalPos = viewer.viewport()->mapToGlobal(pos);
+
+        // Park the engine thread: every later request queues behind it and is never answered.
+        viewer.renderWorker().hangEngineForTesting();
+        QElapsedTimer settle;
+        settle.start();
+        while (settle.elapsed() < 500) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+
+        qint64 innerMs = -1;
+        QTimer::singleShot(100, &viewer, [&]() {
+            QHelpEvent second(QEvent::ToolTip, pos, globalPos);
+            QElapsedTimer inner;
+            inner.start();
+            QApplication::sendEvent(viewer.viewport(), &second);
+            innerMs = inner.elapsed();
+        });
+        QHelpEvent first(QEvent::ToolTip, pos, globalPos);
+        QElapsedTimer outer;
+        outer.start();
+        QApplication::sendEvent(viewer.viewport(), &first);
+        const qint64 outerMs = outer.elapsed();
+        viewer.renderWorker().stop();
+
+        if (outerMs > 2000) {
+            std::cerr << "[FAIL] 55a tooltip waited " << outerMs << " ms on a busy worker (limit 2000)" << std::endl;
+            return 1;
+        }
+        if (innerMs < 0 || innerMs > 150) {
+            std::cerr << "[FAIL] 55b a tooltip event arriving during a pending one waited " << innerMs
+                      << " ms instead of returning at once" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: tooltip gave up after " << outerMs << " ms and a second hover did not stack." << std::endl;
+    }
+#endif
+
+    std::cout << " ALL 55 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

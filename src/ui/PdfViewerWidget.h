@@ -418,6 +418,7 @@ private:
     pdf::EditLog m_editLog;
     bool m_saveInProgress{false};
     bool m_editInProgress{false};
+    bool m_hoverHitTestPending{false};   // a tooltip hit test is waiting for the worker; further ones are skipped
 
     void refreshAfterEdit();
     void recoverAfterWorkerFailure();

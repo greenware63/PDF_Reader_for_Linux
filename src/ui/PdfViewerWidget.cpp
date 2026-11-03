@@ -2764,6 +2764,17 @@ bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem&
     return true;
 }
 
+namespace {
+// The annotation requests below wait for the worker inside a nested event loop. How long they may wait depends on
+// who is waiting: a tooltip is only a convenience and must give up quickly (a busy worker, for example one rendering
+// tiles, would otherwise leave a tooltip pending for seconds), a context menu or a double click is an explicit action,
+// and listing a page's annotations before a delete is allowed to take as long as a hostile, very large page needs
+// (parsing 24 ink annotations of 100,000 points took about 6 s cold, against the previous 10 s limit).
+constexpr int kHoverHitTestTimeoutMs = 400;
+constexpr int kExplicitHitTestTimeoutMs = 2000;
+constexpr int kAnnotationListTimeoutMs = 30000;
+} // namespace
+
 QString PdfViewerWidget::annotationTooltipHtml(const QString& author, const QString& contents) {
     constexpr qsizetype kMaxTipChars = 1000;
     auto prep = [](QString s) {
@@ -2800,7 +2811,7 @@ bool PdfViewerWidget::deleteAnnotationByName(int pageIndex, const QString& annot
         }
     }
     if (!found) {
-        const auto list = m_renderWorker.listAnnotationsSync(m_currentDocumentId, pageIndex);
+        const auto list = m_renderWorker.listAnnotationsSync(m_currentDocumentId, pageIndex, kAnnotationListTimeoutMs);
         if (!list.success || list.truncated) {
             Q_EMIT loadError(tr("Could not delete annotation because its complete details could not be loaded."));
             return false;
@@ -2881,7 +2892,7 @@ void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
             const double userX = ax;
             const double userY = pl.heightPoints - ay;
 
-            auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY);
+            auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY, kExplicitHitTestTimeoutMs);
             if (hit.hit && !hit.annotation.name.isEmpty()) {
                 const auto hitItem = hit.annotation;
                 menu.addAction(tr("&Delete Annotation"), this, [this, clickPage, hitItem]() {
@@ -2936,7 +2947,7 @@ void PdfViewerWidget::mouseDoubleClickEvent(QMouseEvent* event) {
                 const double userX = ax;
                 const double userY = pl.heightPoints - ay;
 
-                auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY);
+                auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY, kExplicitHitTestTimeoutMs);
                 if (hit.hit && hit.annotation.subtype == pdf::AnnotationSubtype::Text) {
                     bool ok = false;
                     const QString title = hit.annotation.author.isEmpty() ? tr("Sticky Note") : tr("Sticky Note - %1").arg(hit.annotation.author);
@@ -2967,7 +2978,13 @@ bool PdfViewerWidget::viewportEvent(QEvent* event) {
                 const auto& pl = m_layout.getPageLayout(page);
                 const double userX = ax;
                 const double userY = pl.heightPoints - ay;
-                auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, page, userX, userY);
+                // Tooltips repeat while the pointer rests; do not stack a second wait on top of one still pending.
+                if (m_hoverHitTestPending) {
+                    event->ignore();
+                    return true;
+                }
+                QScopedValueRollback<bool> hoverGuard(m_hoverHitTestPending, true);
+                auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, page, userX, userY, kHoverHitTestTimeoutMs);
                 if (hit.hit && !hit.annotation.contents.isEmpty()) {
                     const QString tip = annotationTooltipHtml(hit.annotation.author, hit.annotation.contents);
                     QToolTip::showText(helpEvent->globalPos(), tip, viewport());
