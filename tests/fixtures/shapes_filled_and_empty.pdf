@@ -1,0 +1,70 @@
+%PDF-1.7
+1 0 obj
+<</Type/Catalog/Pages 2 0 R>>
+endobj
+2 0 obj
+<</Type/Pages/Kids[3 0 R]/Count 1>>
+endobj
+3 0 obj
+<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Annots[4 0 R 5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R]>>
+endobj
+4 0 obj
+<</Type/Annot/Subtype/Square/NM(filled-square)/F 4/Rect[100 600 200 700]/C[1 0 0]/BS<</W 2>>/IC[1 1 0]>>
+endobj
+5 0 obj
+<</Type/Annot/Subtype/Square/NM(empty-square)/F 4/Rect[300 600 400 700]/C[1 0 0]/BS<</W 2>>>>
+endobj
+6 0 obj
+<</Type/Annot/Subtype/Circle/NM(filled-circle)/F 4/Rect[100 400 200 500]/C[1 0 0]/BS<</W 2>>/IC[0 1 0]>>
+endobj
+7 0 obj
+<</Type/Annot/Subtype/Circle/NM(empty-circle)/F 4/Rect[300 400 400 500]/C[1 0 0]/BS<</W 2>>>>
+endobj
+8 0 obj
+<</Type/Annot/Subtype/Square/NM(clear-fill-square)/F 4/Rect[100 200 200 300]/C[1 0 0]/BS<</W 2>>/IC[1 1 0]/CA 0>>
+endobj
+9 0 obj
+<</Type/Annot/Subtype/Square/NM(black-fill-square)/F 4/Rect[300 200 400 300]/C[1 0 0]/BS<</W 2>>/IC[0 0 0]>>
+endobj
+10 0 obj
+<</Type/Annot/Subtype/Square/NM(empty-ic-square)/F 4/Rect[450 200 550 300]/C[1 0 0]/BS<</W 2>>/IC[]>>
+endobj
+11 0 obj
+<</Type/Annot/Subtype/Square/NM(ap-filled-square)/F 4/Rect[450 600 550 700]/C[1 0 0]/BS<</W 2>>/IC[1 1 0]/AP<</N 13 0 R>>>>
+endobj
+12 0 obj
+<</Type/Annot/Subtype/Square/NM(ap-outline-square)/F 4/Rect[450 400 550 500]/C[1 0 0]/BS<</W 2>>/AP<</N 14 0 R>>>>
+endobj
+13 0 obj
+<</Type/XObject/Subtype/Form/BBox[450 600 550 700]/Resources<<>>/Length 40>>
+stream
+1 1 0 rg 1 0 0 RG 2 w 451 601 98 98 re B
+endstream
+endobj
+14 0 obj
+<</Type/XObject/Subtype/Form/BBox[450 400 550 500]/Resources<<>>/Length 31>>
+stream
+1 0 0 RG 2 w 451 401 98 98 re S
+endstream
+endobj
+xref
+0 15
+0000000000 65535 f 
+0000000009 00000 n 
+0000000054 00000 n 
+0000000105 00000 n 
+0000000235 00000 n 
+0000000355 00000 n 
+0000000464 00000 n 
+0000000584 00000 n 
+0000000693 00000 n 
+0000000822 00000 n 
+0000000946 00000 n 
+0000001064 00000 n 
+0000001204 00000 n 
+0000001335 00000 n 
+0000001486 00000 n 
+trailer<</Size 15/Root 1 0 R>>
+startxref
+1628
+%%EOF

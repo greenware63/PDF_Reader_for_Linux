@@ -128,6 +128,10 @@ struct AnnotationQuad {
     }
 };
 
+/// Hit-test tolerances for Square/Circle outlines, in PDF points.
+constexpr double kShapeOutsideTolerance = 2.0;  // just outside the stroke still counts as on it
+constexpr double kShapeMinBand = 4.0;           // minimum sensitive width inside the stroke
+
 struct AnnotationItem {
     int pageIndex{0};
     int annotIndex{0};
@@ -154,6 +158,10 @@ struct AnnotationItem {
     QString uri;                            // For Link subtype (action URI)
     double borderWidth{0.0};                // Border / stroke width in PDF points (0.0 = subtype default)
     std::vector<std::vector<AnnotationPoint>> inkStrokes; // For Ink subtype (max 256 strokes, max 100,000 points total)
+    /// Square/Circle: the shape has an interior fill (/IC), so clicking inside it selects it. Unfilled shapes are
+    /// selected by their outline only. Set by the engine while listing and used by contains(); it is not part of the
+    /// wire format, so an item received over IPC always reads false.
+    bool interiorFilled{false};
 
     bool isValid() const noexcept {
         return !std::isnan(left) && !std::isnan(top) &&
@@ -173,9 +181,42 @@ struct AnnotationItem {
         const double maxY = std::max(bottom, top);
 
         // For Ink annotations, allow a tolerance margin around the bounding box
-        const double hitMargin = (subtype == AnnotationSubtype::Ink) ? std::max(5.0, borderWidth / 2.0) : 0.0;
+        const bool isShape = (subtype == AnnotationSubtype::Square || subtype == AnnotationSubtype::Circle);
+        const double hitMargin = (subtype == AnnotationSubtype::Ink) ? std::max(5.0, borderWidth / 2.0)
+                                 : isShape                            ? kShapeOutsideTolerance
+                                                                      : 0.0;
         if (x < minX - hitMargin || x > maxX + hitMargin || y < minY - hitMargin || y > maxY + hitMargin) {
             return false;
+        }
+
+        // Rectangles and ellipses: an unfilled one is selected by its outline, not by the empty space inside it,
+        // so a rectangle drawn around a note (or a highlight) does not hide what lies under it, and the Delete
+        // and tooltip hit test does not trigger from the middle of a circle.
+        if (isShape) {
+            // The stroke is drawn inside /Rect, so the sensitive band reaches inwards from the edge.
+            const double inward = std::max(kShapeMinBand, borderWidth + 2.0);
+            if (subtype == AnnotationSubtype::Square) {
+                if (interiorFilled) {
+                    return true;
+                }
+                const bool insideInner = x > minX + inward && x < maxX - inward && y > minY + inward && y < maxY - inward;
+                return !insideInner;
+            }
+            // Circle / ellipse inscribed in /Rect: compare the distance from the centre with the radius of the
+            // ellipse along the same direction.
+            const double a = (maxX - minX) / 2.0;
+            const double b = (maxY - minY) / 2.0;
+            const double dx = x - (minX + a);
+            const double dy = y - (minY + b);
+            const double dist = std::hypot(dx, dy);
+            double radius = std::min(a, b);
+            if (dist > 1e-9 && a > 1e-9 && b > 1e-9) {
+                radius = 1.0 / std::hypot(dx / dist / a, dy / dist / b);
+            }
+            if (dist > radius + kShapeOutsideTolerance) {
+                return false;
+            }
+            return interiorFilled || dist >= radius - inward;
         }
 
         // If specific quad points are defined (e.g. text markup across lines), hit-test quads

@@ -3,6 +3,7 @@
 #include "layout/DocumentLayout.h"
 #include <fpdf_text.h>
 #include <fpdf_annot.h>
+#include <fpdf_edit.h>
 #include <fpdf_doc.h>
 #include <vector>
 #include <algorithm>
@@ -26,6 +27,39 @@ static constexpr int64_t MAX_WHOLE_PAGE_PIXELS = 16 * 1024 * 1024; // 16 MP max 
 // Safety bounds on individual tile requests
 static constexpr int MAX_TILE_DIM = 4096;
 static constexpr int64_t MAX_TILE_PIXELS = 16 * 1024 * 1024;
+
+// Caller holds the PDFium mutex. Whether a Square/Circle paints its interior, i.e. whether a click inside it should
+// select it. PDFium builds an appearance stream for every shape that lacks one as soon as the page is loaded, and
+// from then on FPDFAnnot_GetColor refuses to report /IC (it only answers for annotations without an /AP), so the
+// appearance itself is inspected: any path object that is filled makes the shape filled. That also covers shapes
+// whose own appearance (made by another application) fills the inside.
+static bool shapePaintsInterior(FPDF_ANNOTATION annot) {
+    // /CA 0 makes the whole annotation invisible, so there is no visible fill to click on either.
+    float opacity = 1.0f;
+    if (FPDFAnnot_GetNumberValue(annot, "CA", &opacity) && opacity <= 0.0f) {
+        return false;
+    }
+
+    constexpr int kMaxObjectsInspected = 64;
+    const int objectCount = FPDFAnnot_GetObjectCount(annot);
+    for (int i = 0; i < objectCount && i < kMaxObjectsInspected; ++i) {
+        FPDF_PAGEOBJECT object = FPDFAnnot_GetObject(annot, i);
+        int fillMode = FPDF_FILLMODE_NONE;
+        FPDF_BOOL stroke = false;
+        if (object && FPDFPageObj_GetType(object) == FPDF_PAGEOBJ_PATH &&
+            FPDFPath_GetDrawMode(object, &fillMode, &stroke) && fillMode != FPDF_FILLMODE_NONE) {
+            return true;
+        }
+    }
+    if (objectCount > 0) {
+        return false;   // it has an appearance and that appearance draws no fill
+    }
+
+    // No appearance at all (the page was loaded without a form environment): /IC is still readable.
+    unsigned int r = 0, g = 0, b = 0, a = 0;
+    return FPDFAnnot_HasKey(annot, "IC") &&
+           FPDFAnnot_GetColor(annot, FPDFANNOT_COLORTYPE_InteriorColor, &r, &g, &b, &a) && a > 0;
+}
 
 PdfiumPage::PdfiumPage(DocumentHandle doc, int pageIndex, std::shared_ptr<FormEnv> form)
     : m_doc(std::move(doc)), m_form(std::move(form)), m_pageIndex(pageIndex) {
@@ -537,6 +571,10 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations(bool* truncated) {
                              (static_cast<uint32_t>(r) << 16) |
                              (static_cast<uint32_t>(g) << 8) |
                              (static_cast<uint32_t>(b));
+        }
+
+        if (item.subtype == AnnotationSubtype::Square || item.subtype == AnnotationSubtype::Circle) {
+            item.interiorFilled = shapePaintsInterior(annot);
         }
 
         float hRadius = 0.0f, vRadius = 0.0f, bWidth = 0.0f;

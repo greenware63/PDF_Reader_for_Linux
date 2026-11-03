@@ -2812,14 +2812,19 @@ int main(int argc, char* argv[]) {
         }
 
         // Hit testing
-        auto hitSq = client.hitTestAnnotationSync(31, 0, 150.0, 650.0);
+        // Unfilled shapes are selected by their outline, not by the empty space inside them.
+        auto hitSq = client.hitTestAnnotationSync(31, 0, 101.0, 650.0);
         if (!hitSq.hit || hitSq.annotation.subtype != pdf::AnnotationSubtype::Square || hitSq.annotation.name != "square-ipc-31") {
-            std::cerr << "[FAIL] 31: Hit test inside square rect failed" << std::endl;
+            std::cerr << "[FAIL] 31: Hit test on the square outline failed" << std::endl;
             return 1;
         }
-        auto hitCr = client.hitTestAnnotationSync(31, 0, 300.0, 650.0);
+        auto hitCr = client.hitTestAnnotationSync(31, 0, 349.0, 650.0);
         if (!hitCr.hit || hitCr.annotation.subtype != pdf::AnnotationSubtype::Circle || hitCr.annotation.name != "circle-ipc-31") {
-            std::cerr << "[FAIL] 31: Hit test inside circle rect failed" << std::endl;
+            std::cerr << "[FAIL] 31: Hit test on the circle outline failed" << std::endl;
+            return 1;
+        }
+        if (client.hitTestAnnotationSync(31, 0, 150.0, 650.0).hit || client.hitTestAnnotationSync(31, 0, 300.0, 650.0).hit) {
+            std::cerr << "[FAIL] 31: Hit test in the empty interior of a shape unexpectedly succeeded" << std::endl;
             return 1;
         }
 

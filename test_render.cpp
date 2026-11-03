@@ -32,6 +32,7 @@
 #include <mutex>
 #include "ipc/IpcMessages.h"
 #include <QCoreApplication>
+#include <map>
 #include <QString>
 
 // Generates a multi-page PDF fixture containing:
@@ -3303,12 +3304,17 @@ int main(int argc, char* argv[]) {
 
         // Hit testing
         pdf::AnnotationItem hit;
-        if (!page->hitTestAnnotation(150.0, 650.0, hit) || hit.subtype != pdf::AnnotationSubtype::Square || hit.name != "square-test-35") {
-            std::cerr << "[FAIL] Test 35: Hit test inside square rect failed" << std::endl;
+        // Unfilled shapes are selected by their outline (see Test 40), not by the empty space inside them.
+        if (!page->hitTestAnnotation(101.0, 650.0, hit) || hit.subtype != pdf::AnnotationSubtype::Square || hit.name != "square-test-35") {
+            std::cerr << "[FAIL] Test 35: Hit test on the square outline failed" << std::endl;
             return 1;
         }
-        if (!page->hitTestAnnotation(300.0, 650.0, hit) || hit.subtype != pdf::AnnotationSubtype::Circle || hit.name != "circle-test-35") {
-            std::cerr << "[FAIL] Test 35: Hit test inside circle rect failed" << std::endl;
+        if (!page->hitTestAnnotation(349.0, 650.0, hit) || hit.subtype != pdf::AnnotationSubtype::Circle || hit.name != "circle-test-35") {
+            std::cerr << "[FAIL] Test 35: Hit test on the circle outline failed" << std::endl;
+            return 1;
+        }
+        if (page->hitTestAnnotation(150.0, 650.0, hit) || page->hitTestAnnotation(300.0, 650.0, hit)) {
+            std::cerr << "[FAIL] Test 35: Hit test in the empty interior of a shape unexpectedly succeeded" << std::endl;
             return 1;
         }
         if (page->hitTestAnnotation(50.0, 50.0, hit)) {
@@ -3928,8 +3934,167 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: FreeText shows its text over a transparent background." << std::endl;
     }
 
+    // --- Test 40: Square/Circle are selected by their outline, not by their empty interior ---
+    std::cout << "Test 40: Square/Circle hit-testing follows the outline unless the shape is filled..." << std::endl;
+    {
+        // 40a: pure geometry on an unfilled rectangle 100..200 x 600..700 with a 2 pt stroke.
+        pdf::AnnotationItem sq;
+        sq.subtype = pdf::AnnotationSubtype::Square;
+        sq.left = 100; sq.bottom = 600; sq.right = 200; sq.top = 700;
+        sq.borderWidth = 2.0;
+        struct Probe { double x, y; bool hit; const char* what; };
+        const Probe sqProbes[] = {
+            {101, 650, true, "left edge"}, {199, 650, true, "right edge"}, {150, 601, true, "bottom edge"},
+            {150, 699, true, "top edge"}, {100, 600, true, "corner"}, {98.5, 650, true, "just outside the stroke"},
+            {150, 650, false, "centre of the empty rectangle"}, {120, 620, false, "inside, away from the stroke"},
+            {95, 650, false, "well outside"}, {150, 710, false, "above"},
+        };
+        for (const auto& p : sqProbes) {
+            if (sq.contains(p.x, p.y) != p.hit) {
+                std::cerr << "[FAIL] Test 40a Square " << p.what << " expected " << (p.hit ? "hit" : "miss") << std::endl;
+                return 1;
+            }
+        }
+        pdf::AnnotationItem sqFilled = sq;
+        sqFilled.interiorFilled = true;
+        if (!sqFilled.contains(150, 650) || sqFilled.contains(95, 650)) {
+            std::cerr << "[FAIL] Test 40a filled Square must hit inside and miss outside" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem tiny = sq;
+        tiny.left = 10; tiny.right = 16; tiny.bottom = 10; tiny.top = 16;   // narrower than the stroke band
+        if (!tiny.contains(13, 13)) {
+            std::cerr << "[FAIL] Test 40a a tiny Square must stay selectable" << std::endl;
+            return 1;
+        }
+
+        // 40b: circle inscribed in 250..350 x 600..700 (radius 50, centre 300,650) and an ellipse 200 x 100.
+        pdf::AnnotationItem ci;
+        ci.subtype = pdf::AnnotationSubtype::Circle;
+        ci.left = 250; ci.bottom = 600; ci.right = 350; ci.top = 700;
+        ci.borderWidth = 2.0;
+        const Probe ciProbes[] = {
+            {349, 650, true, "3 o'clock on the circle"}, {300, 699, true, "12 o'clock on the circle"},
+            {251, 650, true, "9 o'clock on the circle"}, {300, 601, true, "6 o'clock on the circle"},
+            {300, 650, false, "centre of the empty circle"}, {320, 650, false, "inside, away from the stroke"},
+            {251, 601, false, "corner of the bounding box (outside the circle)"}, {349, 699, false, "far corner"},
+        };
+        for (const auto& p : ciProbes) {
+            if (ci.contains(p.x, p.y) != p.hit) {
+                std::cerr << "[FAIL] Test 40b Circle " << p.what << " expected " << (p.hit ? "hit" : "miss") << std::endl;
+                return 1;
+            }
+        }
+        pdf::AnnotationItem ciFilled = ci;
+        ciFilled.interiorFilled = true;
+        if (!ciFilled.contains(300, 650) || ciFilled.contains(251, 601)) {
+            std::cerr << "[FAIL] Test 40b filled Circle must hit the middle but not the box corner" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem ell = ci;
+        ell.left = 100; ell.right = 300; ell.bottom = 200; ell.top = 300;   // 200 wide, 100 tall, centre 200,250
+        if (!ell.contains(299, 250) || !ell.contains(200, 299) || ell.contains(200, 250) || ell.contains(110, 210)) {
+            std::cerr << "[FAIL] Test 40b ellipse outline hit-test is wrong" << std::endl;
+            return 1;
+        }
+
+        // 40c: shapes read from a file: /IC decides whether the inside is clickable.
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        auto sdoc = pdf::createDocument();
+        if (sdoc->loadFromFile(root + "/tests/fixtures/shapes_filled_and_empty.pdf") != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 40c cannot open the shapes fixture" << std::endl;
+            return 1;
+        }
+        auto spage = sdoc->getPage(0);
+        if (!spage) {
+            std::cerr << "[FAIL] Test 40c getPage(0) failed" << std::endl;
+            return 1;
+        }
+        const auto listed = spage->listAnnotations();
+        std::map<std::string, bool> filledByName;
+        for (const auto& a : listed) {
+            filledByName[a.name.toStdString()] = a.interiorFilled;
+        }
+        const std::pair<const char*, bool> expectFilled[] = {
+            {"filled-square", true}, {"empty-square", false}, {"filled-circle", true},
+            {"empty-circle", false}, {"clear-fill-square", false}, {"black-fill-square", true},
+            {"empty-ic-square", false}, {"ap-filled-square", true}, {"ap-outline-square", false},
+        };
+        for (const auto& e : expectFilled) {
+            auto it = filledByName.find(e.first);
+            if (it == filledByName.end() || it->second != e.second) {
+                std::cerr << "[FAIL] Test 40c interiorFilled wrong for " << e.first << std::endl;
+                return 1;
+            }
+        }
+        struct Hit { double x, y; const char* expectName; const char* what; };   // expectName == nullptr: no annotation
+        const Hit hits[] = {
+            {150, 650, "filled-square", "inside the filled square"},
+            {350, 650, nullptr, "inside the empty square"},
+            {301, 650, "empty-square", "on the empty square's outline"},
+            {150, 450, "filled-circle", "middle of the filled circle"},
+            {350, 450, nullptr, "middle of the empty circle"},
+            {399, 450, "empty-circle", "on the empty circle's outline"},
+            {150, 250, nullptr, "inside the square with a clear fill"},
+            {350, 250, "black-fill-square", "inside the square filled with black"},
+            {500, 250, nullptr, "inside the square with an empty /IC"},
+            {500, 650, "ap-filled-square", "inside the square whose own appearance fills it"},
+            {500, 450, nullptr, "inside the square whose own appearance only strokes it"},
+            {451, 450, "ap-outline-square", "on the outline of the stroke-only square"},
+        };
+        for (const auto& h : hits) {
+            pdf::AnnotationItem got;
+            const bool hit = spage->hitTestAnnotation(h.x, h.y, got);
+            const bool ok = h.expectName ? (hit && got.name == QString::fromLatin1(h.expectName)) : !hit;
+            if (!ok) {
+                std::cerr << "[FAIL] Test 40c " << h.what << ": got " << (hit ? got.name.toStdString() : std::string("nothing"))
+                          << std::endl;
+                return 1;
+            }
+        }
+
+        // 40d: a rectangle drawn around a sticky note must not hide the note (the topmost hit used to win).
+        auto doc40 = pdf::createDocument();
+        if (doc40->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 40d loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page40 = doc40->getPage(0);
+        pdf::AnnotationItem note;
+        note.subtype = pdf::AnnotationSubtype::Text;
+        note.pageIndex = 0;
+        note.left = 138; note.bottom = 638; note.right = 162; note.top = 662;
+        note.colorArgb = 0xFFFFD700; note.hasColor = true; note.flags = 4;
+        note.contents = QStringLiteral("note under a rectangle");
+        note.name = QStringLiteral("note-40d");
+        pdf::AnnotationItem frame;
+        frame.subtype = pdf::AnnotationSubtype::Square;
+        frame.pageIndex = 0;
+        frame.left = 100; frame.bottom = 600; frame.right = 200; frame.top = 700;
+        frame.colorArgb = 0xFFFF0000; frame.hasColor = true; frame.flags = 4;
+        frame.name = QStringLiteral("frame-40d");
+        if (!page40 || !page40->addTextAnnotation(note) || !page40->addGeometricAnnotation(frame, 2.0)) {
+            std::cerr << "[FAIL] Test 40d could not create the note and the rectangle" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem under;
+        if (!page40->hitTestAnnotation(150, 650, under) || under.name != QStringLiteral("note-40d")) {
+            std::cerr << "[FAIL] Test 40d the rectangle hides the note drawn under it (got "
+                      << (under.name.isEmpty() ? std::string("nothing") : under.name.toStdString()) << ")" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem edge;
+        if (!page40->hitTestAnnotation(101, 650, edge) || edge.name != QStringLiteral("frame-40d")) {
+            std::cerr << "[FAIL] Test 40d the rectangle's own outline is not selectable" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: outline hit-testing, fill detection (own and PDFium-built appearances, /IC, clear fill) and note-under-rectangle verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 39 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 40 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
