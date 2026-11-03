@@ -9,6 +9,7 @@
 #include <QThread>
 #include <iostream>
 #include <functional>
+#include <atomic>
 #include <algorithm>
 #include "ipc/IpcProtocol.h"
 #include "ipc/IpcMessages.h"
@@ -3081,6 +3082,48 @@ int main(int argc, char* argv[]) {
         client.closeDocumentSync();
         client.stop();
         std::cout << "  -> Passed: FreeText annotations (/FreeText) add, list, hit-test, remove, and hostile input rejection over IPC verified." << std::endl;
+    }
+
+    // --- Test 34: waitForIdle() must not return before the replies of the work it waited for ---
+    // The worker delivers engine results to its socket thread as queued signals. A control request that arrived
+    // in the same read as the work it waits for used to be answered ahead of those results, so a caller that
+    // waited for idle and then looked for its answer sometimes found nothing (several percent of the time).
+    std::cout << "Test 34: waitForIdle orders its reply after the replies of finished work..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto openRes = client.openDocumentSync(34, samplePdf.toStdString());
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 34: openDocumentSync failed" << std::endl;
+            return 1;
+        }
+        std::atomic<int> answers{0};
+        QMetaObject::Connection answerConn = QObject::connect(
+            &client, &pdf::ipc::WorkerClient::pageTextReady, &client,
+            [&](int64_t, int, std::shared_ptr<pdf::PageText>) { ++answers; }, Qt::DirectConnection);
+        constexpr int kIterations = 3000;
+        int late = 0;
+        for (int i = 0; i < kIterations; ++i) {
+            answers = 0;
+            client.requestPageText(34, 99999);   // a missing page is answered with empty text, very quickly
+            client.waitForIdle();
+            if (answers.load() != 1) {
+                ++late;
+                QElapsedTimer drain;
+                drain.start();
+                while (answers.load() < 1 && drain.elapsed() < 2000) {
+                    QCoreApplication::processEvents();
+                }
+            }
+        }
+        QObject::disconnect(answerConn);
+        client.closeDocumentSync();
+        client.stop();
+        if (late != 0) {
+            std::cerr << "[FAIL] 34: waitForIdle returned before the reply in " << late << " of " << kIterations
+                      << " iterations" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: " << kIterations << " waitForIdle round trips each saw their reply first." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

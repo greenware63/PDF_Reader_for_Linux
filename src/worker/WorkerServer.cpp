@@ -659,12 +659,17 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
                 m_engineWorker.setHangEngineForTesting(true);
             }
 #endif
-            if (request.waitForIdle && !m_engineWorker.isIdle()) {
-                m_pendingControlRequests.push_back(request);
-                if (m_engineWorker.isIdle()) {
-                    onIdle();
+            if (request.waitForIdle) {
+                if (!m_engineWorker.isIdle()) {
+                    m_pendingControlRequests.push_back(request);
+                    break;
                 }
-                break;
+                // The engine is idle, but the responses for the work it just finished travel to this thread as
+                // queued signals, and this socket handler can run before they are delivered. Replying now would put
+                // the "idle" answer on the wire ahead of those responses, so a caller that waits for idle and then
+                // looks for its answer sometimes finds nothing (about 1 in 50 on a quiet machine). Idleness was
+                // read first, so every response of the finished work is already posted: deliver them, then reply.
+                QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
             }
 
             ipc::WorkerControlResponse response;
