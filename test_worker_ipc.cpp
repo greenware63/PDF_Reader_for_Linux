@@ -3131,6 +3131,122 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: " << kIterations << " waitForIdle round trips each saw their reply first." << std::endl;
     }
 
+    // --- Test 35: non-Latin text in sticky notes survives add, save and reload ---
+    // A sticky note is how a document is annotated in Persian today (the text box cannot draw it). The text is
+    // stored as a PDF text string in /Contents and has to come back exactly: right-to-left runs, Persian letters and
+    // digits, a zero-width non-joiner, a right-to-left / left-to-right mix, an astral emoji (a UTF-16 surrogate pair
+    // with a skin-tone modifier) and line breaks. The literals are written as escapes so that the test does not
+    // depend on the compiler's source character set.
+    std::cout << "Test 35: Sticky notes keep Persian, mixed-direction and emoji text through save and reload..." << std::endl;
+    {
+        struct NoteText { const char* tag; QString text; };
+        const NoteText notes[] = {
+            // Persian sentence with the Persian-only letters (pe, che, zhe, gaf, keheh, yeh) and Persian digits
+            {"fa", QString::fromUtf16(u"سلام دنیا! این یک یادداشت فارسی است: پ چ ژ گ ک ی ۱۲۳۴۵۶۷۸۹۰")},
+            // Latin and Persian in one line, with Persian digits, a euro sign and ASCII digits and punctuation
+            {"mixed", QString::fromUtf16(u"Invoice شماره ۴۲ paid, مبلغ 1,250.50 €")},
+            {"emoji", QString::fromUtf16(u"ok \U0001F44D\U0001F3FD done \U0001F389 ✔")},
+            {"lines", QString::fromUtf16(u"first line\nخط دوم\nthird line")},
+            // U+200C ZERO WIDTH NON-JOINER is part of normal Persian spelling
+            {"zwnj", QString::fromUtf16(u"می‌خواهم نیم‌فاصله")},
+        };
+        auto hexOf = [](const QString& text) {
+            QString out;
+            for (const QChar c : text) {
+                out += QString::number(c.unicode(), 16) + QLatin1Char(' ');
+            }
+            return out.toStdString();
+        };
+        auto check = [&](const std::vector<pdf::AnnotationItem>& listed, const char* when) -> bool {
+            for (const auto& n : notes) {
+                const QString name = QStringLiteral("note-ipc-35-") + QString::fromLatin1(n.tag);
+                bool found = false;
+                for (const auto& a : listed) {
+                    if (a.name != name) {
+                        continue;
+                    }
+                    found = true;
+                    if (a.contents != n.text) {
+                        std::cerr << "[FAIL] 35: note '" << n.tag << "' changed " << when << ": expected [" << hexOf(n.text)
+                                  << "] got [" << hexOf(a.contents) << "]" << std::endl;
+                        return false;
+                    }
+                }
+                if (!found) {
+                    std::cerr << "[FAIL] 35: note '" << n.tag << "' is missing " << when << std::endl;
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] 35: Failed to create temp dir" << std::endl;
+            return 1;
+        }
+        const QString savedPath = tempDir.filePath("ipc_unicode_notes.pdf");
+        {
+            pdf::ipc::WorkerClient client;
+            if (client.openDocumentSync(35, samplePdf.toStdString()).error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 35: openDocumentSync failed" << std::endl;
+                return 1;
+            }
+            double left = 40.0;
+            for (const auto& n : notes) {
+                pdf::AnnotationItem note;
+                note.subtype = pdf::AnnotationSubtype::Text;
+                note.pageIndex = 0;
+                note.left = left; note.bottom = 680.0; note.right = left + 24.0; note.top = 704.0;
+                note.colorArgb = 0xFFFFD700;
+                note.hasColor = true;
+                note.flags = 4;
+                note.contents = n.text;
+                note.name = QStringLiteral("note-ipc-35-") + QString::fromLatin1(n.tag);
+                left += 40.0;
+                const auto added = client.addAnnotationSync(35, 0, note);
+                if (!added.success) {
+                    std::cerr << "[FAIL] 35: adding note '" << n.tag << "' failed: " << added.errorMessage.toStdString() << std::endl;
+                    return 1;
+                }
+            }
+            const auto listed = client.listAnnotationsSync(35, 0);
+            if (!listed.success || !check(listed.annotations, "when listed right after adding")) {
+                return 1;
+            }
+#ifdef Q_OS_LINUX
+            int writeFd = ::open(savedPath.toLocal8Bit().constData(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+            if (writeFd < 0) {
+                std::cerr << "[FAIL] 35: Failed to open saveFd" << std::endl;
+                return 1;
+            }
+            const auto saved = client.saveDocumentSync(35, writeFd, true, "");
+#else
+            const auto saved = client.saveDocumentSync(35, -1, true, savedPath);
+#endif
+            if (!saved.success || saved.bytesWritten == 0) {
+                std::cerr << "[FAIL] 35: saveDocumentSync failed: " << saved.errorMessage.toStdString() << std::endl;
+                return 1;
+            }
+            client.closeDocumentSync();
+            client.stop();
+        }
+        {
+            pdf::ipc::WorkerClient reader;
+            if (reader.openDocumentSync(135, savedPath.toStdString()).error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 35: the saved file does not open again" << std::endl;
+                return 1;
+            }
+            const auto listed = reader.listAnnotationsSync(135, 0);
+            if (!listed.success || !check(listed.annotations, "after saving and reopening the file")) {
+                return 1;
+            }
+            reader.closeDocumentSync();
+            reader.stop();
+        }
+        std::cout << "  -> Passed: Persian, mixed-direction, emoji and multi-line note text round-trips exactly." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;
