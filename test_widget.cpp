@@ -36,6 +36,7 @@
 #include <fstream>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include <cstring>
 #include <QSettings>
@@ -5861,7 +5862,117 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    std::cout << " ALL 55 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- Test 56: new notes, shapes and text boxes are placed on the page, wherever the user clicked ---
+    // The default size hung off the page (and out of reach) whenever the click was near the right or bottom edge.
+    std::cout << "Test 56: Default placement keeps new annotations on the page..." << std::endl;
+    {
+        auto near = [](double a, double b) { return std::abs(a - b) < 1e-6; };
+        auto sameRect = [&](const QRectF& a, const QRectF& b) {
+            return near(a.x(), b.x()) && near(a.y(), b.y()) && near(a.width(), b.width()) && near(a.height(), b.height());
+        };
+
+        // 56a: the placement rule on its own. A 100 x 60 shape on a 612 x 792 page keeps 4 pt to the edge.
+        struct Case { QPointF anchor; QRectF expect; const char* what; };
+        const Case cases[] = {
+            {{200.0, 400.0}, QRectF(200.0, 340.0, 100.0, 60.0), "a click in the middle is kept"},
+            {{600.0, 400.0}, QRectF(508.0, 340.0, 100.0, 60.0), "near the right edge it moves left"},
+            {{200.0, 10.0}, QRectF(200.0, 4.0, 100.0, 60.0), "near the bottom edge it moves up"},
+            {{-50.0, 900.0}, QRectF(4.0, 728.0, 100.0, 60.0), "outside the top-left corner it moves in"},
+            {{612.0, 0.0}, QRectF(508.0, 4.0, 100.0, 60.0), "in the bottom-right corner it moves in"},
+        };
+        for (const auto& c : cases) {
+            const QRectF got = ui::PdfViewerWidget::placeOnPage(c.anchor, QSizeF(100.0, 60.0), QSizeF(612.0, 792.0));
+            if (!sameRect(got, c.expect)) {
+                std::cerr << "[FAIL] 56a " << c.what << ": got " << got.x() << "," << got.y() << " " << got.width() << "x"
+                          << got.height() << std::endl;
+                return 1;
+            }
+        }
+        if (!sameRect(ui::PdfViewerWidget::placeOnPage(QPointF(10.0, 40.0), QSizeF(100.0, 60.0), QSizeF(80.0, 50.0)),
+                      QRectF(0.0, 0.0, 80.0, 50.0))) {
+            std::cerr << "[FAIL] 56a a page smaller than the shape must shrink it to the page" << std::endl;
+            return 1;
+        }
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        if (!ui::PdfViewerWidget::placeOnPage(QPointF(nan, 10.0), QSizeF(100.0, 60.0), QSizeF(612.0, 792.0)).isEmpty() ||
+            !ui::PdfViewerWidget::placeOnPage(QPointF(10.0, 10.0), QSizeF(100.0, 60.0), QSizeF(0.0, 792.0)).isEmpty() ||
+            !ui::PdfViewerWidget::placeOnPage(QPointF(10.0, 10.0), QSizeF(0.0, 60.0), QSizeF(612.0, 792.0)).isEmpty()) {
+            std::cerr << "[FAIL] 56a a non-finite anchor or an empty size/page must give an empty rectangle" << std::endl;
+            return 1;
+        }
+
+        // 56b: through the viewer, with a click 5 pt from the bottom-right corner of the page.
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(samplePath));
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 56b document did not finish opening" << std::endl;
+            return 1;
+        }
+        const auto& pl = viewer.layout().getPageLayout(0);
+        const double pw = pl.widthPoints;
+        const double ph = pl.heightPoints;
+        struct Kind { pdf::AnnotationSubtype subtype; double w, h; const char* what; };
+        const Kind kinds[] = {
+            {pdf::AnnotationSubtype::Text, 24.0, 24.0, "sticky note"},
+            {pdf::AnnotationSubtype::Square, 100.0, 60.0, "rectangle"},
+            {pdf::AnnotationSubtype::Circle, 100.0, 60.0, "circle"},
+            {pdf::AnnotationSubtype::FreeText, 150.0, 40.0, "text box"},
+        };
+        for (const auto& k : kinds) {
+            if (!viewer.addDefaultAnnotationAt(0, k.subtype, pw - 5.0, 10.0, QStringLiteral("placed in the corner"))) {
+                std::cerr << "[FAIL] 56b adding a " << k.what << " in the corner returned false" << std::endl;
+                return 1;
+            }
+        }
+        if (viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Ink, 100.0, 100.0) ||
+            viewer.addDefaultAnnotationAt(99, pdf::AnnotationSubtype::Square, 100.0, 100.0)) {
+            std::cerr << "[FAIL] 56b an unsupported subtype or a missing page must be refused" << std::endl;
+            return 1;
+        }
+        const auto listed = viewer.renderWorker().listAnnotationsSync(viewer.currentDocumentId(), 0, 15000);
+        if (!listed.success) {
+            std::cerr << "[FAIL] 56b listing annotations failed" << std::endl;
+            return 1;
+        }
+        for (const auto& k : kinds) {
+            bool found = false;
+            for (const auto& a : listed.annotations) {
+                if (a.subtype != k.subtype || !a.name.startsWith(QStringLiteral("pdfr-"))) {
+                    continue;
+                }
+                found = true;
+                const double l = std::min(a.left, a.right), r = std::max(a.left, a.right);
+                const double b = std::min(a.bottom, a.top), t = std::max(a.bottom, a.top);
+                if (l < -1e-6 || b < -1e-6 || r > pw + 1e-6 || t > ph + 1e-6) {
+                    std::cerr << "[FAIL] 56b the " << k.what << " hangs off the page: " << l << "," << b << " - " << r << ","
+                              << t << " on a " << pw << " x " << ph << " page" << std::endl;
+                    return 1;
+                }
+                // PDFium itself shrinks a sticky note to its own 20 x 20 icon inside the box it was given.
+                const bool isNote = k.subtype == pdf::AnnotationSubtype::Text;
+                const bool sizeOk = isNote ? (r - l <= k.w + 1e-6 && t - b <= k.h + 1e-6) : (near(r - l, k.w) && near(t - b, k.h));
+                if (!sizeOk) {
+                    std::cerr << "[FAIL] 56b the " << k.what << " changed size: " << (r - l) << " x " << (t - b) << std::endl;
+                    return 1;
+                }
+            }
+            if (!found) {
+                std::cerr << "[FAIL] 56b the " << k.what << " is missing from the page" << std::endl;
+                return 1;
+            }
+        }
+        std::cout << "  -> Passed: notes, shapes and text boxes clicked into a page corner are moved onto the page." << std::endl;
+    }
+
+    std::cout << " ALL 56 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

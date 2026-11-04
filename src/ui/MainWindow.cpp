@@ -1835,6 +1835,16 @@ void MainWindow::squigglySelection() {
     }
 }
 
+namespace {
+// Where the toolbar and menu actions put a new note, shape or text box: one inch from the top-left corner of the
+// current page (PDF user space, origin bottom-left). PdfViewerWidget::addDefaultAnnotationAt moves it onto the page
+// when the page is too small for that.
+QPointF defaultAnnotationAnchor(const ui::PdfViewerWidget& viewer, int page) {
+    const auto& pl = viewer.layout().getPageLayout(page);
+    return QPointF(72.0, pl.heightPoints - 72.0);
+}
+} // namespace
+
 void MainWindow::addStickyNote() {
     auto* v = currentViewer();
     if (!v || !v->isDocumentOpen()) return;
@@ -1844,30 +1854,24 @@ void MainWindow::addStickyNote() {
     if (!ok || text.trimmed().isEmpty()) return;
 
     const int page = v->currentPage();
-    const auto& pl = v->layout().getPageLayout(page);
-    const double userX = 72.0;
-    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
-    v->addTextAnnotation(page, userX, userY, text);
+    const QPointF at = defaultAnnotationAnchor(*v, page);
+    v->addDefaultAnnotationAt(page, pdf::AnnotationSubtype::Text, at.x(), at.y(), text);
 }
 
 void MainWindow::addRectangle() {
     auto* v = currentViewer();
     if (!v || !v->isDocumentOpen()) return;
     const int page = v->currentPage();
-    const auto& pl = v->layout().getPageLayout(page);
-    const double userX = 72.0;
-    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
-    v->addSquareAnnotation(page, QRectF(userX, userY - 60.0, 100.0, 60.0));
+    const QPointF at = defaultAnnotationAnchor(*v, page);
+    v->addDefaultAnnotationAt(page, pdf::AnnotationSubtype::Square, at.x(), at.y());
 }
 
 void MainWindow::addCircle() {
     auto* v = currentViewer();
     if (!v || !v->isDocumentOpen()) return;
     const int page = v->currentPage();
-    const auto& pl = v->layout().getPageLayout(page);
-    const double userX = 72.0;
-    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
-    v->addCircleAnnotation(page, QRectF(userX, userY - 60.0, 100.0, 60.0));
+    const QPointF at = defaultAnnotationAnchor(*v, page);
+    v->addDefaultAnnotationAt(page, pdf::AnnotationSubtype::Circle, at.x(), at.y());
 }
 
 void MainWindow::toggleInkDrawing() {
@@ -1888,10 +1892,8 @@ void MainWindow::addFreeText() {
     if (!ok || text.trimmed().isEmpty()) return;
 
     const int page = v->currentPage();
-    const auto& pl = v->layout().getPageLayout(page);
-    const double userX = 72.0;
-    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
-    v->addFreeTextAnnotation(page, QRectF(userX, userY - 40.0, 150.0, 40.0), text);
+    const QPointF at = defaultAnnotationAnchor(*v, page);
+    v->addDefaultAnnotationAt(page, pdf::AnnotationSubtype::FreeText, at.x(), at.y(), text);
 }
 
 void MainWindow::undoEdit() {

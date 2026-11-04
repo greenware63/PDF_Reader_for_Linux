@@ -2744,6 +2744,56 @@ bool PdfViewerWidget::addFreeTextAnnotation(int pageIndex, const QRectF& pagePoi
     return true;
 }
 
+QRectF PdfViewerWidget::placeOnPage(const QPointF& anchor, const QSizeF& size, const QSizeF& pageSizePoints) {
+    const double values[] = {anchor.x(), anchor.y(), size.width(), size.height(), pageSizePoints.width(), pageSizePoints.height()};
+    for (const double v : values) {
+        if (!std::isfinite(v)) {
+            return {};
+        }
+    }
+    if (size.width() <= 0.0 || size.height() <= 0.0 || pageSizePoints.width() <= 0.0 || pageSizePoints.height() <= 0.0) {
+        return {};
+    }
+
+    // Keep a little air to the page edge whenever the page is big enough to afford it.
+    constexpr double kEdgeMargin = 4.0;
+    const double marginX = pageSizePoints.width() > size.width() + 2.0 * kEdgeMargin ? kEdgeMargin : 0.0;
+    const double marginY = pageSizePoints.height() > size.height() + 2.0 * kEdgeMargin ? kEdgeMargin : 0.0;
+    const double w = std::min(size.width(), pageSizePoints.width());
+    const double h = std::min(size.height(), pageSizePoints.height());
+
+    const double left = std::clamp(anchor.x(), marginX, pageSizePoints.width() - marginX - w);
+    const double upper = std::clamp(anchor.y(), marginY + h, pageSizePoints.height() - marginY);
+    return QRectF(left, upper - h, w, h);
+}
+
+bool PdfViewerWidget::addDefaultAnnotationAt(int pageIndex, pdf::AnnotationSubtype subtype, double userX, double userY,
+                                             const QString& contents) {
+    if (!m_hasDocument || pageIndex < 0 || pageIndex >= m_pageCount) {
+        return false;
+    }
+    QSizeF size;
+    switch (subtype) {
+        case pdf::AnnotationSubtype::Text:     size = QSizeF(24.0, 24.0); break;
+        case pdf::AnnotationSubtype::Square:
+        case pdf::AnnotationSubtype::Circle:   size = QSizeF(100.0, 60.0); break;
+        case pdf::AnnotationSubtype::FreeText: size = QSizeF(150.0, 40.0); break;
+        default: return false;
+    }
+    const auto& pl = m_layout.getPageLayout(pageIndex);
+    const QRectF rect = placeOnPage(QPointF(userX, userY), size, QSizeF(pl.widthPoints, pl.heightPoints));
+    if (rect.isEmpty()) {
+        return false;
+    }
+    switch (subtype) {
+        case pdf::AnnotationSubtype::Text:     return addTextAnnotation(pageIndex, rect.left(), rect.bottom(), contents);
+        case pdf::AnnotationSubtype::Square:   return addSquareAnnotation(pageIndex, rect);
+        case pdf::AnnotationSubtype::Circle:   return addCircleAnnotation(pageIndex, rect);
+        case pdf::AnnotationSubtype::FreeText: return addFreeTextAnnotation(pageIndex, rect, contents);
+        default: return false;
+    }
+}
+
 bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item) {
     if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
@@ -2906,21 +2956,21 @@ void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
                 const QString text = QInputDialog::getMultiLineText(
                     this, tr("Add Sticky Note"), tr("Note text:"), QString(), &ok);
                 if (ok && !text.trimmed().isEmpty()) {
-                    addTextAnnotation(clickPage, userX, userY, text);
+                    addDefaultAnnotationAt(clickPage, pdf::AnnotationSubtype::Text, userX, userY, text);
                 }
             });
             menu.addAction(tr("Add &Rectangle Here"), this, [this, clickPage, userX, userY]() {
-                addSquareAnnotation(clickPage, QRectF(userX, userY - 60.0, 100.0, 60.0));
+                addDefaultAnnotationAt(clickPage, pdf::AnnotationSubtype::Square, userX, userY);
             });
             menu.addAction(tr("Add &Circle Here"), this, [this, clickPage, userX, userY]() {
-                addCircleAnnotation(clickPage, QRectF(userX, userY - 60.0, 100.0, 60.0));
+                addDefaultAnnotationAt(clickPage, pdf::AnnotationSubtype::Circle, userX, userY);
             });
             menu.addAction(tr("Add &Text Box Here"), this, [this, clickPage, userX, userY]() {
                 bool ok = false;
                 const QString text = QInputDialog::getMultiLineText(
                     this, tr("Add Text Box"), tr("Text:"), QString(), &ok);
                 if (ok && !text.trimmed().isEmpty()) {
-                    addFreeTextAnnotation(clickPage, QRectF(userX, userY - 40.0, 150.0, 40.0), text);
+                    addDefaultAnnotationAt(clickPage, pdf::AnnotationSubtype::FreeText, userX, userY, text);
                 }
             });
             menu.addAction(tr("&Draw Freehand Ink"), this, [this]() {
