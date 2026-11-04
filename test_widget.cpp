@@ -5764,9 +5764,27 @@ int main(int argc, char* argv[]) {
         if (cmds.size() != 1 ||
             cmds[0].after.subtype != pdf::AnnotationSubtype::FreeText ||
             cmds[0].after.contents != "Widget FreeText Note" ||
-            std::abs(cmds[0].after.borderWidth - 14.0) > 0.01) {
+            std::abs(cmds[0].after.fontSize - 14.0) > 0.01 || cmds[0].after.borderWidth != 0.0) {
             std::cerr << "[FAIL] 54 EditLog did not record FreeText annotation properly" << std::endl;
             return 1;
+        }
+        {
+            // The font size must not turn into a border of the same width on the stored annotation.
+            const auto listed = viewer.renderWorker().listAnnotationsSync(viewer.currentDocumentId(), 0, 15000);
+            bool found = false;
+            for (const auto& a : listed.annotations) {
+                if (a.subtype == pdf::AnnotationSubtype::FreeText && a.name.startsWith(QStringLiteral("pdfr-"))) {
+                    found = true;
+                    if (std::abs(a.borderWidth) > 1e-6) {
+                        std::cerr << "[FAIL] 54 the text box got a " << a.borderWidth << " pt border from its font size" << std::endl;
+                        return 1;
+                    }
+                }
+            }
+            if (!listed.success || !found) {
+                std::cerr << "[FAIL] 54 the text box is missing from the page" << std::endl;
+                return 1;
+            }
         }
 
         // Test Undo & Redo
@@ -5797,7 +5815,14 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] 54 EditLog is dirty after save" << std::endl;
             return 1;
         }
-
+        {
+            // The requested 14 pt must reach the saved text box (its /DA names the font size).
+            QFile saved(savedPath);
+            if (!saved.open(QIODevice::ReadOnly) || !saved.readAll().contains("14 Tf")) {
+                std::cerr << "[FAIL] 54 the 14 pt font size did not reach the saved text box" << std::endl;
+                return 1;
+            }
+        }
 
         std::cout << "  -> Passed: FreeText annotations creation, undo/redo, and save verified." << std::endl;
     }

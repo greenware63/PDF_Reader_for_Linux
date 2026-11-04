@@ -157,6 +157,7 @@ struct AnnotationItem {
     std::vector<AnnotationQuad> quadPoints; // For text markup or link attachment points (max 4096)
     QString uri;                            // For Link subtype (action URI)
     double borderWidth{0.0};                // Border / stroke width in PDF points (0.0 = subtype default)
+    double fontSize{0.0};                   // For FreeText: font size in PDF points (0.0 = default, 12)
     std::vector<std::vector<AnnotationPoint>> inkStrokes; // For Ink subtype (max 256 strokes, max 100,000 points total)
     /// Square/Circle: the shape has an interior fill (/IC), so clicking inside it selects it. Unfilled shapes are
     /// selected by their outline only. Set by the engine while listing and used by contains(); it is not part of the

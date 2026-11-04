@@ -390,6 +390,7 @@ QDataStream& operator<<(QDataStream& out, const AnnotationItem& item) {
             out << pt;
         }
     }
+    out << item.fontSize;
     return out;
 }
 
@@ -478,6 +479,11 @@ QDataStream& operator>>(QDataStream& in, AnnotationItem& item) {
             stroke.push_back(pt);
         }
         item.inkStrokes.push_back(std::move(stroke));
+    }
+
+    in >> item.fontSize;
+    if (std::isnan(item.fontSize) || std::isinf(item.fontSize) || item.fontSize < 0.0 || item.fontSize > 144.0) {
+        item.fontSize = 0.0;
     }
     return in;
 }

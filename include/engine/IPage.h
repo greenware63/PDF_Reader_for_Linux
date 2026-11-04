@@ -150,8 +150,9 @@ public:
      * @brief Creates a free text annotation (/FreeText) on this page.
      * Generates bounding box (/Rect), contents (/Contents), default appearance (/DA),
      * stroke/text color (/C), flags, /NM identifier, author (/T), and normal appearance stream (/AP).
-     * @param item Annotation properties.
-     * @param fontSize Font size in points (default: 12.0).
+     * @param item Annotation properties. item.borderWidth is the width of the /Border (0 = none); the font size is
+     *             not part of it.
+     * @param fontSize Font size in points (default: 12.0); item.fontSize carries it over the IPC.
      * @return true if successfully created, false otherwise.
      */
     virtual bool addFreeTextAnnotation(const AnnotationItem& item, double fontSize = 12.0) {

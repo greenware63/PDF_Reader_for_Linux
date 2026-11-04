@@ -11,6 +11,8 @@
 #include <functional>
 #include <atomic>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include "ipc/IpcProtocol.h"
 #include "ipc/IpcMessages.h"
 #include "ipc/WorkerClient.h"
@@ -2999,7 +3001,7 @@ int main(int argc, char* argv[]) {
         ft.colorArgb = 0xFF003366;
         ft.hasColor = true;
         ft.flags = 4;
-        ft.borderWidth = 14.0; // font size
+        ft.fontSize = 14.0;
 
         auto respFt = client.addAnnotationSync(33, 0, ft);
         if (!respFt.success || respFt.annotationName != "ft-ipc-33") {
@@ -3017,6 +3019,10 @@ int main(int argc, char* argv[]) {
         if (listed.subtype != pdf::AnnotationSubtype::FreeText || listed.name != "ft-ipc-33" ||
             listed.contents != "FreeText over IPC") {
             std::cerr << "[FAIL] 33: Listed FreeText annotation properties mismatch" << std::endl;
+            return 1;
+        }
+        if (std::abs(listed.borderWidth) > 1e-6) {
+            std::cerr << "[FAIL] 33: FreeText got a " << listed.borderWidth << " pt border from its font size" << std::endl;
             return 1;
         }
 
@@ -3245,6 +3251,43 @@ int main(int argc, char* argv[]) {
             reader.stop();
         }
         std::cout << "  -> Passed: Persian, mixed-direction, emoji and multi-line note text round-trips exactly." << std::endl;
+    }
+
+    // --- Test 36: the FreeText font size has its own field on the wire ---
+    // It used to travel in borderWidth, so every text box also got a /Border as wide as its font size.
+    std::cout << "Test 36: AnnotationItem carries the FreeText font size separately from the border width..." << std::endl;
+    {
+        using namespace pdf::ipc;
+        AddAnnotationRequest req;
+        req.documentId = 36;
+        req.pageIndex = 0;
+        req.annotation.subtype = pdf::AnnotationSubtype::FreeText;
+        req.annotation.left = 10.0; req.annotation.bottom = 10.0; req.annotation.right = 110.0; req.annotation.top = 50.0;
+        req.annotation.contents = QStringLiteral("size on the wire");
+        req.annotation.fontSize = 18.0;
+        req.annotation.borderWidth = 0.0;
+
+        AddAnnotationRequest back;
+        if (!deserialize(serialize(req), back) || std::abs(back.annotation.fontSize - 18.0) > 1e-9 ||
+            back.annotation.borderWidth != 0.0) {
+            std::cerr << "[FAIL] 36: fontSize / borderWidth did not round-trip separately" << std::endl;
+            return 1;
+        }
+        req.annotation.borderWidth = 2.5;
+        if (!deserialize(serialize(req), back) || std::abs(back.annotation.fontSize - 18.0) > 1e-9 ||
+            std::abs(back.annotation.borderWidth - 2.5) > 1e-9) {
+            std::cerr << "[FAIL] 36: a text box with both a font size and a border lost one of them" << std::endl;
+            return 1;
+        }
+        for (const double bad : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -3.0, 1.0e9}) {
+            req.annotation.fontSize = bad;
+            AddAnnotationRequest hostile;
+            if (!deserialize(serialize(req), hostile) || hostile.annotation.fontSize != 0.0) {
+                std::cerr << "[FAIL] 36: a hostile font size (" << bad << ") was not reset to the default" << std::endl;
+                return 1;
+            }
+        }
+        std::cout << "  -> Passed: font size and border width travel separately; hostile sizes fall back to the default." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;

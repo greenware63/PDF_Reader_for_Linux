@@ -3797,7 +3797,7 @@ int main(int argc, char* argv[]) {
         ft.colorArgb = 0xFF003366; // Dark blue
         ft.hasColor = true;
         ft.flags = 4;
-        ft.borderWidth = 14.0; // font size
+        ft.fontSize = 14.0;
 
         if (!page->addFreeTextAnnotation(ft, 14.0)) {
             std::cerr << "[FAIL] Test 38: addFreeTextAnnotation failed for valid FreeText" << std::endl;
@@ -3814,6 +3814,11 @@ int main(int argc, char* argv[]) {
         if (listed.subtype != pdf::AnnotationSubtype::FreeText || listed.name != "ft-test-38" ||
             listed.contents != "Sample FreeText Box") {
             std::cerr << "[FAIL] Test 38: Listed annotation properties mismatch" << std::endl;
+            return 1;
+        }
+        // The font size is not a border width: a FreeText that asked for no border must not get a /Border.
+        if (std::abs(listed.borderWidth) > 1e-6) {
+            std::cerr << "[FAIL] Test 38: FreeText got a " << listed.borderWidth << " pt border from its font size" << std::endl;
             return 1;
         }
 
@@ -3877,6 +3882,22 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Test 38: Annotation still present after removal" << std::endl;
             return 1;
         }
+
+        // A border that is asked for explicitly is kept, whatever the font size is.
+        pdf::AnnotationItem framed = ft;
+        framed.name = QStringLiteral("ft-test-38-framed");
+        framed.fontSize = 20.0;
+        framed.borderWidth = 3.0;
+        if (!page->addFreeTextAnnotation(framed, 20.0)) {
+            std::cerr << "[FAIL] Test 38: addFreeTextAnnotation failed for a framed FreeText" << std::endl;
+            return 1;
+        }
+        const auto framedList = page->listAnnotations();
+        if (framedList.size() != 1 || std::abs(framedList[0].borderWidth - 3.0) > 1e-3) {
+            std::cerr << "[FAIL] Test 38: an explicit FreeText border of 3 pt was not kept" << std::endl;
+            return 1;
+        }
+        page->removeAnnotationByName(QStringLiteral("ft-test-38-framed"));
 
         std::cout << "  -> Passed: FreeText annotations (/FreeText) add, list, hit-test, save, reload, removal and hostile bounds verified." << std::endl;
     }

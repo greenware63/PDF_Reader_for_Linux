@@ -2727,7 +2727,7 @@ bool PdfViewerWidget::addFreeTextAnnotation(int pageIndex, const QRectF& pagePoi
     item.bottom = normalized.top();
     item.right = normalized.right();
     item.top = normalized.bottom();
-    item.borderWidth = fs; // carries fontSize
+    item.fontSize = fs;
     item.contents = contents;
     item.colorArgb = colorArgb;
     item.hasColor = true;
