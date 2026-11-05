@@ -5,6 +5,7 @@
 #include <fpdf_annot.h>
 #include <fpdf_edit.h>
 #include <fpdf_doc.h>
+#include <fpdf_attachment.h>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -728,6 +729,22 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations(bool* truncated) {
             }
         }
 
+                if (item.subtype == AnnotationSubtype::FileAttachment) {
+            FPDF_ATTACHMENT att = FPDFAnnot_GetFileAttachment(annot);
+            if (att) {
+                unsigned long nameLen = FPDFAttachment_GetName(att, nullptr, 0);
+                if (nameLen > 2 && nameLen <= 1024) {
+                    std::vector<unsigned char> nameBuf(nameLen, 0);
+                    unsigned long actual = FPDFAttachment_GetName(att, reinterpret_cast<FPDF_WCHAR*>(nameBuf.data()), nameLen);
+                    if (actual == nameLen) {
+                        const char16_t* u16 = reinterpret_cast<const char16_t*>(nameBuf.data());
+                        size_t charCount = (actual - 2) / sizeof(char16_t);
+                        item.attachmentFileName = QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
+                    }
+                }
+            }
+        }
+
         if (item.subtype == AnnotationSubtype::Link && m_doc) {
             FPDF_LINK link = FPDFAnnot_GetLink(annot);
             if (link) {
@@ -1423,6 +1440,222 @@ bool PdfiumPage::addFreeTextAnnotation(const AnnotationItem& item, double fontSi
     }
     if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
         return failFreeText();
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
+}
+
+static QByteArray stampAppearanceContent(const AnnotationItem& item, double r, double g, double b) {
+    QByteArray out;
+    out.reserve(static_cast<qsizetype>(item.textOutline.size()) * 14 + 256);
+    out += "q\n";
+    const QByteArray color = pdfNumber(r) + " " + pdfNumber(g) + " " + pdfNumber(b);
+    const double bw = (item.borderWidth > 0.0 && item.borderWidth <= 100.0 && std::isfinite(item.borderWidth))
+                      ? item.borderWidth : 2.0;
+    const double half = bw / 2.0;
+    const double w = (item.right - item.left) - bw;
+    const double h = (item.top - item.bottom) - bw;
+    if (w > 0.0 && h > 0.0) {
+        out += color + " RG " + pdfNumber(bw) + " w " + pdfNumber(item.left + half) + " " +
+               pdfNumber(item.bottom + half) + " " + pdfNumber(w) + " " + pdfNumber(h) + " re S\n";
+    }
+    out += color + " rg\n";
+    const auto& path = item.textOutline;
+    for (size_t i = 0; i < path.size();) {
+        const auto& e = path[i];
+        if (e.kind == AnnotationPathElement::Kind::CurveTo) {
+            out += pdfNumber(path[i].x) + " " + pdfNumber(path[i].y) + " " + pdfNumber(path[i + 1].x) + " " +
+                   pdfNumber(path[i + 1].y) + " " + pdfNumber(path[i + 2].x) + " " + pdfNumber(path[i + 2].y) + " c\n";
+            i += 3;
+        } else {
+            out += pdfNumber(e.x) + " " + pdfNumber(e.y) +
+                   (e.kind == AnnotationPathElement::Kind::MoveTo ? " m\n" : " l\n");
+            ++i;
+        }
+    }
+    if (!path.empty()) {
+        out += "f\n";
+    }
+    out += "Q\n";
+    return out;
+}
+
+bool PdfiumPage::addStampAnnotation(const AnnotationItem& item) {
+    if (!m_page || !item.isValid() || item.subtype != AnnotationSubtype::Stamp) {
+        return false;
+    }
+    if (!isValidNewAnnotationPayload(item)) {
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    const int annotIndex = FPDFPage_GetAnnotCount(m_page);
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, FPDF_ANNOT_STAMP);
+    if (!annot) {
+        return false;
+    }
+
+    auto failStamp = [this, annotIndex, annot]() {
+        FPDFPage_CloseAnnot(annot);
+        FPDFPage_RemoveAnnot(m_page, annotIndex);
+        return false;
+    };
+
+    // 1. Set /Rect (left, top, right, bottom order in FS_RECTF)
+    FS_RECTF rect{};
+    rect.left = static_cast<float>(item.left);
+    rect.top = static_cast<float>(item.top);
+    rect.right = static_cast<float>(item.right);
+    rect.bottom = static_cast<float>(item.bottom);
+    if (!FPDFAnnot_SetRect(annot, &rect)) {
+        return failStamp();
+    }
+
+    // 2. Set Stroke/Fill Color (/C)
+    double r = 0.0, g = 0.0, b = 0.0;
+    if (item.hasColor) {
+        r = ((item.colorArgb >> 16) & 0xFF) / 255.0;
+        g = ((item.colorArgb >> 8) & 0xFF) / 255.0;
+        b = (item.colorArgb & 0xFF) / 255.0;
+        unsigned int ri = (item.colorArgb >> 16) & 0xFF;
+        unsigned int gi = (item.colorArgb >> 8) & 0xFF;
+        unsigned int bi = item.colorArgb & 0xFF;
+        unsigned int ai = (item.colorArgb >> 24) & 0xFF;
+        FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, ri, gi, bi, ai);
+    } else {
+        // Default stamp color: Red
+        r = 0.8; g = 0.0; b = 0.0;
+        FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, 204, 0, 0, 255);
+    }
+
+    // 3. Set Flags (/F)
+    uint32_t flags = item.flags ? item.flags : FPDF_ANNOT_FLAG_PRINT;
+    if (!FPDFAnnot_SetFlags(annot, flags)) {
+        return failStamp();
+    }
+
+    // 4. Set /NM
+    if (!item.name.isEmpty()) {
+        const std::u16string u16 = item.name.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failStamp();
+        }
+    }
+
+    // 5. Set /Contents
+    if (!item.contents.isEmpty()) {
+        const std::u16string u16 = item.contents.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failStamp();
+        }
+    }
+
+    // 6. Set /T (Author)
+    if (!item.author.isEmpty()) {
+        const std::u16string u16 = item.author.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failStamp();
+        }
+    }
+
+    // 7. Write appearance stream (/AP) in page coordinates
+    const QByteArray apContent = stampAppearanceContent(item, r, g, b);
+    const std::u16string apU16 = QString::fromLatin1(apContent).toStdU16String();
+    if (!FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                         reinterpret_cast<FPDF_WIDESTRING>(apU16.c_str()))) {
+        return failStamp();
+    }
+
+    if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
+        return failStamp();
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
+}
+
+bool PdfiumPage::addFileAttachmentAnnotation(const AnnotationItem& item) {
+    if (!m_page || !m_doc || !item.isValid() || item.subtype != AnnotationSubtype::FileAttachment) {
+        return false;
+    }
+    if (!isValidNewAnnotationPayload(item)) {
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    const int annotIndex = FPDFPage_GetAnnotCount(m_page);
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, FPDF_ANNOT_FILEATTACHMENT);
+    if (!annot) {
+        return false;
+    }
+
+    auto failAttachment = [this, annotIndex, annot]() {
+        FPDFPage_CloseAnnot(annot);
+        FPDFPage_RemoveAnnot(m_page, annotIndex);
+        return false;
+    };
+
+    // 1. Set /Rect
+    FS_RECTF rect{};
+    rect.left = static_cast<float>(item.left);
+    rect.top = static_cast<float>(item.top);
+    rect.right = static_cast<float>(item.right);
+    rect.bottom = static_cast<float>(item.bottom);
+    if (!FPDFAnnot_SetRect(annot, &rect)) {
+        return failAttachment();
+    }
+
+    // 2. Set Color (/C)
+    if (item.hasColor) {
+        unsigned int r = (item.colorArgb >> 16) & 0xFF;
+        unsigned int g = (item.colorArgb >> 8) & 0xFF;
+        unsigned int b = item.colorArgb & 0xFF;
+        unsigned int a = (item.colorArgb >> 24) & 0xFF;
+        FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, a);
+    }
+
+    // 3. Set Flags (/F)
+    uint32_t flags = item.flags ? item.flags : (FPDF_ANNOT_FLAG_PRINT | FPDF_ANNOT_FLAG_NOZOOM | FPDF_ANNOT_FLAG_NOROTATE);
+    if (!FPDFAnnot_SetFlags(annot, flags)) {
+        return failAttachment();
+    }
+
+    // 4. Set /NM
+    if (!item.name.isEmpty()) {
+        const std::u16string u16 = item.name.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failAttachment();
+        }
+    }
+
+    // 5. Set /Contents
+    if (!item.contents.isEmpty()) {
+        const std::u16string u16 = item.contents.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failAttachment();
+        }
+    }
+
+    // 6. Set /T (Author)
+    if (!item.author.isEmpty()) {
+        const std::u16string u16 = item.author.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failAttachment();
+        }
+    }
+
+    // 7. Add File Attachment payload
+    const std::u16string fileNameU16 = item.attachmentFileName.toStdU16String();
+    FPDF_ATTACHMENT att = FPDFAnnot_AddFileAttachment(annot, reinterpret_cast<FPDF_WIDESTRING>(fileNameU16.c_str()));
+    if (!att) {
+        return failAttachment();
+    }
+
+    if (!FPDFAttachment_SetFile(att, m_doc.get(), item.binaryPayload.constData(), static_cast<unsigned long>(item.binaryPayload.size()))) {
+        return failAttachment();
     }
 
     FPDFPage_CloseAnnot(annot);

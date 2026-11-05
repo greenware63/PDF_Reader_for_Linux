@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QByteArray>
 #include <QDataStream>
 #include <vector>
 #include <cstdint>
@@ -66,6 +67,10 @@ struct AnnotationPathElement {
 /// characters are some tens of thousands of elements; this bound keeps a hostile request from asking for more.
 constexpr size_t kMaxTextOutlineElements = 250000;
 constexpr double kMaxOutlineCoordinate = 1.0e6;
+constexpr qsizetype kMaxAnnotationAttachmentBytes = 16 * 1024 * 1024;
+constexpr qsizetype kMaxAnnotationAttachmentFileNameUtf8Bytes = 255;
+constexpr qsizetype kMaxStampTextCharacters = 128;
+constexpr size_t kMaxStampVectorElements = 10000;
 
 /// An outline is usable when it is empty ("none") or starts with a MoveTo, has only whole curves (every run of
 /// CurveTo elements is a multiple of three) and has finite, bounded coordinates.
@@ -210,6 +215,10 @@ struct AnnotationItem {
     /// turns it into the appearance stream. Empty = the engine draws plain Latin-1 text with its built-in font.
     std::vector<AnnotationPathElement> textOutline;
     std::vector<std::vector<AnnotationPoint>> inkStrokes; // For Ink subtype (max 256 strokes, max 100,000 points total)
+    // FileAttachment only. Empty in annotation-list responses for pre-existing attachments, whose payload is
+    // intentionally not read into the UI. AddAnnotationRequest requires a valid name and non-empty data.
+    QString attachmentFileName;
+    QByteArray binaryPayload;
     /// Square/Circle: the shape has an interior fill (/IC), so clicking inside it selects it. Unfilled shapes are
     /// selected by their outline only. Set by the engine while listing and used by contains(); it is not part of the
     /// wire format, so an item received over IPC always reads false.
@@ -316,6 +325,60 @@ struct AnnotationItem {
         return true;
     }
 };
+
+/// Validate a leaf attachment filename without rewriting it. Checks the encoded UTF-8 byte limit because that is
+/// the representation persisted by PDF file specifications, and rejects path syntax/control characters.
+inline bool isValidAttachmentFileName(const QString& name) {
+    if (name.isEmpty() || name != name.trimmed() || name.contains(QStringLiteral("..")) ||
+        name.contains(QLatin1Char('/')) || name.contains(QLatin1Char('\\')) ||
+        name.toUtf8().size() > kMaxAnnotationAttachmentFileNameUtf8Bytes) {
+        return false;
+    }
+    for (const QChar ch : name) {
+        if (ch.unicode() < 32 || ch.unicode() == 127) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool isValidAnnotationPayload(const AnnotationItem& item) {
+    if (item.binaryPayload.size() > kMaxAnnotationAttachmentBytes) {
+        return false;
+    }
+    if (item.subtype == AnnotationSubtype::FileAttachment) {
+        // Existing attachment annotations are listed by filename only; add requests require both fields.
+        return item.binaryPayload.isEmpty()
+            ? item.attachmentFileName.isEmpty() || isValidAttachmentFileName(item.attachmentFileName)
+            : isValidAttachmentFileName(item.attachmentFileName);
+    }
+    if (!item.attachmentFileName.isEmpty() || !item.binaryPayload.isEmpty()) {
+        return false;
+    }
+    return true;
+}
+
+/// Validate subtype limits for a newly submitted annotation, without rejecting older PDF annotations while listing.
+inline bool isValidNewAnnotationPayload(const AnnotationItem& item) {
+    if (!isValidAnnotationPayload(item)) {
+        return false;
+    }
+    if (item.subtype == AnnotationSubtype::FileAttachment) {
+        return isValidAttachmentFileName(item.attachmentFileName) && !item.binaryPayload.isEmpty();
+    }
+    if (item.subtype == AnnotationSubtype::Stamp) {
+        return item.contents.size() <= kMaxStampTextCharacters &&
+               item.textOutline.size() <= kMaxStampVectorElements &&
+               std::isfinite(item.left) && std::isfinite(item.top) &&
+               std::isfinite(item.right) && std::isfinite(item.bottom) &&
+               std::fabs(item.left) <= kMaxOutlineCoordinate && std::fabs(item.top) <= kMaxOutlineCoordinate &&
+               std::fabs(item.right) <= kMaxOutlineCoordinate && std::fabs(item.bottom) <= kMaxOutlineCoordinate &&
+               item.right > item.left && item.top > item.bottom &&
+               item.right - item.left >= 0.5 && item.top - item.bottom >= 0.5 &&
+               isValidTextOutline(item.textOutline);
+    }
+    return true;
+}
 
 // ---- Response budget -------------------------------------------------------------------------------------
 // Per-item and per-collection caps alone are not enough: 10 000 annotations x 32 768 chars (or x 4 096 quads)

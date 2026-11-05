@@ -3426,6 +3426,130 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: outlines round-trip; hostile outlines are rejected; the worker refuses text it cannot draw." << std::endl;
     }
 
+    // --- Test 38: M4 Stamp/FileAttachment payload round-trips, hostile frames, and worker survival ---
+    std::cout << "Test 38: M4 Stamp and FileAttachment IPC limits and worker dispatch..." << std::endl;
+    {
+        using namespace pdf::ipc;
+        pdf::AnnotationItem stamp;
+        stamp.subtype = pdf::AnnotationSubtype::Stamp;
+        stamp.left = 100; stamp.bottom = 600; stamp.right = 220; stamp.top = 640;
+        stamp.contents = QStringLiteral("DRAFT");
+        stamp.name = QStringLiteral("stamp-ipc-38");
+        stamp.textOutline = {{pdf::AnnotationPathElement::Kind::MoveTo, 130, 615},
+                             {pdf::AnnotationPathElement::Kind::LineTo, 150, 615},
+                             {pdf::AnnotationPathElement::Kind::LineTo, 150, 630}};
+        AddAnnotationRequest stampReq{38, 0, stamp};
+        AddAnnotationRequest stampBack;
+        if (!deserialize(serialize(stampReq), stampBack) || stampBack.annotation.contents != stamp.contents ||
+            stampBack.annotation.textOutline.size() != stamp.textOutline.size()) {
+            std::cerr << "[FAIL] 38a: Stamp text/vector fields did not round-trip" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem attachment;
+        attachment.subtype = pdf::AnnotationSubtype::FileAttachment;
+        attachment.left = 230; attachment.bottom = 600; attachment.right = 250; attachment.top = 620;
+        attachment.name = QStringLiteral("attachment-ipc-38");
+        attachment.attachmentFileName = QStringLiteral("ipc-note.txt");
+        attachment.binaryPayload = QByteArray("IPC\0payload", 11);
+        AddAnnotationRequest attachmentReq{38, 0, attachment};
+        AddAnnotationRequest attachmentBack;
+        if (!deserialize(serialize(attachmentReq), attachmentBack) ||
+            attachmentBack.annotation.attachmentFileName != attachment.attachmentFileName ||
+            attachmentBack.annotation.binaryPayload != attachment.binaryPayload) {
+            std::cerr << "[FAIL] 38a: FileAttachment filename/payload did not round-trip" << std::endl;
+            return 1;
+        }
+
+        // The exact payload cap is accepted; one byte beyond it is refused before a large frame is emitted.
+        attachmentReq.annotation.binaryPayload = QByteArray(pdf::kMaxAnnotationAttachmentBytes, 'x');
+        QByteArray atLimit = serialize(attachmentReq);
+        if (atLimit.isEmpty() || !deserialize(atLimit, attachmentBack) ||
+            attachmentBack.annotation.binaryPayload.size() != pdf::kMaxAnnotationAttachmentBytes) {
+            std::cerr << "[FAIL] 38b: exact 16 MiB attachment payload was not accepted" << std::endl;
+            return 1;
+        }
+        attachmentReq.annotation.binaryPayload.append('x');
+        if (!serialize(attachmentReq).isEmpty()) {
+            std::cerr << "[FAIL] 38b: payload larger than 16 MiB was serialized" << std::endl;
+            return 1;
+        }
+
+        // Forge a length prefix larger than the cap while retaining a short body. Decoder must reject before allocating it.
+        attachmentReq.annotation.binaryPayload = QByteArray("x", 1);
+        QByteArray hostileFrame = serialize(attachmentReq);
+        QByteArray encodedLength;
+        QDataStream lengthOut(&encodedLength, QIODevice::WriteOnly);
+        lengthOut.setVersion(QDataStream::Qt_6_4);
+        lengthOut << static_cast<quint32>(pdf::kMaxAnnotationAttachmentBytes + 1);
+        const qsizetype lengthOffset = hostileFrame.size() - 1 - static_cast<qsizetype>(sizeof(quint32));
+        if (encodedLength.size() != static_cast<qsizetype>(sizeof(quint32)) || lengthOffset < 0) {
+            std::cerr << "[FAIL] 38c: could not prepare hostile length frame" << std::endl;
+            return 1;
+        }
+        hostileFrame.replace(lengthOffset, static_cast<qsizetype>(sizeof(quint32)), encodedLength);
+        if (deserialize(hostileFrame, attachmentBack)) {
+            std::cerr << "[FAIL] 38c: over-limit attachment length frame was accepted" << std::endl;
+            return 1;
+        }
+        for (const QString& badName : {QStringLiteral("../escape"), QStringLiteral("folder/file"),
+                                       QString(256, QLatin1Char('n')), QStringLiteral("bad\tname")}) {
+            AddAnnotationRequest bad = attachmentReq;
+            bad.annotation.attachmentFileName = badName;
+            if (!serialize(bad).isEmpty()) {
+                std::cerr << "[FAIL] 38c: unsafe filename was serialized" << std::endl;
+                return 1;
+            }
+        }
+        AddAnnotationRequest overlongStamp = stampReq;
+        overlongStamp.annotation.contents = QString(129, QLatin1Char('x'));
+        if (!serialize(overlongStamp).isEmpty()) {
+            std::cerr << "[FAIL] 38c: overlong Stamp text was serialized" << std::endl;
+            return 1;
+        }
+        AddAnnotationRequest overdrawnStamp = stampReq;
+        overdrawnStamp.annotation.textOutline.assign(pdf::kMaxStampVectorElements + 1,
+            pdf::AnnotationPathElement{pdf::AnnotationPathElement::Kind::MoveTo, 10, 10});
+        if (!serialize(overdrawnStamp).isEmpty()) {
+            std::cerr << "[FAIL] 38c: oversized Stamp vector was serialized" << std::endl;
+            return 1;
+        }
+
+        pdf::ipc::WorkerClient client;
+        if (client.openDocumentSync(38, samplePdf.toStdString()).error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 38d: worker failed to open sample PDF" << std::endl;
+            return 1;
+        }
+        if (!client.addAnnotationSync(38, 0, stamp).success ||
+            !client.addAnnotationSync(38, 0, attachment).success) {
+            std::cerr << "[FAIL] 38d: worker rejected valid Stamp or FileAttachment" << std::endl;
+            return 1;
+        }
+        auto listed = client.listAnnotationsSync(38, 0);
+        auto attachmentIt = std::find_if(listed.annotations.begin(), listed.annotations.end(), [](const auto& item) {
+            return item.subtype == pdf::AnnotationSubtype::FileAttachment;
+        });
+        if (!listed.success || listed.annotations.size() != 2 || attachmentIt == listed.annotations.end() ||
+            attachmentIt->attachmentFileName != attachment.attachmentFileName || !attachmentIt->binaryPayload.isEmpty()) {
+            std::cerr << "[FAIL] 38d: worker listing did not return attachment metadata only" << std::endl;
+            return 1;
+        }
+
+        // A locally rejected oversized add is sent as a malformed request; the worker must keep serving requests.
+        pdf::AnnotationItem oversized = attachment;
+        oversized.binaryPayload = QByteArray(pdf::kMaxAnnotationAttachmentBytes + 1, 'z');
+        client.requestAddAnnotation(38, 0, oversized);
+        listed = client.listAnnotationsSync(38, 0);
+        if (!listed.success || listed.annotations.size() != 2) {
+            std::cerr << "[FAIL] 38d: worker did not survive an oversized hostile add request" << std::endl;
+            return 1;
+        }
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: bounded wire data round-trips, hostile frames are rejected, and worker dispatch survives." << std::endl;
+    }
+
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

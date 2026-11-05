@@ -44,6 +44,8 @@ public:
     bool addGeometricAnnotation(const AnnotationItem& item, double borderWidth = 2.0) override;
     bool addInkAnnotation(const AnnotationItem& item, double borderWidth = 2.0) override;
     bool addFreeTextAnnotation(const AnnotationItem& item, double fontSize = 12.0) override;
+    bool addStampAnnotation(const AnnotationItem& item) override;
+    bool addFileAttachmentAnnotation(const AnnotationItem& item) override;
     int removeAnnotationByName(const QString& name) override;
 
     static void setSimulateGetTextFailureForTesting(bool simulate) noexcept;

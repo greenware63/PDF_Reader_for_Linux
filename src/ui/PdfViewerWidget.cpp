@@ -2,6 +2,7 @@
 #include "ImageUtils.h"
 #include "FreeTextLayout.h"
 #include <QFileInfo>
+#include <QFileDialog>
 #include <QMenu>
 #include <QContextMenuEvent>
 
@@ -2800,6 +2801,121 @@ bool PdfViewerWidget::addFreeTextAnnotation(int pageIndex, const QRectF& pagePoi
     return true;
 }
 
+bool PdfViewerWidget::addStampAnnotation(int pageIndex, const QRectF& pagePointsRect, const QString& stampText, uint32_t colorArgb) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    const QRectF normalized = pagePointsRect.normalized();
+    if (pageIndex < 0 || pageIndex >= m_pageCount || normalized.isEmpty() || stampText.trimmed().isEmpty()) {
+        return false;
+    }
+    const QString text = stampText.trimmed();
+    if (text.size() > pdf::kMaxStampTextCharacters) {
+        Q_EMIT loadError(tr("Could not add stamp: stamp text exceeds %1 characters.").arg(pdf::kMaxStampTextCharacters));
+        return false;
+    }
+
+    if (colorArgb == 0) {
+        colorArgb = 0xFFCC0000; // Red default stamp color
+    }
+
+    pdf::AnnotationItem item;
+    item.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    item.subtype = pdf::AnnotationSubtype::Stamp;
+    item.pageIndex = pageIndex;
+    item.left = normalized.left();
+    item.bottom = normalized.top();
+    item.right = normalized.right();
+    item.top = normalized.bottom();
+    item.contents = text;
+    item.colorArgb = colorArgb;
+    item.hasColor = true;
+    item.flags = 4; // FPDF_ANNOT_FLAG_PRINT
+    item.borderWidth = 2.0;
+
+    // Lay out the stamp text to obtain vector outlines
+    const double innerW = (item.right - item.left) - 8.0;
+    const double innerH = (item.top - item.bottom) - 8.0;
+    const double targetFontSize = std::clamp(innerH * 0.5, 8.0, 72.0);
+    FreeTextLayoutResult laid = layoutFreeText(text, targetFontSize, innerW > 0.0 ? innerW : 100.0);
+    if (!laid.outline.empty() && laid.outline.size() <= pdf::kMaxStampVectorElements) {
+        const double midX = item.left + 4.0 + (innerW - laid.size.width()) / 2.0;
+        const double midY = item.top - 4.0 - (innerH - laid.size.height()) / 2.0;
+        translateOutline(laid.outline, midX > item.left ? midX : item.left + 4.0,
+                         midY < item.top ? midY : item.top - 4.0);
+        item.textOutline = std::move(laid.outline);
+    }
+
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, item);
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not add stamp: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordAddAnnotation(pageIndex, item);
+    refreshAfterEdit();
+    return true;
+}
+
+bool PdfViewerWidget::addFileAttachmentAnnotation(int pageIndex, double userX, double userY, const QString& fileName, const QByteArray& data, uint32_t colorArgb) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (pageIndex < 0 || pageIndex >= m_pageCount) {
+        return false;
+    }
+    const QString cleanName = QFileInfo(fileName).fileName();
+    if (!pdf::isValidAttachmentFileName(cleanName)) {
+        Q_EMIT loadError(tr("Could not attach file: invalid attachment filename."));
+        return false;
+    }
+    if (data.isEmpty() || data.size() > pdf::kMaxAnnotationAttachmentBytes) {
+        Q_EMIT loadError(tr("Could not attach file: attachment payload must be between 1 byte and 16 MiB."));
+        return false;
+    }
+
+    if (colorArgb == 0) {
+        colorArgb = 0xFF336699;
+    }
+
+    const auto& pl = m_layout.getPageLayout(pageIndex);
+    const QSizeF pageSize(pl.widthPoints, pl.heightPoints);
+    const QSizeF iconSize(24.0, 24.0);
+    const QRectF rect = placeOnPage(QPointF(userX, userY), iconSize, pageSize);
+    if (rect.isEmpty()) {
+        return false;
+    }
+
+    pdf::AnnotationItem item;
+    item.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    item.subtype = pdf::AnnotationSubtype::FileAttachment;
+    item.pageIndex = pageIndex;
+    item.left = rect.left();
+    item.bottom = rect.top();
+    item.right = rect.right();
+    item.top = rect.bottom();
+    item.attachmentFileName = cleanName;
+    item.binaryPayload = data;
+    item.contents = cleanName;
+    item.colorArgb = colorArgb;
+    item.hasColor = true;
+    item.flags = 4 | 16 | 32; // PRINT | NOZOOM | NOROTATE
+
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, item);
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not attach file: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordAddAnnotation(pageIndex, item);
+    refreshAfterEdit();
+    return true;
+}
+
 QRectF PdfViewerWidget::placeOnPage(const QPointF& anchor, const QSizeF& size, const QSizeF& pageSizePoints) {
     const double values[] = {anchor.x(), anchor.y(), size.width(), size.height(), pageSizePoints.width(), pageSizePoints.height()};
     for (const double v : values) {
@@ -2835,6 +2951,8 @@ bool PdfViewerWidget::addDefaultAnnotationAt(int pageIndex, pdf::AnnotationSubty
         case pdf::AnnotationSubtype::Text:     size = QSizeF(24.0, 24.0); break;
         case pdf::AnnotationSubtype::Square:
         case pdf::AnnotationSubtype::Circle:   size = QSizeF(100.0, 60.0); break;
+        case pdf::AnnotationSubtype::Stamp:    size = QSizeF(120.0, 40.0); break;
+        case pdf::AnnotationSubtype::FileAttachment: size = QSizeF(24.0, 24.0); break;
         case pdf::AnnotationSubtype::FreeText: {
             // As wide as its text wants (at most 300 pt, and never wider than the page), as tall as the wrapped text
             // needs, so that nothing is clipped. A little slack keeps rounding from wrapping a line that just fits.
@@ -2860,6 +2978,7 @@ bool PdfViewerWidget::addDefaultAnnotationAt(int pageIndex, pdf::AnnotationSubty
         case pdf::AnnotationSubtype::Square:   return addSquareAnnotation(pageIndex, rect);
         case pdf::AnnotationSubtype::Circle:   return addCircleAnnotation(pageIndex, rect);
         case pdf::AnnotationSubtype::FreeText: return addFreeTextAnnotation(pageIndex, rect, contents);
+        case pdf::AnnotationSubtype::Stamp:    return addStampAnnotation(pageIndex, rect, contents.isEmpty() ? QStringLiteral("DRAFT") : contents);
         default: return false;
     }
 }
@@ -3068,6 +3187,28 @@ void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
             });
             menu.addAction(tr("&Draw Freehand Ink"), this, [this]() {
                 setInkDrawingMode(true);
+            });
+            menu.addAction(tr("Add &Stamp Here..."), this, [this, clickPage, userX, userY]() {
+                bool ok = false;
+                const QString stamp = QInputDialog::getItem(
+                    this, tr("Add Stamp"), tr("Stamp text:"),
+                    {QStringLiteral("DRAFT"), QStringLiteral("APPROVED"), QStringLiteral("CONFIDENTIAL"),
+                     QStringLiteral("REJECTED"), QStringLiteral("FINAL")},
+                    0, true, &ok);
+                if (ok && !stamp.trimmed().isEmpty()) {
+                    addDefaultAnnotationAt(clickPage, pdf::AnnotationSubtype::Stamp, userX, userY, stamp);
+                }
+            });
+            menu.addAction(tr("Attach &File Here..."), this, [this, clickPage, userX, userY]() {
+                const QString filePath = QFileDialog::getOpenFileName(
+                    this, tr("Select File to Attach"), QString(), tr("All Files (*.*)"));
+                if (!filePath.isEmpty()) {
+                    QFile file(filePath);
+                    if (file.open(QIODevice::ReadOnly)) {
+                        const QByteArray data = file.read(pdf::kMaxAnnotationAttachmentBytes + 1);
+                        addFileAttachmentAnnotation(clickPage, userX, userY, QFileInfo(filePath).fileName(), data);
+                    }
+                }
             });
         }
     }

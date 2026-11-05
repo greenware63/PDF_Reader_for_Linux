@@ -576,6 +576,14 @@ void MainWindow::setupActions() {
     m_addFreeTextAction->setObjectName(QStringLiteral("addFreeTextAction"));
     m_addFreeTextAction->setEnabled(false);
 
+    m_addStampAction = editMenu->addAction(tr("Add &Stamp..."), this, &MainWindow::addStamp);
+    m_addStampAction->setObjectName(QStringLiteral("addStampAction"));
+    m_addStampAction->setEnabled(false);
+
+    m_addAttachmentAction = editMenu->addAction(tr("Attach &File..."), this, &MainWindow::addFileAttachment);
+    m_addAttachmentAction->setObjectName(QStringLiteral("addAttachmentAction"));
+    m_addAttachmentAction->setEnabled(false);
+
     editMenu->addSeparator();
     QAction* copyAction = editMenu->addAction(tr("&Copy"), this, [this]() {
         if (auto* v = currentViewer()) {
@@ -1495,6 +1503,12 @@ void MainWindow::updateStickyNoteAction() {
     if (m_addFreeTextAction) {
         m_addFreeTextAction->setEnabled(open);
     }
+    if (m_addStampAction) {
+        m_addStampAction->setEnabled(open);
+    }
+    if (m_addAttachmentAction) {
+        m_addAttachmentAction->setEnabled(open);
+    }
 }
 
 void MainWindow::onDocumentOpenFailed(const QString& filePath, pdf::DocumentError error) {
@@ -1894,6 +1908,38 @@ void MainWindow::addFreeText() {
     const int page = v->currentPage();
     const QPointF at = defaultAnnotationAnchor(*v, page);
     v->addDefaultAnnotationAt(page, pdf::AnnotationSubtype::FreeText, at.x(), at.y(), text);
+}
+
+void MainWindow::addStamp() {
+    auto* v = currentViewer();
+    if (!v || !v->isDocumentOpen()) return;
+    bool ok = false;
+    const QString stamp = QInputDialog::getItem(
+        this, tr("Add Stamp"), tr("Stamp text:"),
+        {QStringLiteral("DRAFT"), QStringLiteral("APPROVED"), QStringLiteral("CONFIDENTIAL"),
+         QStringLiteral("REJECTED"), QStringLiteral("FINAL")},
+        0, true, &ok);
+    if (!ok || stamp.trimmed().isEmpty()) return;
+
+    const int page = v->currentPage();
+    const QPointF at = defaultAnnotationAnchor(*v, page);
+    v->addDefaultAnnotationAt(page, pdf::AnnotationSubtype::Stamp, at.x(), at.y(), stamp);
+}
+
+void MainWindow::addFileAttachment() {
+    auto* v = currentViewer();
+    if (!v || !v->isDocumentOpen()) return;
+    const QString filePath = QFileDialog::getOpenFileName(
+        this, tr("Select File to Attach"), QString(), tr("All Files (*.*)"));
+    if (filePath.isEmpty()) return;
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) return;
+    const QByteArray data = file.read(pdf::kMaxAnnotationAttachmentBytes + 1);
+
+    const int page = v->currentPage();
+    const QPointF at = defaultAnnotationAnchor(*v, page);
+    v->addFileAttachmentAnnotation(page, at.x(), at.y(), QFileInfo(filePath).fileName(), data);
 }
 
 void MainWindow::undoEdit() {

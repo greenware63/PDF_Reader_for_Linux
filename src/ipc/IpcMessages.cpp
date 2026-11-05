@@ -1,5 +1,6 @@
 ﻿#include "ipc/IpcMessages.h"
 #include <algorithm>
+#include <limits>
 
 namespace pdf {
 namespace {
@@ -369,6 +370,10 @@ QDataStream& operator>>(QDataStream& in, AnnotationQuad& q) {
 
 // AnnotationItem
 QDataStream& operator<<(QDataStream& out, const AnnotationItem& item) {
+    if (!isValidAnnotationPayload(item)) {
+        out.setStatus(QDataStream::WriteFailed);
+        return out;
+    }
     out << static_cast<qint32>(item.pageIndex)
         << static_cast<qint32>(item.annotIndex)
         << static_cast<quint32>(item.subtype)
@@ -395,6 +400,7 @@ QDataStream& operator<<(QDataStream& out, const AnnotationItem& item) {
     for (const auto& e : item.textOutline) {
         out << static_cast<quint8>(e.kind) << e.x << e.y;
     }
+    out << item.attachmentFileName << item.binaryPayload;
     return out;
 }
 
@@ -493,7 +499,10 @@ QDataStream& operator>>(QDataStream& in, AnnotationItem& item) {
     quint32 outlineCount = 0;
     in >> outlineCount;
     item.textOutline.clear();
-    if (!validateCollection(in, outlineCount, static_cast<quint32>(kMaxTextOutlineElements), 17)) {
+    const quint32 outlineLimit = item.subtype == AnnotationSubtype::Stamp
+        ? static_cast<quint32>(kMaxStampVectorElements)
+        : static_cast<quint32>(kMaxTextOutlineElements);
+    if (!validateCollection(in, outlineCount, outlineLimit, 17)) {
         return in;
     }
     item.textOutline.reserve(outlineCount);
@@ -509,6 +518,29 @@ QDataStream& operator>>(QDataStream& in, AnnotationItem& item) {
         item.textOutline.push_back(e);
     }
     if (!isValidTextOutline(item.textOutline)) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    in >> item.attachmentFileName;
+    quint32 payloadSize = 0;
+    in >> payloadSize;
+    const bool nullPayload = payloadSize == std::numeric_limits<quint32>::max();
+    if (nullPayload) {
+        payloadSize = 0;
+    }
+    if (in.status() != QDataStream::Ok || payloadSize > static_cast<quint32>(kMaxAnnotationAttachmentBytes) ||
+        !in.device() || static_cast<quint64>(payloadSize) >
+            static_cast<quint64>(std::max<qint64>(0, in.device()->bytesAvailable()))) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    item.binaryPayload.resize(static_cast<qsizetype>(payloadSize));
+    if (payloadSize > 0 && in.readRawData(item.binaryPayload.data(), static_cast<int>(payloadSize)) !=
+                               static_cast<int>(payloadSize)) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    if (in.status() != QDataStream::Ok || !isValidAnnotationPayload(item)) {
         in.setStatus(QDataStream::ReadCorruptData);
     }
     return in;
@@ -1324,6 +1356,10 @@ QDataStream& operator>>(QDataStream& in, HitTestAnnotationResponse& res) {
 
 // AddAnnotationRequest
 QDataStream& operator<<(QDataStream& out, const AddAnnotationRequest& req) {
+    if (!isValidNewAnnotationPayload(req.annotation)) {
+        out.setStatus(QDataStream::WriteFailed);
+        return out;
+    }
     out << static_cast<qint64>(req.documentId)
         << static_cast<qint32>(req.pageIndex)
         << req.annotation;
@@ -1336,7 +1372,7 @@ QDataStream& operator>>(QDataStream& in, AddAnnotationRequest& req) {
     in >> docId >> pageIdx >> req.annotation;
     req.documentId = docId;
     req.pageIndex = pageIdx;
-    if (pageIdx < 0 || !req.annotation.isValid()) {
+    if (pageIdx < 0 || !req.annotation.isValid() || !isValidNewAnnotationPayload(req.annotation)) {
         in.setStatus(QDataStream::ReadCorruptData);
     }
     return in;

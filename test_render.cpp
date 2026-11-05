@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <chrono>
 #include <thread>
+#include <limits>
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
 #include "engine/PixelBuffer.h"
@@ -34,6 +35,9 @@
 #include <QCoreApplication>
 #include <map>
 #include <QString>
+#include <fpdf_annot.h>
+#include <fpdf_attachment.h>
+#include <fpdf_doc.h>
 
 // Generates a multi-page PDF fixture containing:
 // Page 0: Portrait A4 (595 x 842 pt)
@@ -4261,7 +4265,11 @@ int main(int argc, char* argv[]) {
         // 41d: the appearance and the text survive saving and reloading.
         QTemporaryDir tempDir;
         const std::string savedPath = tempDir.filePath("freetext_outline.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
         int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
         uint64_t written = 0;
         if (saveFd < 0 || !doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
             std::cerr << "[FAIL] Test 41d: saveAsCopy failed" << std::endl;
@@ -4303,8 +4311,223 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: outlines are drawn (holes, curves), survive save and reload; unsupported text and hostile outlines are refused." << std::endl;
     }
 
+    // --- Test 42: M4 vector/text Stamp lifecycle, /AP persistence, and hostile input ---
+    std::cout << "Test 42: Stamp annotations, visible /AP persistence, and hostile bounds..." << std::endl;
+    {
+        using Kind = pdf::AnnotationPathElement::Kind;
+        auto el = [](Kind k, double x, double y) { pdf::AnnotationPathElement e; e.kind = k; e.x = x; e.y = y; return e; };
+        pdf::AnnotationItem stamp;
+        stamp.subtype = pdf::AnnotationSubtype::Stamp;
+        stamp.left = 100; stamp.bottom = 600; stamp.right = 300; stamp.top = 660;
+        stamp.contents = QStringLiteral("APPROVED");
+        stamp.colorArgb = 0xFF008000; stamp.hasColor = true; stamp.borderWidth = 3.0;
+        stamp.flags = 4; stamp.name = QStringLiteral("stamp-42");
+        stamp.textOutline = {el(Kind::MoveTo, 145, 620), el(Kind::LineTo, 175, 620),
+                             el(Kind::LineTo, 175, 640), el(Kind::LineTo, 145, 640)};
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 42: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page || !page->addStampAnnotation(stamp) || page->listAnnotations().size() != 1) {
+            std::cerr << "[FAIL] Test 42: valid Stamp was not created" << std::endl;
+            return 1;
+        }
+        auto lum = [](const pdf::PixelBuffer& b, int x, int y) {
+            const uint32_t px = reinterpret_cast<const uint32_t*>(b.data() + (b.height() - 1 - y) * b.stride())[x];
+            return (static_cast<int>(px & 0xFF) + static_cast<int>((px >> 8) & 0xFF) + static_cast<int>((px >> 16) & 0xFF)) / 3;
+        };
+        auto checkStampInk = [&](const pdf::PixelBuffer& rendered, const char* when) {
+            if (!rendered.isValid() || lum(rendered, 150, 630) > 180 || lum(rendered, 101, 630) > 180) {
+                std::cerr << "[FAIL] Test 42: stamp vector fill/border is not visible " << when << std::endl;
+                return false;
+            }
+            return true;
+        };
+        if (!checkStampInk(page->renderWholePage(1.0, 1.0), "after creation")) return 1;
+
+        auto rejectedWithoutOrphan = [&](const pdf::AnnotationItem& bad, const char* what) {
+            if (page->addStampAnnotation(bad) || page->listAnnotations().size() != 1) {
+                std::cerr << "[FAIL] Test 42: accepted hostile " << what << " or left an orphan annotation" << std::endl;
+                return false;
+            }
+            return true;
+        };
+        pdf::AnnotationItem bad = stamp;
+        bad.contents = QString(129, QLatin1Char('X'));
+        if (!rejectedWithoutOrphan(bad, "overlong stamp text")) return 1;
+        bad = stamp;
+        bad.textOutline.assign(pdf::kMaxStampVectorElements + 1, pdf::AnnotationPathElement{});
+        for (auto& e : bad.textOutline) e.kind = Kind::MoveTo;
+        if (!rejectedWithoutOrphan(bad, "oversized vector outline")) return 1;
+        bad = stamp; bad.right = bad.left;
+        if (!rejectedWithoutOrphan(bad, "degenerate rectangle")) return 1;
+        bad = stamp; bad.right = bad.left - 1;
+        if (!rejectedWithoutOrphan(bad, "inverted rectangle")) return 1;
+        bad = stamp; bad.left = std::numeric_limits<double>::infinity();
+        if (!rejectedWithoutOrphan(bad, "non-finite rectangle")) return 1;
+
+        QTemporaryDir tempDir;
+        const std::string savedPath = tempDir.filePath("stamp_m4.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        uint64_t written = 0;
+        if (saveFd < 0 || !doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
+            std::cerr << "[FAIL] Test 42: saveAsCopy failed" << std::endl;
+            return 1;
+        }
+#ifdef _WIN32
+        ::_close(saveFd);
+#else
+        ::close(saveFd);
+#endif
+
+        // Inspect the persisted annotation itself to ensure the PDF has a non-empty normal appearance stream.
+        FPDF_DOCUMENT rawDoc = FPDF_LoadDocument(savedPath.c_str(), nullptr);
+        FPDF_PAGE rawPage = rawDoc ? FPDF_LoadPage(rawDoc, 0) : nullptr;
+        bool hasNormalAp = false;
+        if (rawPage) {
+            for (int i = 0; i < FPDFPage_GetAnnotCount(rawPage); ++i) {
+                FPDF_ANNOTATION annot = FPDFPage_GetAnnot(rawPage, i);
+                if (!annot) continue;
+                if (FPDFAnnot_GetSubtype(annot) == FPDF_ANNOT_STAMP &&
+                    FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) > sizeof(FPDF_WCHAR)) {
+                    hasNormalAp = true;
+                }
+                FPDFPage_CloseAnnot(annot);
+            }
+            FPDF_ClosePage(rawPage);
+        }
+        if (rawDoc) FPDF_CloseDocument(rawDoc);
+        if (!hasNormalAp) {
+            std::cerr << "[FAIL] Test 42: saved Stamp has no normal /AP stream" << std::endl;
+            return 1;
+        }
+        auto freshDoc = pdf::createDocument();
+        if (freshDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 42: saved PDF did not reload" << std::endl;
+            return 1;
+        }
+        auto freshPage = freshDoc->getPage(0);
+        const auto listed = freshPage ? freshPage->listAnnotations() : std::vector<pdf::AnnotationItem>{};
+        if (listed.size() != 1 || listed[0].subtype != pdf::AnnotationSubtype::Stamp || listed[0].contents != stamp.contents ||
+            !checkStampInk(freshPage->renderWholePage(1.0, 1.0), "after save/reload")) {
+            std::cerr << "[FAIL] Test 42: Stamp metadata or appearance did not survive save/reload" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: vector Stamp /AP renders, persists, and hostile inputs leave no orphan annotation." << std::endl;
+    }
+
+    // --- Test 43: M4 FileAttachment lifecycle, byte-exact /FS persistence, and hostile input ---
+    std::cout << "Test 43: FileAttachment annotations, payload persistence, and hostile filenames..." << std::endl;
+    {
+        pdf::AnnotationItem attachment;
+        attachment.subtype = pdf::AnnotationSubtype::FileAttachment;
+        attachment.left = 200; attachment.bottom = 600; attachment.right = 220; attachment.top = 620;
+        attachment.name = QStringLiteral("file-attachment-43");
+        attachment.attachmentFileName = QStringLiteral("notes.bin");
+        attachment.binaryPayload = QByteArray("M4 attachment\0bytes", 19);
+        attachment.flags = 4;
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 43: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page || !page->addFileAttachmentAnnotation(attachment) || page->listAnnotations().size() != 1 ||
+            page->listAnnotations()[0].attachmentFileName != attachment.attachmentFileName) {
+            std::cerr << "[FAIL] Test 43: valid FileAttachment was not created/listed" << std::endl;
+            return 1;
+        }
+        auto rejectedWithoutOrphan = [&](const pdf::AnnotationItem& bad, const char* what) {
+            if (page->addFileAttachmentAnnotation(bad) || page->listAnnotations().size() != 1) {
+                std::cerr << "[FAIL] Test 43: accepted hostile " << what << " or left an orphan annotation" << std::endl;
+                return false;
+            }
+            return true;
+        };
+        for (const QString& badName : {QStringLiteral("../test.txt"), QStringLiteral("foo/bar.bin"),
+                                       QStringLiteral("foo\\bar.bin"), QString::fromLatin1("has\0nul", 7),
+                                       QString(256, QLatin1Char('x')), QStringLiteral(" leading.txt"),
+                                       QStringLiteral("trailing.txt "), QStringLiteral("bad\nname")}) {
+            pdf::AnnotationItem bad = attachment;
+            bad.attachmentFileName = badName;
+            if (!rejectedWithoutOrphan(bad, "unsafe filename")) return 1;
+        }
+        pdf::AnnotationItem tooLarge = attachment;
+        tooLarge.binaryPayload = QByteArray(pdf::kMaxAnnotationAttachmentBytes + 1, 'x');
+        if (!rejectedWithoutOrphan(tooLarge, "oversized attachment payload")) return 1;
+
+        QTemporaryDir tempDir;
+        const std::string savedPath = tempDir.filePath("attachment_m4.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        uint64_t written = 0;
+        if (saveFd < 0 || !doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
+            std::cerr << "[FAIL] Test 43: saveAsCopy failed" << std::endl;
+            return 1;
+        }
+#ifdef _WIN32
+        ::_close(saveFd);
+#else
+        ::close(saveFd);
+#endif
+
+        FPDF_DOCUMENT rawDoc = FPDF_LoadDocument(savedPath.c_str(), nullptr);
+        FPDF_PAGE rawPage = rawDoc ? FPDF_LoadPage(rawDoc, 0) : nullptr;
+        bool payloadMatches = false;
+        bool foundFileSpec = false;
+        if (rawPage) {
+            for (int i = 0; i < FPDFPage_GetAnnotCount(rawPage); ++i) {
+                FPDF_ANNOTATION annot = FPDFPage_GetAnnot(rawPage, i);
+                if (!annot) continue;
+                if (FPDFAnnot_GetSubtype(annot) == FPDF_ANNOT_FILEATTACHMENT) {
+                    FPDF_ATTACHMENT embedded = FPDFAnnot_GetFileAttachment(annot);
+                    if (embedded) {
+                        foundFileSpec = true;
+                        std::vector<unsigned char> bytes(static_cast<size_t>(attachment.binaryPayload.size()));
+                        unsigned long outLength = 0;
+                        const bool got = FPDFAttachment_GetFile(embedded, bytes.data(),
+                            static_cast<unsigned long>(bytes.size()), &outLength);
+                        payloadMatches = got && outLength == bytes.size() &&
+                            std::memcmp(bytes.data(), attachment.binaryPayload.constData(), bytes.size()) == 0;
+                    }
+                }
+                FPDFPage_CloseAnnot(annot);
+            }
+            FPDF_ClosePage(rawPage);
+        }
+        if (rawDoc) FPDF_CloseDocument(rawDoc);
+        if (!foundFileSpec || !payloadMatches) {
+            std::cerr << "[FAIL] Test 43: saved /FS attachment did not return byte-exact payload" << std::endl;
+            return 1;
+        }
+        auto freshDoc = pdf::createDocument();
+        if (freshDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 43: saved PDF did not reload" << std::endl;
+            return 1;
+        }
+        auto freshPage = freshDoc->getPage(0);
+        const auto listed = freshPage ? freshPage->listAnnotations() : std::vector<pdf::AnnotationItem>{};
+        if (listed.size() != 1 || listed[0].subtype != pdf::AnnotationSubtype::FileAttachment ||
+            listed[0].attachmentFileName != attachment.attachmentFileName || !listed[0].binaryPayload.isEmpty()) {
+            std::cerr << "[FAIL] Test 43: attachment metadata did not survive reload or listing read payload eagerly" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: /FS file bytes persist exactly, filenames are fail-closed, and listing stays metadata-only." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 41 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 43 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
