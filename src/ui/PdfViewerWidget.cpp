@@ -2838,13 +2838,16 @@ bool PdfViewerWidget::addStampAnnotation(int pageIndex, const QRectF& pagePoints
     const double innerH = (item.top - item.bottom) - 8.0;
     const double targetFontSize = std::clamp(innerH * 0.5, 8.0, 72.0);
     FreeTextLayoutResult laid = layoutFreeText(text, targetFontSize, innerW > 0.0 ? innerW : 100.0);
-    if (!laid.outline.empty() && laid.outline.size() <= pdf::kMaxStampVectorElements) {
-        const double midX = item.left + 4.0 + (innerW - laid.size.width()) / 2.0;
-        const double midY = item.top - 4.0 - (innerH - laid.size.height()) / 2.0;
-        translateOutline(laid.outline, midX > item.left ? midX : item.left + 4.0,
-                         midY < item.top ? midY : item.top - 4.0);
-        item.textOutline = std::move(laid.outline);
+    if (laid.outline.empty() || laid.tooLarge || !laid.undrawable.isEmpty() ||
+        laid.outline.size() > pdf::kMaxStampVectorElements) {
+        Q_EMIT loadError(tr("Could not add stamp: stamp text could not be laid out into vector outlines."));
+        return false;
     }
+    const double midX = item.left + 4.0 + (innerW - laid.size.width()) / 2.0;
+    const double midY = item.top - 4.0 - (innerH - laid.size.height()) / 2.0;
+    translateOutline(laid.outline, midX > item.left ? midX : item.left + 4.0,
+                     midY < item.top ? midY : item.top - 4.0);
+    item.textOutline = std::move(laid.outline);
 
     QScopedValueRollback<bool> editGuard(m_editInProgress, true);
 
@@ -2883,7 +2886,7 @@ bool PdfViewerWidget::addFileAttachmentAnnotation(int pageIndex, double userX, d
     const QSizeF pageSize(pl.widthPoints, pl.heightPoints);
     const QSizeF iconSize(24.0, 24.0);
     const QRectF rect = placeOnPage(QPointF(userX, userY), iconSize, pageSize);
-    if (rect.isEmpty()) {
+    if (rect.isEmpty() || rect.width() < 0.5 || rect.height() < 0.5) {
         return false;
     }
 
@@ -2900,7 +2903,7 @@ bool PdfViewerWidget::addFileAttachmentAnnotation(int pageIndex, double userX, d
     item.contents = fileName;
     item.colorArgb = colorArgb;
     item.hasColor = true;
-    item.flags = 4 | 16 | 32; // PRINT | NOZOOM | NOROTATE
+    item.flags = pdf::AnnotationFlag::Print | pdf::AnnotationFlag::NoZoom | pdf::AnnotationFlag::NoRotate;
 
     QScopedValueRollback<bool> editGuard(m_editInProgress, true);
 

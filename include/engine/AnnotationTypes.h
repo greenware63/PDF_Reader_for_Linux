@@ -42,6 +42,20 @@ enum class AnnotationSubtype : uint32_t {
     Redact = 28
 };
 
+// PDF standard annotation flags (ISO 32000-1 Table 165 / PDFium FPDF_ANNOT_FLAG_*)
+namespace AnnotationFlag {
+    constexpr uint32_t Invisible      = 1u << 0; // 1
+    constexpr uint32_t Hidden         = 1u << 1; // 2
+    constexpr uint32_t Print          = 1u << 2; // 4
+    constexpr uint32_t NoZoom         = 1u << 3; // 8
+    constexpr uint32_t NoRotate       = 1u << 4; // 16
+    constexpr uint32_t NoView         = 1u << 5; // 32
+    constexpr uint32_t ReadOnly       = 1u << 6; // 64
+    constexpr uint32_t Locked         = 1u << 7; // 128
+    constexpr uint32_t ToggleNoView   = 1u << 8; // 256
+    constexpr uint32_t LockedContents = 1u << 9; // 512
+}
+
 struct AnnotationPoint {
     double x{0.0};
     double y{0.0};
@@ -342,15 +356,20 @@ inline bool isValidAttachmentFileName(const QString& name) {
     return true;
 }
 
+inline bool isValidExistingAttachmentFileName(const QString& name) {
+    if (name.size() > 1024) return false;
+    for (const QChar c : name) {
+        if (c.isNull()) return false;
+    }
+    return true;
+}
+
 inline bool isValidAnnotationPayload(const AnnotationItem& item) {
     if (item.binaryPayload.size() > kMaxAnnotationAttachmentBytes) {
         return false;
     }
     if (item.subtype == AnnotationSubtype::FileAttachment) {
-        // Existing attachment annotations are listed by filename only; add requests require both fields.
-        return item.binaryPayload.isEmpty()
-            ? item.attachmentFileName.isEmpty() || isValidAttachmentFileName(item.attachmentFileName)
-            : isValidAttachmentFileName(item.attachmentFileName);
+        return isValidExistingAttachmentFileName(item.attachmentFileName);
     }
     if (!item.attachmentFileName.isEmpty() || !item.binaryPayload.isEmpty()) {
         return false;
@@ -364,10 +383,19 @@ inline bool isValidNewAnnotationPayload(const AnnotationItem& item) {
         return false;
     }
     if (item.subtype == AnnotationSubtype::FileAttachment) {
-        return isValidAttachmentFileName(item.attachmentFileName) && !item.binaryPayload.isEmpty();
+        return isValidAttachmentFileName(item.attachmentFileName) &&
+               !item.binaryPayload.isEmpty() &&
+               std::isfinite(item.left) && std::isfinite(item.top) &&
+               std::isfinite(item.right) && std::isfinite(item.bottom) &&
+               std::fabs(item.left) <= kMaxOutlineCoordinate && std::fabs(item.top) <= kMaxOutlineCoordinate &&
+               std::fabs(item.right) <= kMaxOutlineCoordinate && std::fabs(item.bottom) <= kMaxOutlineCoordinate &&
+               item.right > item.left && item.top > item.bottom &&
+               item.right - item.left >= 0.5 && item.top - item.bottom >= 0.5;
     }
     if (item.subtype == AnnotationSubtype::Stamp) {
-        return item.contents.size() <= kMaxStampTextCharacters &&
+        return !item.contents.trimmed().isEmpty() &&
+               item.contents.size() <= kMaxStampTextCharacters &&
+               !item.textOutline.empty() &&
                item.textOutline.size() <= kMaxStampVectorElements &&
                std::isfinite(item.left) && std::isfinite(item.top) &&
                std::isfinite(item.right) && std::isfinite(item.bottom) &&
@@ -391,14 +419,15 @@ constexpr uint64_t kMaxAnnotationListBytes = 16ull * 1024 * 1024;
 inline uint64_t annotationBudgetCost(const AnnotationItem& a) noexcept {
     const uint64_t chars = static_cast<uint64_t>(a.contents.size()) + static_cast<uint64_t>(a.author.size()) +
                            static_cast<uint64_t>(a.name.size()) + static_cast<uint64_t>(a.modificationDate.size()) +
-                           static_cast<uint64_t>(a.uri.size());
+                           static_cast<uint64_t>(a.uri.size()) + static_cast<uint64_t>(a.attachmentFileName.size());
     uint64_t inkPointCount = 0;
     for (const auto& s : a.inkStrokes) {
         inkPointCount += static_cast<uint64_t>(s.size());
     }
     return 192ull + 2ull * chars + 64ull * static_cast<uint64_t>(a.quadPoints.size()) +
            16ull * inkPointCount + 32ull * static_cast<uint64_t>(a.inkStrokes.size()) +
-           24ull * static_cast<uint64_t>(a.textOutline.size());
+           24ull * static_cast<uint64_t>(a.textOutline.size()) +
+           static_cast<uint64_t>(a.binaryPayload.size());
 }
 
 QDataStream& operator<<(QDataStream& out, const AnnotationPoint& p);

@@ -1272,6 +1272,12 @@ QDataStream& operator>>(QDataStream& in, ListAnnotationsRequest& req) {
 
 // ListAnnotationsResponse
 QDataStream& operator<<(QDataStream& out, const ListAnnotationsResponse& res) {
+    for (const auto& a : res.annotations) {
+        if (!a.binaryPayload.isEmpty()) {
+            out.setStatus(QDataStream::WriteFailed);
+            return out;
+        }
+    }
     out << static_cast<qint64>(res.documentId)
         << static_cast<qint32>(res.pageIndex)
         << res.success
@@ -1302,6 +1308,10 @@ QDataStream& operator>>(QDataStream& in, ListAnnotationsResponse& res) {
         AnnotationItem item;
         in >> item;
         if (in.status() != QDataStream::Ok) {
+            return in;
+        }
+        if (!item.binaryPayload.isEmpty()) {
+            in.setStatus(QDataStream::ReadCorruptData);
             return in;
         }
         budgetUsed += annotationBudgetCost(item);

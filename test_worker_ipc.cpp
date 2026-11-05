@@ -3544,6 +3544,54 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] 38d: worker did not survive an oversized hostile add request" << std::endl;
             return 1;
         }
+        // Test that ListAnnotationsResponse serializer rejects any item carrying a binary payload.
+        ListAnnotationsResponse listWithPayload;
+        listWithPayload.documentId = 38;
+        listWithPayload.pageIndex = 0;
+        listWithPayload.success = true;
+        pdf::AnnotationItem leakedItem = attachment;
+        leakedItem.binaryPayload = QByteArray("leaked", 6);
+        listWithPayload.annotations.push_back(leakedItem);
+        if (!serialize(listWithPayload).isEmpty()) {
+            std::cerr << "[FAIL] 38e: ListAnnotationsResponse with binary payload must fail serialization" << std::endl;
+            return 1;
+        }
+        QByteArray manualListFrame;
+        QDataStream manualOut(&manualListFrame, QIODevice::WriteOnly);
+        manualOut.setVersion(QDataStream::Qt_6_4);
+        manualOut << static_cast<qint64>(38) << static_cast<qint32>(0) << true << false << static_cast<quint32>(1) << leakedItem;
+        ListAnnotationsResponse leakedBack;
+        if (deserialize(manualListFrame, leakedBack)) {
+            std::cerr << "[FAIL] 38e: ListAnnotationsResponse deserializer must reject item with binary payload" << std::endl;
+            return 1;
+        }
+
+        // Test that annotationBudgetCost accounts for attachmentFileName and binaryPayload.
+        const uint64_t baseCost = pdf::annotationBudgetCost(attachment);
+        pdf::AnnotationItem moreBytes = attachment;
+        moreBytes.binaryPayload = QByteArray(100, 'b');
+        if (pdf::annotationBudgetCost(moreBytes) != baseCost - static_cast<uint64_t>(attachment.binaryPayload.size()) + 100) {
+            std::cerr << "[FAIL] 38e: annotationBudgetCost did not accurately account for binaryPayload" << std::endl;
+            return 1;
+        }
+
+        // Test that an existing attachment with slash or traversal serializes and deserializes as bounded metadata.
+        pdf::AnnotationItem existingMeta = attachment;
+        existingMeta.attachmentFileName = QStringLiteral("path/to/existing.pdf");
+        existingMeta.binaryPayload.clear();
+        QByteArray serializedMeta;
+        QDataStream outMeta(&serializedMeta, QIODevice::WriteOnly);
+        outMeta.setVersion(QDataStream::Qt_6_4);
+        outMeta << existingMeta;
+        pdf::AnnotationItem deserializedMeta;
+        QDataStream inMeta(&serializedMeta, QIODevice::ReadOnly);
+        inMeta.setVersion(QDataStream::Qt_6_4);
+        inMeta >> deserializedMeta;
+        if (inMeta.status() != QDataStream::Ok || deserializedMeta.attachmentFileName != existingMeta.attachmentFileName) {
+            std::cerr << "[FAIL] 38e: existing attachment with separator failed to round-trip as bounded metadata" << std::endl;
+            return 1;
+        }
+
         client.closeDocumentSync();
         client.stop();
         std::cout << "  -> Passed: bounded wire data round-trips, hostile frames are rejected, and worker dispatch survives." << std::endl;

@@ -4368,6 +4368,10 @@ int main(int argc, char* argv[]) {
         if (!rejectedWithoutOrphan(bad, "inverted rectangle")) return 1;
         bad = stamp; bad.left = std::numeric_limits<double>::infinity();
         if (!rejectedWithoutOrphan(bad, "non-finite rectangle")) return 1;
+        bad = stamp; bad.textOutline.clear();
+        if (!rejectedWithoutOrphan(bad, "empty text outline")) return 1;
+        bad = stamp; bad.contents = QStringLiteral("   ");
+        if (!rejectedWithoutOrphan(bad, "whitespace-only stamp text")) return 1;
 
         QTemporaryDir tempDir;
         const std::string savedPath = tempDir.filePath("stamp_m4.pdf").toStdString();
@@ -4463,6 +4467,14 @@ int main(int argc, char* argv[]) {
         pdf::AnnotationItem tooLarge = attachment;
         tooLarge.binaryPayload = QByteArray(pdf::kMaxAnnotationAttachmentBytes + 1, 'x');
         if (!rejectedWithoutOrphan(tooLarge, "oversized attachment payload")) return 1;
+        pdf::AnnotationItem bad = attachment; bad.right = bad.left;
+        if (!rejectedWithoutOrphan(bad, "degenerate attachment rectangle")) return 1;
+        bad = attachment; bad.right = bad.left - 1;
+        if (!rejectedWithoutOrphan(bad, "inverted attachment rectangle")) return 1;
+        bad = attachment; bad.left = std::numeric_limits<double>::infinity();
+        if (!rejectedWithoutOrphan(bad, "non-finite attachment rectangle")) return 1;
+        bad = attachment; bad.left = 1e7; bad.right = 1e7 + 20;
+        if (!rejectedWithoutOrphan(bad, "out-of-bounds attachment coordinate")) return 1;
 
         QTemporaryDir tempDir;
         const std::string savedPath = tempDir.filePath("attachment_m4.pdf").toStdString();
@@ -4491,6 +4503,12 @@ int main(int argc, char* argv[]) {
                 FPDF_ANNOTATION annot = FPDFPage_GetAnnot(rawPage, i);
                 if (!annot) continue;
                 if (FPDFAnnot_GetSubtype(annot) == FPDF_ANNOT_FILEATTACHMENT) {
+                    const uint32_t annotFlags = FPDFAnnot_GetFlags(annot);
+                    if ((annotFlags & FPDF_ANNOT_FLAG_NOVIEW) != 0 || (annotFlags & FPDF_ANNOT_FLAG_PRINT) == 0) {
+                        std::cerr << "[FAIL] Test 43: attachment has NOVIEW set or PRINT missing: flags=" << annotFlags << std::endl;
+                        FPDFPage_CloseAnnot(annot);
+                        return 1;
+                    }
                     FPDF_ATTACHMENT embedded = FPDFAnnot_GetFileAttachment(annot);
                     if (embedded) {
                         foundFileSpec = true;
@@ -4521,6 +4539,14 @@ int main(int argc, char* argv[]) {
         if (listed.size() != 1 || listed[0].subtype != pdf::AnnotationSubtype::FileAttachment ||
             listed[0].attachmentFileName != attachment.attachmentFileName || !listed[0].binaryPayload.isEmpty()) {
             std::cerr << "[FAIL] Test 43: attachment metadata did not survive reload or listing read payload eagerly" << std::endl;
+            return 1;
+        }
+        // Test that existing attachment annotations with untrusted filenames (e.g. directory separators or traversal)
+        // are treated as bounded metadata during listing without failing serialization.
+        pdf::AnnotationItem existingUntrusted = attachment;
+        existingUntrusted.attachmentFileName = QStringLiteral("folder/sub.txt");
+        if (!pdf::isValidAnnotationPayload(existingUntrusted)) {
+            std::cerr << "[FAIL] Test 43: existing attachment with separator must be allowed as bounded metadata" << std::endl;
             return 1;
         }
         std::cout << "  -> Passed: /FS file bytes persist exactly, filenames are fail-closed, and listing stays metadata-only." << std::endl;

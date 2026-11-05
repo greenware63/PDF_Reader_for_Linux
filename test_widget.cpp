@@ -6618,6 +6618,10 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] 59a stamp with zero width was accepted" << std::endl;
             return 1;
         }
+        if (viewer.addStampAnnotation(0, stampRect, QStringLiteral("   "))) {
+            std::cerr << "[FAIL] 59a whitespace-only stamp was accepted" << std::endl;
+            return 1;
+        }
 
         // Add second stamp via addDefaultAnnotationAt
         if (!viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Stamp, 200.0, 400.0, QStringLiteral("APPROVED"))) {
@@ -6676,6 +6680,11 @@ int main(int argc, char* argv[]) {
             cmds[2].after.attachmentFileName != testFileName ||
             cmds[2].after.binaryPayload != testPayload) {
             std::cerr << "[FAIL] 59b EditLog did not record FileAttachment correctly" << std::endl;
+            return 1;
+        }
+        if ((cmds[2].after.flags & pdf::AnnotationFlag::NoView) != 0 ||
+            (cmds[2].after.flags & pdf::AnnotationFlag::Print) == 0) {
+            std::cerr << "[FAIL] 59b FileAttachment has NoView set or Print missing: flags=" << cmds[2].after.flags << std::endl;
             return 1;
         }
 
