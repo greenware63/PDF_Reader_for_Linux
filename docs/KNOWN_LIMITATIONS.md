@@ -50,7 +50,9 @@ Text boxes:
   refused with a message that points to sticky notes, which keep any text. A text that is too long for a text box
   is refused the same way.
 - Deleting a text box that came from another application and then undoing the deletion lays its text out again
-  with this viewer's font, so its look can change.
+  with this viewer's font, so its look can change. If one of its characters cannot be drawn by any installed
+  font, the deletion cannot be undone (a message says so and the box stays deleted until the file is reopened
+  without saving).
 
 Selecting and deleting:
 
