@@ -3592,6 +3592,26 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        // An embedded NUL in an existing PDF name is omitted, not allowed to poison the whole list response.
+        const QString nulName = QString::fromUtf16(u"prefix\0suffix", 13);
+        if (pdf::setExistingAttachmentFileName(existingMeta, nulName) ||
+            !existingMeta.attachmentFileName.isEmpty()) {
+            std::cerr << "[FAIL] 38e: unsafe existing filename was not dropped from annotation metadata" << std::endl;
+            return 1;
+        }
+        ListAnnotationsResponse safeList;
+        safeList.documentId = 38;
+        safeList.pageIndex = 0;
+        safeList.success = true;
+        safeList.truncated = true;
+        safeList.annotations.push_back(existingMeta);
+        ListAnnotationsResponse safeListBack;
+        if (!deserialize(serialize(safeList), safeListBack) || !safeListBack.truncated ||
+            safeListBack.annotations.size() != 1 || !safeListBack.annotations[0].attachmentFileName.isEmpty()) {
+            std::cerr << "[FAIL] 38e: list response with omitted unsafe filename did not round-trip" << std::endl;
+            return 1;
+        }
+
         client.closeDocumentSync();
         client.stop();
         std::cout << "  -> Passed: bounded wire data round-trips, hostile frames are rejected, and worker dispatch survives." << std::endl;

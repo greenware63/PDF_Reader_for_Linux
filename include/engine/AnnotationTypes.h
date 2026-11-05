@@ -364,6 +364,16 @@ inline bool isValidExistingAttachmentFileName(const QString& name) {
     return true;
 }
 
+/// Keeps malformed existing PDF names out of list responses while allowing annotation enumeration to continue.
+inline bool setExistingAttachmentFileName(AnnotationItem& item, const QString& name) {
+    if (!isValidExistingAttachmentFileName(name)) {
+        item.attachmentFileName.clear();
+        return false;
+    }
+    item.attachmentFileName = name;
+    return true;
+}
+
 inline bool isValidAnnotationPayload(const AnnotationItem& item) {
     if (item.binaryPayload.size() > kMaxAnnotationAttachmentBytes) {
         return false;

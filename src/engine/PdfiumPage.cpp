@@ -729,17 +729,29 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations(bool* truncated) {
             }
         }
 
-                if (item.subtype == AnnotationSubtype::FileAttachment) {
+        if (item.subtype == AnnotationSubtype::FileAttachment) {
             FPDF_ATTACHMENT att = FPDFAnnot_GetFileAttachment(annot);
             if (att) {
                 unsigned long nameLen = FPDFAttachment_GetName(att, nullptr, 0);
-                if (nameLen > 2 && nameLen <= 1024) {
-                    std::vector<unsigned char> nameBuf(nameLen, 0);
-                    unsigned long actual = FPDFAttachment_GetName(att, reinterpret_cast<FPDF_WCHAR*>(nameBuf.data()), nameLen);
-                    if (actual == nameLen) {
-                        const char16_t* u16 = reinterpret_cast<const char16_t*>(nameBuf.data());
-                        size_t charCount = (actual - 2) / sizeof(char16_t);
-                        item.attachmentFileName = QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
+                if (nameLen > 2) {
+                    if (nameLen <= 1024) {
+                        std::vector<unsigned char> nameBuf(nameLen, 0);
+                        const unsigned long actual = FPDFAttachment_GetName(
+                            att, reinterpret_cast<FPDF_WCHAR*>(nameBuf.data()), nameLen);
+                        if (actual == nameLen) {
+                            const char16_t* u16 = reinterpret_cast<const char16_t*>(nameBuf.data());
+                            const size_t charCount = (actual - 2) / sizeof(char16_t);
+                            const QString candidate = QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
+                            if (!setExistingAttachmentFileName(item, candidate)) {
+                                // The filename came from an untrusted PDF. Keep the annotation list usable,
+                                // but omit metadata that cannot safely cross the UI/IPC boundary.
+                                clippedAny = true;
+                            }
+                        } else {
+                            clippedAny = true;
+                        }
+                    } else {
+                        clippedAny = true;
                     }
                 }
             }
