@@ -4114,8 +4114,197 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: outline hit-testing, fill detection (own and PDFium-built appearances, /IC, clear fill) and note-under-rectangle verified." << std::endl;
     }
 
+    // --- Test 41: a FreeText box can carry its text as glyph outlines; text the built-in font cannot draw is refused ---
+    std::cout << "Test 41: FreeText from supplied outlines, and no silently dropped text without them..." << std::endl;
+    {
+        using Kind = pdf::AnnotationPathElement::Kind;
+        auto el = [](Kind k, double x, double y) { pdf::AnnotationPathElement e; e.kind = k; e.x = x; e.y = y; return e; };
+        const auto M = [&](double x, double y) { return el(Kind::MoveTo, x, y); };
+        const auto L = [&](double x, double y) { return el(Kind::LineTo, x, y); };
+        const auto C = [&](double x, double y) { return el(Kind::CurveTo, x, y); };
+
+        // Box 100..300 x 600..660 (200 x 60 pt) with: a block with a hole (the hole wound the other way, as in
+        // the letter "o"), and a circle of radius 8 at (250, 630) made of four cubic curves.
+        std::vector<pdf::AnnotationPathElement> outline = {
+            M(120, 620), L(180, 620), L(180, 640), L(120, 640),             // block, counter-clockwise
+            M(140, 625), L(140, 635), L(160, 635), L(160, 625),             // hole, clockwise
+            M(258, 630),
+            C(258, 634.4), C(254.4, 638), C(250, 638),
+            C(245.6, 638), C(242, 634.4), C(242, 630),
+            C(242, 625.6), C(245.6, 622), C(250, 622),
+            C(254.4, 622), C(258, 625.6), C(258, 630),
+            // Two overlapping rectangles wound the same way (glyphs of some fonts overlap like this): the overlap
+            // is part of the shape under the non-zero rule and must not turn into a hole.
+            M(200, 645), L(230, 645), L(230, 655), L(200, 655),
+            M(215, 645), L(245, 645), L(245, 655), L(215, 655),
+        };
+        pdf::AnnotationItem ft;
+        ft.subtype = pdf::AnnotationSubtype::FreeText;
+        ft.pageIndex = 0;
+        ft.left = 100; ft.bottom = 600; ft.right = 300; ft.top = 660;
+        ft.contents = QString::fromUtf8("\xd8\xb3\xd9\x84\xd8\xa7\xd9\x85 Persian");   // Persian "salam" and Latin: Helvetica cannot draw it
+        ft.colorArgb = 0xFF000000; ft.hasColor = true; ft.flags = 4;
+        ft.fontSize = 12.0;
+        ft.name = QStringLiteral("freetext-41");
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 41: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 41: getPage(0) failed" << std::endl;
+            return 1;
+        }
+        const pdf::PixelBuffer before = page->renderWholePage(1.0, 1.0);
+        if (!before.isValid()) {
+            std::cerr << "[FAIL] Test 41: render before failed" << std::endl;
+            return 1;
+        }
+        // Luminance at a point given in PDF user space (the page is rendered at 1 pixel per point).
+        auto lum = [](const pdf::PixelBuffer& b, double x, double y) {
+            const uint32_t px = reinterpret_cast<const uint32_t*>(b.data() + (b.height() - 1 - static_cast<int>(y)) * b.stride())[static_cast<int>(x)];
+            return (static_cast<int>(px & 0xFF) + static_cast<int>((px >> 8) & 0xFF) + static_cast<int>((px >> 16) & 0xFF)) / 3;
+        };
+        // The probes must lie on blank paper for the checks to mean anything.
+        const double probes[][2] = {{130, 630}, {150, 630}, {250, 630}, {290, 610}, {222, 650}, {110, 650}};
+        for (const auto& p : probes) {
+            if (lum(before, p[0], p[1]) < 240) {
+                std::cerr << "[FAIL] Test 41: the sample page is not blank at (" << p[0] << ", " << p[1] << ")" << std::endl;
+                return 1;
+            }
+        }
+
+        // 41a: refused without outlines (Persian is not Latin-1), nothing is left behind.
+        if (page->addFreeTextAnnotation(ft, 12.0) || !page->listAnnotations().empty()) {
+            std::cerr << "[FAIL] Test 41a: Persian text without outlines was accepted (PDFium would drop it)" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem multiline = ft;
+        multiline.contents = QStringLiteral("line one\nline two");
+        if (page->addFreeTextAnnotation(multiline, 12.0) || !page->listAnnotations().empty()) {
+            std::cerr << "[FAIL] Test 41a: a line break without outlines was accepted (PDFium would join the lines)" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem latin1 = ft;
+        latin1.contents = QString::fromUtf8("Caf\xc3\xa9 \xc3\xbc");
+        latin1.name = QStringLiteral("freetext-41-latin1");
+        if (!page->addFreeTextAnnotation(latin1, 12.0)) {
+            std::cerr << "[FAIL] Test 41a: Latin-1 text without outlines was refused" << std::endl;
+            return 1;
+        }
+        page->removeAnnotationByName(QStringLiteral("freetext-41-latin1"));
+
+        // 41b: hostile outlines are refused and leave nothing behind.
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        std::vector<std::pair<const char*, std::vector<pdf::AnnotationPathElement>>> hostile;
+        hostile.push_back({"NaN coordinate", {M(120, 620), L(nan, 640)}});
+        hostile.push_back({"does not start with a MoveTo", {L(120, 620), L(130, 630)}});
+        hostile.push_back({"two curve points only", {M(120, 620), C(130, 630), C(140, 640)}});
+        hostile.push_back({"a curve cut short by a line", {M(120, 620), C(130, 630), C(140, 640), L(150, 650)}});
+        hostile.push_back({"a coordinate of 1e9", {M(120, 620), L(1.0e9, 640)}});
+        std::vector<pdf::AnnotationPathElement> tooMany(pdf::kMaxTextOutlineElements + 1, L(130, 630));
+        tooMany[0] = M(120, 620);
+        hostile.push_back({"more elements than allowed", std::move(tooMany)});
+        for (auto& h : hostile) {
+            pdf::AnnotationItem bad = ft;
+            bad.textOutline = h.second;
+            if (page->addFreeTextAnnotation(bad, 12.0) || !page->listAnnotations().empty()) {
+                std::cerr << "[FAIL] Test 41b: an outline with " << h.first << " was accepted" << std::endl;
+                return 1;
+            }
+        }
+
+        // 41c: the outline is what is drawn: ink in the block, none in the hole or outside the shapes.
+        ft.textOutline = outline;
+        if (!page->addFreeTextAnnotation(ft, 12.0)) {
+            std::cerr << "[FAIL] Test 41c: addFreeTextAnnotation with outlines failed" << std::endl;
+            return 1;
+        }
+        auto checkInk = [&](const pdf::PixelBuffer& after, const char* when) {
+            if (!after.isValid()) {
+                std::cerr << "[FAIL] Test 41c: render " << when << " failed" << std::endl;
+                return false;
+            }
+            if (lum(after, 130, 630) > 60) {
+                std::cerr << "[FAIL] Test 41c: the block is not drawn " << when << std::endl;
+                return false;
+            }
+            if (lum(after, 150, 630) < 240) {
+                std::cerr << "[FAIL] Test 41c: the hole of the block is filled " << when << " (non-zero winding expected)" << std::endl;
+                return false;
+            }
+            if (lum(after, 250, 630) > 60) {
+                std::cerr << "[FAIL] Test 41c: the curved shape is not drawn " << when << std::endl;
+                return false;
+            }
+            if (lum(after, 222, 650) > 60) {
+                std::cerr << "[FAIL] Test 41c: the overlap of two same-wound contours is not filled " << when << " (non-zero winding expected)" << std::endl;
+                return false;
+            }
+            if (lum(after, 290, 610) < 240 || lum(after, 110, 650) < 240) {
+                std::cerr << "[FAIL] Test 41c: ink where the outline has none " << when << std::endl;
+                return false;
+            }
+            return true;
+        };
+        if (!checkInk(page->renderWholePage(1.0, 1.0), "after adding the box")) {
+            return 1;
+        }
+        const auto listed = page->listAnnotations();
+        if (listed.size() != 1 || listed[0].contents != ft.contents) {
+            std::cerr << "[FAIL] Test 41c: the Persian /Contents was not kept" << std::endl;
+            return 1;
+        }
+
+        // 41d: the appearance and the text survive saving and reloading.
+        QTemporaryDir tempDir;
+        const std::string savedPath = tempDir.filePath("freetext_outline.pdf").toStdString();
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+        uint64_t written = 0;
+        if (saveFd < 0 || !doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
+            std::cerr << "[FAIL] Test 41d: saveAsCopy failed" << std::endl;
+            return 1;
+        }
+        auto freshDoc = pdf::createDocument();
+        if (freshDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 41d: reload failed" << std::endl;
+            return 1;
+        }
+        auto freshPage = freshDoc->getPage(0);
+        const auto freshList = freshPage ? freshPage->listAnnotations() : std::vector<pdf::AnnotationItem>{};
+        if (freshList.size() != 1 || freshList[0].contents != ft.contents) {
+            std::cerr << "[FAIL] Test 41d: the reloaded box or its Persian text is wrong" << std::endl;
+            return 1;
+        }
+        if (!checkInk(freshPage->renderWholePage(1.0, 1.0), "after save and reload")) {
+            return 1;
+        }
+
+        // 41e: a requested border is drawn around the box, in the text colour; without one there is no frame.
+        if (lum(page->renderWholePage(1.0, 1.0), 101, 630) < 240) {
+            std::cerr << "[FAIL] Test 41e: a text box that asked for no border has a frame" << std::endl;
+            return 1;
+        }
+        page->removeAnnotationByName(QStringLiteral("freetext-41"));
+        pdf::AnnotationItem framed = ft;
+        framed.name = QStringLiteral("freetext-41-framed");
+        framed.borderWidth = 3.0;
+        if (!page->addFreeTextAnnotation(framed, 12.0)) {
+            std::cerr << "[FAIL] Test 41e: adding the framed box failed" << std::endl;
+            return 1;
+        }
+        const pdf::PixelBuffer framedRender = page->renderWholePage(1.0, 1.0);
+        if (lum(framedRender, 101, 630) > 60 || lum(framedRender, 200, 658) > 60 || lum(framedRender, 200, 640 + 15) < 240) {
+            std::cerr << "[FAIL] Test 41e: the 3 pt frame of the box is not drawn where expected" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: outlines are drawn (holes, curves), survive save and reload; unsupported text and hostile outlines are refused." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 40 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 41 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

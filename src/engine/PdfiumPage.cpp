@@ -61,6 +61,71 @@ static bool shapePaintsInterior(FPDF_ANNOTATION annot) {
            FPDFAnnot_GetColor(annot, FPDFANNOT_COLORTYPE_InteriorColor, &r, &g, &b, &a) && a > 0;
 }
 
+// PDFium draws a FreeText box's text itself with the built-in Helvetica when no appearance is supplied. That font
+// holds Latin-1 only and PDFium puts the whole text on one line: any other character is silently left out and line
+// breaks vanish. Such a box is refused instead of being created with text missing; the UI supplies the text as glyph
+// outlines and never takes this path.
+static bool drawableByBuiltInFont(const QString& text) {
+    for (const QChar ch : text) {
+        const char16_t u = ch.unicode();
+        if (u > 0xFF || (u < 0x20 && u != u'\t') || (u >= 0x7F && u < 0xA0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A number for a PDF content stream: fixed point with up to three decimals, no exponent, no trailing zeros.
+static QByteArray pdfNumber(double v) {
+    QByteArray s = QByteArray::number(v, 'f', 3);
+    if (s.contains('.')) {
+        while (s.endsWith('0')) {
+            s.chop(1);
+        }
+        if (s.endsWith('.')) {
+            s.chop(1);
+        }
+    }
+    return (s == "-0") ? QByteArray("0") : s;
+}
+
+// Content stream of the appearance of a FreeText box whose text is given as filled glyph outlines. The form's
+// /BBox is the annotation's /Rect, so the outline's page coordinates are used as they are. Glyph outlines are
+// designed for the non-zero winding rule: contours that overlap must not cut holes into each other.
+static QByteArray freeTextAppearanceContent(const AnnotationItem& item, double r, double g, double b) {
+    QByteArray out;
+    out.reserve(static_cast<qsizetype>(item.textOutline.size()) * 14 + 128);
+    out += "q\n";
+    const QByteArray color = pdfNumber(r) + ' ' + pdfNumber(g) + ' ' + pdfNumber(b);
+    if (item.borderWidth > 0.0 && item.borderWidth <= 100.0 && std::isfinite(item.borderWidth)) {
+        // The frame is stroked inside the box: half the line width in from every edge.
+        const double half = item.borderWidth / 2.0;
+        const double w = (item.right - item.left) - item.borderWidth;
+        const double h = (item.top - item.bottom) - item.borderWidth;
+        if (w > 0.0 && h > 0.0) {
+            out += color + " RG " + pdfNumber(item.borderWidth) + " w " + pdfNumber(item.left + half) + ' ' +
+                   pdfNumber(item.bottom + half) + ' ' + pdfNumber(w) + ' ' + pdfNumber(h) + " re S\n";
+        }
+    }
+    out += color + " rg\n";
+    const auto& path = item.textOutline;
+    for (size_t i = 0; i < path.size();) {
+        const auto& e = path[i];
+        if (e.kind == AnnotationPathElement::Kind::CurveTo) {
+            // isValidTextOutline() guarantees that three elements follow.
+            out += pdfNumber(path[i].x) + ' ' + pdfNumber(path[i].y) + ' ' + pdfNumber(path[i + 1].x) + ' ' +
+                   pdfNumber(path[i + 1].y) + ' ' + pdfNumber(path[i + 2].x) + ' ' + pdfNumber(path[i + 2].y) + " c\n";
+            i += 3;
+        } else {
+            out += pdfNumber(e.x) + ' ' + pdfNumber(e.y) +
+                   (e.kind == AnnotationPathElement::Kind::MoveTo ? " m\n" : " l\n");
+            ++i;
+        }
+    }
+    out += "f\nQ\n";
+    return out;
+}
+
 PdfiumPage::PdfiumPage(DocumentHandle doc, int pageIndex, std::shared_ptr<FormEnv> form)
     : m_doc(std::move(doc)), m_form(std::move(form)), m_pageIndex(pageIndex) {
     if (m_doc) {
@@ -1247,6 +1312,13 @@ bool PdfiumPage::addFreeTextAnnotation(const AnnotationItem& item, double fontSi
         return false;
     }
 
+    // Text that comes with its own outlines is drawn from them; any other text must be something PDFium's built-in
+    // font can draw, or the box would be created with part of its text missing.
+    const bool drawnFromOutline = !item.textOutline.empty();
+    if (!isValidTextOutline(item.textOutline) || (!drawnFromOutline && !drawableByBuiltInFont(item.contents))) {
+        return false;
+    }
+
     double effFontSize = (fontSize > 0.0 && fontSize <= 144.0 && std::isfinite(fontSize)) ? fontSize : 12.0;
 
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
@@ -1333,11 +1405,22 @@ bool PdfiumPage::addFreeTextAnnotation(const AnnotationItem& item, double fontSi
         }
     }
 
-    // 10. Generate appearance stream (/AP)
-    FPDF_BITMAP appearanceBitmap = FPDFBitmap_Create(1, 1, 0);
-    if (!appearanceBitmap) return failFreeText();
-    FPDF_RenderPageBitmap(appearanceBitmap, m_page, 0, 0, 1, 1, 0, FPDF_ANNOT);
-    FPDFBitmap_Destroy(appearanceBitmap);
+    // 10. Appearance stream (/AP)
+    if (drawnFromOutline) {
+        // Our own appearance: once /AP exists PDFium does not generate one (so none of its Helvetica limits apply).
+        const QByteArray content = freeTextAppearanceContent(item, rf, gf, bf);
+        const std::u16string contentU16 = QString::fromLatin1(content).toStdU16String();
+        if (!FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                             reinterpret_cast<FPDF_WIDESTRING>(contentU16.c_str()))) {
+            return failFreeText();
+        }
+    } else {
+        // PDFium generates the appearance from /Contents and /DA while the page is rendered.
+        FPDF_BITMAP appearanceBitmap = FPDFBitmap_Create(1, 1, 0);
+        if (!appearanceBitmap) return failFreeText();
+        FPDF_RenderPageBitmap(appearanceBitmap, m_page, 0, 0, 1, 1, 0, FPDF_ANNOT);
+        FPDFBitmap_Destroy(appearanceBitmap);
+    }
     if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
         return failFreeText();
     }

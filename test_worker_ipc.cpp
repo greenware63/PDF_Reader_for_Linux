@@ -3290,6 +3290,142 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: font size and border width travel separately; hostile sizes fall back to the default." << std::endl;
     }
 
+    // --- Test 37: a text box's glyph outlines cross the wire intact and hostile ones are rejected ---
+    // The UI draws a text box's text itself (any script, wrapping, line breaks) and sends the outlines; the worker
+    // turns them into the appearance. Without outlines the worker has only its built-in Latin-1 font and must refuse
+    // text it cannot draw instead of leaving part of it out.
+    std::cout << "Test 37: FreeText outlines over IPC (wire, hostile input, worker)..." << std::endl;
+    {
+        using namespace pdf::ipc;
+        using Kind = pdf::AnnotationPathElement::Kind;
+        auto el = [](Kind k, double x, double y) { pdf::AnnotationPathElement e; e.kind = k; e.x = x; e.y = y; return e; };
+        const auto M = [&](double x, double y) { return el(Kind::MoveTo, x, y); };
+        const auto L = [&](double x, double y) { return el(Kind::LineTo, x, y); };
+        const auto C = [&](double x, double y) { return el(Kind::CurveTo, x, y); };
+
+        AddAnnotationRequest req;
+        req.documentId = 37;
+        req.pageIndex = 0;
+        req.annotation.subtype = pdf::AnnotationSubtype::FreeText;
+        req.annotation.left = 50.0; req.annotation.bottom = 600.0; req.annotation.right = 250.0; req.annotation.top = 650.0;
+        req.annotation.contents = QString::fromUtf16(u"سلام دنیا");
+        req.annotation.fontSize = 14.0;
+        req.annotation.textOutline = {M(60, 610), L(120.25, 610), L(120.25, 640.5), L(60, 640.5),
+                                      M(200, 620), C(210, 620), C(220, 630), C(220, 640)};
+
+        // 37a: the outline round-trips exactly.
+        AddAnnotationRequest back;
+        if (!deserialize(serialize(req), back) || back.annotation.textOutline.size() != req.annotation.textOutline.size() ||
+            back.annotation.contents != req.annotation.contents) {
+            std::cerr << "[FAIL] 37a: the outline did not round-trip" << std::endl;
+            return 1;
+        }
+        for (size_t i = 0; i < req.annotation.textOutline.size(); ++i) {
+            const auto& a = req.annotation.textOutline[i];
+            const auto& b = back.annotation.textOutline[i];
+            if (a.kind != b.kind || a.x != b.x || a.y != b.y) {
+                std::cerr << "[FAIL] 37a: outline element " << i << " changed on the wire" << std::endl;
+                return 1;
+            }
+        }
+
+        // 37b: hostile outlines are rejected by the decoder.
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        std::vector<std::pair<const char*, std::vector<pdf::AnnotationPathElement>>> hostile;
+        hostile.push_back({"a NaN coordinate", {M(60, 610), L(nan, 640)}});
+        hostile.push_back({"no leading MoveTo", {L(60, 610), L(70, 620)}});
+        hostile.push_back({"two curve points only", {M(60, 610), C(70, 620), C(80, 630)}});
+        hostile.push_back({"a curve cut short by a line", {M(60, 610), C(70, 620), C(80, 630), L(90, 640)}});
+        hostile.push_back({"a coordinate of 1e9", {M(60, 610), L(1.0e9, 640)}});
+        hostile.push_back({"an unknown element kind", {M(60, 610), el(static_cast<Kind>(7), 70, 620)}});
+        std::vector<pdf::AnnotationPathElement> tooMany(pdf::kMaxTextOutlineElements + 1, L(70, 620));
+        tooMany[0] = M(60, 610);
+        hostile.push_back({"more elements than allowed", std::move(tooMany)});
+        for (auto& h : hostile) {
+            AddAnnotationRequest bad = req;
+            bad.annotation.textOutline = h.second;
+            AddAnnotationRequest out;
+            if (deserialize(serialize(bad), out)) {
+                std::cerr << "[FAIL] 37b: an outline with " << h.first << " was accepted by the decoder" << std::endl;
+                return 1;
+            }
+        }
+        QByteArray truncated = serialize(req);
+        truncated.chop(5);
+        AddAnnotationRequest cut;
+        if (deserialize(truncated, cut)) {
+            std::cerr << "[FAIL] 37b: a payload cut in the middle of the outline was accepted" << std::endl;
+            return 1;
+        }
+
+        // 37c: through a real worker. The outline makes the Persian box possible; without it the worker refuses.
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] 37: Failed to create temp dir" << std::endl;
+            return 1;
+        }
+        const QString savedPath = tempDir.filePath("ipc_freetext_outline.pdf");
+        {
+            pdf::ipc::WorkerClient client;
+            if (client.openDocumentSync(37, samplePdf.toStdString()).error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 37c: openDocumentSync failed" << std::endl;
+                return 1;
+            }
+            pdf::AnnotationItem withOutline = req.annotation;
+            withOutline.name = QStringLiteral("ft-ipc-37");
+            withOutline.colorArgb = 0xFF003366; withOutline.hasColor = true; withOutline.flags = 4;
+            pdf::AnnotationItem without = withOutline;
+            without.name = QStringLiteral("ft-ipc-37-bare");
+            without.textOutline.clear();
+            if (client.addAnnotationSync(37, 0, without).success) {
+                std::cerr << "[FAIL] 37c: Persian text without outlines was accepted by the worker" << std::endl;
+                return 1;
+            }
+            const auto added = client.addAnnotationSync(37, 0, withOutline);
+            if (!added.success) {
+                std::cerr << "[FAIL] 37c: the box with outlines was refused: " << added.errorMessage.toStdString() << std::endl;
+                return 1;
+            }
+            const auto listed = client.listAnnotationsSync(37, 0);
+            if (!listed.success || listed.annotations.size() != 1 || listed.annotations[0].name != "ft-ipc-37" ||
+                listed.annotations[0].contents != withOutline.contents) {
+                std::cerr << "[FAIL] 37c: the listed box is wrong (the refused one must not be there)" << std::endl;
+                return 1;
+            }
+#ifdef Q_OS_LINUX
+            int writeFd = ::open(savedPath.toLocal8Bit().constData(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+            if (writeFd < 0) {
+                std::cerr << "[FAIL] 37c: Failed to open saveFd" << std::endl;
+                return 1;
+            }
+            const auto saved = client.saveDocumentSync(37, writeFd, true, "");
+#else
+            const auto saved = client.saveDocumentSync(37, -1, true, savedPath);
+#endif
+            if (!saved.success || saved.bytesWritten == 0) {
+                std::cerr << "[FAIL] 37c: saveDocumentSync failed: " << saved.errorMessage.toStdString() << std::endl;
+                return 1;
+            }
+            client.closeDocumentSync();
+            client.stop();
+        }
+        {
+            pdf::ipc::WorkerClient reader;
+            if (reader.openDocumentSync(137, savedPath.toStdString()).error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 37c: the saved file does not open again" << std::endl;
+                return 1;
+            }
+            const auto listed = reader.listAnnotationsSync(137, 0);
+            if (!listed.success || listed.annotations.size() != 1 || listed.annotations[0].contents != req.annotation.contents) {
+                std::cerr << "[FAIL] 37c: the Persian text box did not survive saving and reopening" << std::endl;
+                return 1;
+            }
+            reader.closeDocumentSync();
+            reader.stop();
+        }
+        std::cout << "  -> Passed: outlines round-trip; hostile outlines are rejected; the worker refuses text it cannot draw." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

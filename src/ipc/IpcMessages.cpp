@@ -391,6 +391,10 @@ QDataStream& operator<<(QDataStream& out, const AnnotationItem& item) {
         }
     }
     out << item.fontSize;
+    out << static_cast<quint32>(item.textOutline.size());
+    for (const auto& e : item.textOutline) {
+        out << static_cast<quint8>(e.kind) << e.x << e.y;
+    }
     return out;
 }
 
@@ -484,6 +488,28 @@ QDataStream& operator>>(QDataStream& in, AnnotationItem& item) {
     in >> item.fontSize;
     if (std::isnan(item.fontSize) || std::isinf(item.fontSize) || item.fontSize < 0.0 || item.fontSize > 144.0) {
         item.fontSize = 0.0;
+    }
+
+    quint32 outlineCount = 0;
+    in >> outlineCount;
+    item.textOutline.clear();
+    if (!validateCollection(in, outlineCount, static_cast<quint32>(kMaxTextOutlineElements), 17)) {
+        return in;
+    }
+    item.textOutline.reserve(outlineCount);
+    for (quint32 i = 0; i < outlineCount; ++i) {
+        quint8 kind = 0;
+        AnnotationPathElement e;
+        in >> kind >> e.x >> e.y;
+        if (in.status() != QDataStream::Ok || kind > static_cast<quint8>(AnnotationPathElement::Kind::CurveTo)) {
+            in.setStatus(QDataStream::ReadCorruptData);
+            return in;
+        }
+        e.kind = static_cast<AnnotationPathElement::Kind>(kind);
+        item.textOutline.push_back(e);
+    }
+    if (!isValidTextOutline(item.textOutline)) {
+        in.setStatus(QDataStream::ReadCorruptData);
     }
     return in;
 }

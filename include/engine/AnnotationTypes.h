@@ -53,6 +53,53 @@ struct AnnotationPoint {
 constexpr size_t kMaxInkStrokes = 256;
 constexpr size_t kMaxInkPoints = 100000;
 
+/// One step of a vector outline, in PDF user space points. A curve is three consecutive CurveTo elements (two
+/// control points, then the end point), the same encoding QPainterPath uses.
+struct AnnotationPathElement {
+    enum class Kind : uint8_t { MoveTo = 0, LineTo = 1, CurveTo = 2 };
+    Kind kind{Kind::MoveTo};
+    double x{0.0};
+    double y{0.0};
+};
+
+/// A text box can be handed to the engine with its text already drawn as filled glyph outlines. A few thousand
+/// characters are some tens of thousands of elements; this bound keeps a hostile request from asking for more.
+constexpr size_t kMaxTextOutlineElements = 250000;
+constexpr double kMaxOutlineCoordinate = 1.0e6;
+
+/// An outline is usable when it is empty ("none") or starts with a MoveTo, has only whole curves (every run of
+/// CurveTo elements is a multiple of three) and has finite, bounded coordinates.
+inline bool isValidTextOutline(const std::vector<AnnotationPathElement>& outline) noexcept {
+    if (outline.empty()) {
+        return true;
+    }
+    if (outline.size() > kMaxTextOutlineElements || outline.front().kind != AnnotationPathElement::Kind::MoveTo) {
+        return false;
+    }
+    size_t curveRun = 0;
+    for (const auto& e : outline) {
+        if (!std::isfinite(e.x) || !std::isfinite(e.y) ||
+            std::fabs(e.x) > kMaxOutlineCoordinate || std::fabs(e.y) > kMaxOutlineCoordinate) {
+            return false;
+        }
+        switch (e.kind) {
+            case AnnotationPathElement::Kind::MoveTo:
+            case AnnotationPathElement::Kind::LineTo:
+                if (curveRun % 3 != 0) {
+                    return false;
+                }
+                curveRun = 0;
+                break;
+            case AnnotationPathElement::Kind::CurveTo:
+                ++curveRun;
+                break;
+            default:
+                return false;
+        }
+    }
+    return curveRun % 3 == 0;
+}
+
 // Represents 4 vertices (8 coordinates) for text markup or link attachment points in PDF points:
 // (x1, y1) top-left, (x2, y2) top-right, (x3, y3) bottom-left, (x4, y4) bottom-right
 struct AnnotationQuad {
@@ -158,6 +205,10 @@ struct AnnotationItem {
     QString uri;                            // For Link subtype (action URI)
     double borderWidth{0.0};                // Border / stroke width in PDF points (0.0 = subtype default)
     double fontSize{0.0};                   // For FreeText: font size in PDF points (0.0 = default, 12)
+    /// For FreeText: the text drawn as filled glyph outlines in PDF user space (max kMaxTextOutlineElements). The UI
+    /// makes it with Qt's text layout, so the box can show any script, wrap and keep line breaks; the worker only
+    /// turns it into the appearance stream. Empty = the engine draws plain Latin-1 text with its built-in font.
+    std::vector<AnnotationPathElement> textOutline;
     std::vector<std::vector<AnnotationPoint>> inkStrokes; // For Ink subtype (max 256 strokes, max 100,000 points total)
     /// Square/Circle: the shape has an interior fill (/IC), so clicking inside it selects it. Unfilled shapes are
     /// selected by their outline only. Set by the engine while listing and used by contains(); it is not part of the
@@ -283,7 +334,8 @@ inline uint64_t annotationBudgetCost(const AnnotationItem& a) noexcept {
         inkPointCount += static_cast<uint64_t>(s.size());
     }
     return 192ull + 2ull * chars + 64ull * static_cast<uint64_t>(a.quadPoints.size()) +
-           16ull * inkPointCount + 32ull * static_cast<uint64_t>(a.inkStrokes.size());
+           16ull * inkPointCount + 32ull * static_cast<uint64_t>(a.inkStrokes.size()) +
+           24ull * static_cast<uint64_t>(a.textOutline.size());
 }
 
 QDataStream& operator<<(QDataStream& out, const AnnotationPoint& p);
