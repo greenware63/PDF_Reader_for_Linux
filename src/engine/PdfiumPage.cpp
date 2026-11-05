@@ -3,6 +3,7 @@
 #include "layout/DocumentLayout.h"
 #include <fpdf_text.h>
 #include <fpdf_annot.h>
+#include <fpdf_edit.h>
 #include <fpdf_doc.h>
 #include <vector>
 #include <algorithm>
@@ -26,6 +27,104 @@ static constexpr int64_t MAX_WHOLE_PAGE_PIXELS = 16 * 1024 * 1024; // 16 MP max 
 // Safety bounds on individual tile requests
 static constexpr int MAX_TILE_DIM = 4096;
 static constexpr int64_t MAX_TILE_PIXELS = 16 * 1024 * 1024;
+
+// Caller holds the PDFium mutex. Whether a Square/Circle paints its interior, i.e. whether a click inside it should
+// select it. PDFium builds an appearance stream for every shape that lacks one as soon as the page is loaded, and
+// from then on FPDFAnnot_GetColor refuses to report /IC (it only answers for annotations without an /AP), so the
+// appearance itself is inspected: any path object that is filled makes the shape filled. That also covers shapes
+// whose own appearance (made by another application) fills the inside.
+static bool shapePaintsInterior(FPDF_ANNOTATION annot) {
+    // /CA 0 makes the whole annotation invisible, so there is no visible fill to click on either.
+    float opacity = 1.0f;
+    if (FPDFAnnot_GetNumberValue(annot, "CA", &opacity) && opacity <= 0.0f) {
+        return false;
+    }
+
+    constexpr int kMaxObjectsInspected = 64;
+    const int objectCount = FPDFAnnot_GetObjectCount(annot);
+    for (int i = 0; i < objectCount && i < kMaxObjectsInspected; ++i) {
+        FPDF_PAGEOBJECT object = FPDFAnnot_GetObject(annot, i);
+        int fillMode = FPDF_FILLMODE_NONE;
+        FPDF_BOOL stroke = false;
+        if (object && FPDFPageObj_GetType(object) == FPDF_PAGEOBJ_PATH &&
+            FPDFPath_GetDrawMode(object, &fillMode, &stroke) && fillMode != FPDF_FILLMODE_NONE) {
+            return true;
+        }
+    }
+    if (objectCount > 0) {
+        return false;   // it has an appearance and that appearance draws no fill
+    }
+
+    // No appearance at all (the page was loaded without a form environment): /IC is still readable.
+    unsigned int r = 0, g = 0, b = 0, a = 0;
+    return FPDFAnnot_HasKey(annot, "IC") &&
+           FPDFAnnot_GetColor(annot, FPDFANNOT_COLORTYPE_InteriorColor, &r, &g, &b, &a) && a > 0;
+}
+
+// PDFium draws a FreeText box's text itself with the built-in Helvetica when no appearance is supplied. That font
+// holds Latin-1 only and PDFium puts the whole text on one line: any other character is silently left out and line
+// breaks vanish. Such a box is refused instead of being created with text missing; the UI supplies the text as glyph
+// outlines and never takes this path.
+static bool drawableByBuiltInFont(const QString& text) {
+    for (const QChar ch : text) {
+        const char16_t u = ch.unicode();
+        if (u > 0xFF || (u < 0x20 && u != u'\t') || (u >= 0x7F && u < 0xA0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A number for a PDF content stream: fixed point with up to three decimals, no exponent, no trailing zeros.
+static QByteArray pdfNumber(double v) {
+    QByteArray s = QByteArray::number(v, 'f', 3);
+    if (s.contains('.')) {
+        while (s.endsWith('0')) {
+            s.chop(1);
+        }
+        if (s.endsWith('.')) {
+            s.chop(1);
+        }
+    }
+    return (s == "-0") ? QByteArray("0") : s;
+}
+
+// Content stream of the appearance of a FreeText box whose text is given as filled glyph outlines. The form's
+// /BBox is the annotation's /Rect, so the outline's page coordinates are used as they are. Glyph outlines are
+// designed for the non-zero winding rule: contours that overlap must not cut holes into each other.
+static QByteArray freeTextAppearanceContent(const AnnotationItem& item, double r, double g, double b) {
+    QByteArray out;
+    out.reserve(static_cast<qsizetype>(item.textOutline.size()) * 14 + 128);
+    out += "q\n";
+    const QByteArray color = pdfNumber(r) + ' ' + pdfNumber(g) + ' ' + pdfNumber(b);
+    if (item.borderWidth > 0.0 && item.borderWidth <= 100.0 && std::isfinite(item.borderWidth)) {
+        // The frame is stroked inside the box: half the line width in from every edge.
+        const double half = item.borderWidth / 2.0;
+        const double w = (item.right - item.left) - item.borderWidth;
+        const double h = (item.top - item.bottom) - item.borderWidth;
+        if (w > 0.0 && h > 0.0) {
+            out += color + " RG " + pdfNumber(item.borderWidth) + " w " + pdfNumber(item.left + half) + ' ' +
+                   pdfNumber(item.bottom + half) + ' ' + pdfNumber(w) + ' ' + pdfNumber(h) + " re S\n";
+        }
+    }
+    out += color + " rg\n";
+    const auto& path = item.textOutline;
+    for (size_t i = 0; i < path.size();) {
+        const auto& e = path[i];
+        if (e.kind == AnnotationPathElement::Kind::CurveTo) {
+            // isValidTextOutline() guarantees that three elements follow.
+            out += pdfNumber(path[i].x) + ' ' + pdfNumber(path[i].y) + ' ' + pdfNumber(path[i + 1].x) + ' ' +
+                   pdfNumber(path[i + 1].y) + ' ' + pdfNumber(path[i + 2].x) + ' ' + pdfNumber(path[i + 2].y) + " c\n";
+            i += 3;
+        } else {
+            out += pdfNumber(e.x) + ' ' + pdfNumber(e.y) +
+                   (e.kind == AnnotationPathElement::Kind::MoveTo ? " m\n" : " l\n");
+            ++i;
+        }
+    }
+    out += "f\nQ\n";
+    return out;
+}
 
 PdfiumPage::PdfiumPage(DocumentHandle doc, int pageIndex, std::shared_ptr<FormEnv> form)
     : m_doc(std::move(doc)), m_form(std::move(form)), m_pageIndex(pageIndex) {
@@ -537,6 +636,10 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations(bool* truncated) {
                              (static_cast<uint32_t>(r) << 16) |
                              (static_cast<uint32_t>(g) << 8) |
                              (static_cast<uint32_t>(b));
+        }
+
+        if (item.subtype == AnnotationSubtype::Square || item.subtype == AnnotationSubtype::Circle) {
+            item.interiorFilled = shapePaintsInterior(annot);
         }
 
         float hRadius = 0.0f, vRadius = 0.0f, bWidth = 0.0f;
@@ -1182,6 +1285,144 @@ bool PdfiumPage::addInkAnnotation(const AnnotationItem& item, double borderWidth
     FPDFBitmap_Destroy(appearanceBitmap);
     if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
         return failInk();
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
+}
+
+bool PdfiumPage::addFreeTextAnnotation(const AnnotationItem& item, double fontSize) {
+    if (!m_page || !item.isValid() || item.subtype != AnnotationSubtype::FreeText) {
+        return false;
+    }
+
+    constexpr double kMaxCoord = 1.0e6;
+    const double coords[4] = {item.left, item.bottom, item.right, item.top};
+    for (const double v : coords) {
+        if (!std::isfinite(v) || std::fabs(v) > kMaxCoord) {
+            return false;
+        }
+    }
+    if (item.right <= item.left || item.top <= item.bottom ||
+        (item.right - item.left) < 0.5 || (item.top - item.bottom) < 0.5) {
+        return false;
+    }
+
+    if (item.contents.isEmpty() || item.contents.size() > 32768) {
+        return false;
+    }
+
+    // Text that comes with its own outlines is drawn from them; any other text must be something PDFium's built-in
+    // font can draw, or the box would be created with part of its text missing.
+    const bool drawnFromOutline = !item.textOutline.empty();
+    if (!isValidTextOutline(item.textOutline) || (!drawnFromOutline && !drawableByBuiltInFont(item.contents))) {
+        return false;
+    }
+
+    double effFontSize = (fontSize > 0.0 && fontSize <= 144.0 && std::isfinite(fontSize)) ? fontSize : 12.0;
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    // 1. Create annotation
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(m_page, FPDF_ANNOT_FREETEXT);
+    if (!annot) {
+        return false;
+    }
+    const int annotIndex = FPDFPage_GetAnnotCount(m_page) - 1;
+    auto failFreeText = [&]() {
+        FPDFPage_CloseAnnot(annot);
+        FPDFPage_RemoveAnnot(m_page, annotIndex);
+        return false;
+    };
+
+    // 2. Set /Rect
+    FS_RECTF rect{};
+    rect.left = static_cast<float>(item.left);
+    rect.bottom = static_cast<float>(item.bottom);
+    rect.right = static_cast<float>(item.right);
+    rect.top = static_cast<float>(item.top);
+    if (!FPDFAnnot_SetRect(annot, &rect)) {
+        return failFreeText();
+    }
+
+    // 3. Set Color (/C)
+    uint32_t a = (item.colorArgb >> 24) & 0xFF;
+    uint32_t r = (item.colorArgb >> 16) & 0xFF;
+    uint32_t g = (item.colorArgb >> 8) & 0xFF;
+    uint32_t b = item.colorArgb & 0xFF;
+    if (a == 0 && item.colorArgb == 0) {
+        // Default text color: Black
+        r = 0; g = 0; b = 0; a = 255;
+    }
+    // NOTE: /C on a FreeText annotation is the BACKGROUND fill, not the text colour (that lives in /DA below).
+    // Setting it to the text colour painted an opaque block of the same colour over the page and hid the text.
+    (void)a;
+
+    // 4. Set Default Appearance (/DA)
+    double rf = r / 255.0;
+    double gf = g / 255.0;
+    double bf = b / 255.0;
+    QString daString = QStringLiteral("/Helv %1 Tf %2 %3 %4 rg")
+        .arg(effFontSize)
+        .arg(rf, 0, 'f', 3)
+        .arg(gf, 0, 'f', 3)
+        .arg(bf, 0, 'f', 3);
+    const std::u16string daU16 = daString.toStdU16String();
+    if (!FPDFAnnot_SetStringValue(annot, "DA", reinterpret_cast<FPDF_WIDESTRING>(daU16.c_str()))) {
+        return failFreeText();
+    }
+
+    // 5. Set Border width (/BS) if specified
+    if (item.borderWidth > 0.0 && item.borderWidth <= 100.0 && std::isfinite(item.borderWidth)) {
+        FPDFAnnot_SetBorder(annot, 0.0f, 0.0f, static_cast<float>(item.borderWidth));
+    }
+
+    // 6. Set Flags (/F)
+    uint32_t flags = item.flags ? item.flags : FPDF_ANNOT_FLAG_PRINT;
+    if (!FPDFAnnot_SetFlags(annot, flags)) {
+        return failFreeText();
+    }
+
+    // 7. Set /NM (unique identifier string)
+    if (!item.name.isEmpty()) {
+        const std::u16string u16 = item.name.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "NM", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failFreeText();
+        }
+    }
+
+    // 8. Set /Contents
+    const std::u16string contentsU16 = item.contents.toStdU16String();
+    if (!FPDFAnnot_SetStringValue(annot, "Contents", reinterpret_cast<FPDF_WIDESTRING>(contentsU16.c_str()))) {
+        return failFreeText();
+    }
+
+    // 9. Set /T (Author)
+    if (!item.author.isEmpty()) {
+        const std::u16string u16 = item.author.toStdU16String();
+        if (!FPDFAnnot_SetStringValue(annot, "T", reinterpret_cast<FPDF_WIDESTRING>(u16.c_str()))) {
+            return failFreeText();
+        }
+    }
+
+    // 10. Appearance stream (/AP)
+    if (drawnFromOutline) {
+        // Our own appearance: once /AP exists PDFium does not generate one (so none of its Helvetica limits apply).
+        const QByteArray content = freeTextAppearanceContent(item, rf, gf, bf);
+        const std::u16string contentU16 = QString::fromLatin1(content).toStdU16String();
+        if (!FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                             reinterpret_cast<FPDF_WIDESTRING>(contentU16.c_str()))) {
+            return failFreeText();
+        }
+    } else {
+        // PDFium generates the appearance from /Contents and /DA while the page is rendered.
+        FPDF_BITMAP appearanceBitmap = FPDFBitmap_Create(1, 1, 0);
+        if (!appearanceBitmap) return failFreeText();
+        FPDF_RenderPageBitmap(appearanceBitmap, m_page, 0, 0, 1, 1, 0, FPDF_ANNOT);
+        FPDFBitmap_Destroy(appearanceBitmap);
+    }
+    if (FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0) <= sizeof(FPDF_WCHAR)) {
+        return failFreeText();
     }
 
     FPDFPage_CloseAnnot(annot);

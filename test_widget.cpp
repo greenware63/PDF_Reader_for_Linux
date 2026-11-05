@@ -2,6 +2,7 @@
 #include "ui/AppSettings.h"
 #include "ui/PdfViewerWidget.h"
 #include "ui/ImageUtils.h"
+#include "ui/FreeTextLayout.h"
 #include "ui/MainWindow.h"
 #include "ui/ThumbnailListWidget.h"
 #include <QTabWidget>
@@ -14,6 +15,7 @@
 #include <QImage>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontDatabase>
 #include <QPainter>
 #include <QScrollBar>
 #include <QThread>
@@ -36,6 +38,7 @@
 #include <fstream>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <vector>
 #include <cstring>
 #include <QSettings>
@@ -5728,7 +5731,847 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Ink annotations programmatic creation, mouse drawing UI, undo/redo, and save verified." << std::endl;
     }
 
-    std::cout << " ALL 53 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- Test 54: FreeText Annotations (/FreeText) on PdfViewerWidget ---
+    std::cout << "Test 54: FreeText Annotations on PdfViewerWidget..." << std::endl;
+    {
+        QTemporaryDir tmp;
+        if (!tmp.isValid()) {
+            std::cerr << "[FAIL] 54 could not create temp directory" << std::endl;
+            return 1;
+        }
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(samplePath));
+
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 54 document did not finish opening" << std::endl;
+            return 1;
+        }
+
+        if (!viewer.addFreeTextAnnotation(0, QRectF(100.0, 600.0, 200.0, 50.0), QStringLiteral("Widget FreeText Note"), 0xFF003366, 14.0)) {
+            std::cerr << "[FAIL] 54 addFreeTextAnnotation returned false" << std::endl;
+            return 1;
+        }
+
+        const auto cmds = viewer.editLog().activeCommands();
+        if (cmds.size() != 1 ||
+            cmds[0].after.subtype != pdf::AnnotationSubtype::FreeText ||
+            cmds[0].after.contents != "Widget FreeText Note" ||
+            std::abs(cmds[0].after.fontSize - 14.0) > 0.01 || cmds[0].after.borderWidth != 0.0) {
+            std::cerr << "[FAIL] 54 EditLog did not record FreeText annotation properly" << std::endl;
+            return 1;
+        }
+        {
+            // The font size must not turn into a border of the same width on the stored annotation.
+            const auto listed = viewer.renderWorker().listAnnotationsSync(viewer.currentDocumentId(), 0, 15000);
+            bool found = false;
+            for (const auto& a : listed.annotations) {
+                if (a.subtype == pdf::AnnotationSubtype::FreeText && a.name.startsWith(QStringLiteral("pdfr-"))) {
+                    found = true;
+                    if (std::abs(a.borderWidth) > 1e-6) {
+                        std::cerr << "[FAIL] 54 the text box got a " << a.borderWidth << " pt border from its font size" << std::endl;
+                        return 1;
+                    }
+                }
+            }
+            if (!listed.success || !found) {
+                std::cerr << "[FAIL] 54 the text box is missing from the page" << std::endl;
+                return 1;
+            }
+        }
+
+        // Test Undo & Redo
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 54 undoEdit failed" << std::endl;
+            return 1;
+        }
+        if (!viewer.editLog().activeCommands().empty()) {
+            std::cerr << "[FAIL] 54 EditLog activeCommands not empty after undo" << std::endl;
+            return 1;
+        }
+        if (!viewer.redoEdit()) {
+            std::cerr << "[FAIL] 54 redoEdit failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().activeCommands().size() != 1) {
+            std::cerr << "[FAIL] 54 EditLog activeCommands not restored after redo" << std::endl;
+            return 1;
+        }
+
+        // Save document with FreeText annotation
+        const QString savedPath = tmp.filePath(QStringLiteral("freetext_saved.pdf"));
+        if (!viewer.saveDocument(savedPath)) {
+            std::cerr << "[FAIL] 54 saveDocument failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 54 EditLog is dirty after save" << std::endl;
+            return 1;
+        }
+        {
+            // The requested 14 pt must reach the saved text box (its /DA names the font size).
+            QFile saved(savedPath);
+            if (!saved.open(QIODevice::ReadOnly) || !saved.readAll().contains("14 Tf")) {
+                std::cerr << "[FAIL] 54 the 14 pt font size did not reach the saved text box" << std::endl;
+                return 1;
+            }
+        }
+
+        std::cout << "  -> Passed: FreeText annotations creation, undo/redo, and save verified." << std::endl;
+    }
+
+#ifdef PDF_WORKER_TEST_HOOKS
+    // --- Test 55: a tooltip hit test gives up quickly on a busy worker and is never stacked ---
+    // Hovering used to wait up to 5 s for the worker inside a nested event loop, once per tooltip event, so a
+    // worker that was busy (or hung) kept the viewer in repeated multi-second waits.
+    std::cout << "Test 55: Tooltip hit test is bounded and not stacked on a busy worker..." << std::endl;
+    {
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(samplePath));
+        QElapsedTimer opened;
+        opened.start();
+        while (opened.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 55 document did not finish opening" << std::endl;
+            return 1;
+        }
+        const QPoint pos = viewer.viewport()->rect().center();
+        const QPoint globalPos = viewer.viewport()->mapToGlobal(pos);
+
+        // Park the engine thread: every later request queues behind it and is never answered.
+        viewer.renderWorker().hangEngineForTesting();
+        QElapsedTimer settle;
+        settle.start();
+        while (settle.elapsed() < 500) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+
+        qint64 innerMs = -1;
+        QTimer::singleShot(100, &viewer, [&]() {
+            QHelpEvent second(QEvent::ToolTip, pos, globalPos);
+            QElapsedTimer inner;
+            inner.start();
+            QApplication::sendEvent(viewer.viewport(), &second);
+            innerMs = inner.elapsed();
+        });
+        QHelpEvent first(QEvent::ToolTip, pos, globalPos);
+        QElapsedTimer outer;
+        outer.start();
+        QApplication::sendEvent(viewer.viewport(), &first);
+        const qint64 outerMs = outer.elapsed();
+        viewer.renderWorker().stop();
+
+        if (outerMs > 2000) {
+            std::cerr << "[FAIL] 55a tooltip waited " << outerMs << " ms on a busy worker (limit 2000)" << std::endl;
+            return 1;
+        }
+        if (innerMs < 0 || innerMs > 150) {
+            std::cerr << "[FAIL] 55b a tooltip event arriving during a pending one waited " << innerMs
+                      << " ms instead of returning at once" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: tooltip gave up after " << outerMs << " ms and a second hover did not stack." << std::endl;
+    }
+#endif
+
+    // --- Test 56: new notes, shapes and text boxes are placed on the page, wherever the user clicked ---
+    // The default size hung off the page (and out of reach) whenever the click was near the right or bottom edge.
+    std::cout << "Test 56: Default placement keeps new annotations on the page..." << std::endl;
+    {
+        auto near = [](double a, double b) { return std::abs(a - b) < 1e-6; };
+        auto sameRect = [&](const QRectF& a, const QRectF& b) {
+            return near(a.x(), b.x()) && near(a.y(), b.y()) && near(a.width(), b.width()) && near(a.height(), b.height());
+        };
+
+        // 56a: the placement rule on its own. A 100 x 60 shape on a 612 x 792 page keeps 4 pt to the edge.
+        struct Case { QPointF anchor; QRectF expect; const char* what; };
+        const Case cases[] = {
+            {{200.0, 400.0}, QRectF(200.0, 340.0, 100.0, 60.0), "a click in the middle is kept"},
+            {{600.0, 400.0}, QRectF(508.0, 340.0, 100.0, 60.0), "near the right edge it moves left"},
+            {{200.0, 10.0}, QRectF(200.0, 4.0, 100.0, 60.0), "near the bottom edge it moves up"},
+            {{-50.0, 900.0}, QRectF(4.0, 728.0, 100.0, 60.0), "outside the top-left corner it moves in"},
+            {{612.0, 0.0}, QRectF(508.0, 4.0, 100.0, 60.0), "in the bottom-right corner it moves in"},
+        };
+        for (const auto& c : cases) {
+            const QRectF got = ui::PdfViewerWidget::placeOnPage(c.anchor, QSizeF(100.0, 60.0), QSizeF(612.0, 792.0));
+            if (!sameRect(got, c.expect)) {
+                std::cerr << "[FAIL] 56a " << c.what << ": got " << got.x() << "," << got.y() << " " << got.width() << "x"
+                          << got.height() << std::endl;
+                return 1;
+            }
+        }
+        if (!sameRect(ui::PdfViewerWidget::placeOnPage(QPointF(10.0, 40.0), QSizeF(100.0, 60.0), QSizeF(80.0, 50.0)),
+                      QRectF(0.0, 0.0, 80.0, 50.0))) {
+            std::cerr << "[FAIL] 56a a page smaller than the shape must shrink it to the page" << std::endl;
+            return 1;
+        }
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        if (!ui::PdfViewerWidget::placeOnPage(QPointF(nan, 10.0), QSizeF(100.0, 60.0), QSizeF(612.0, 792.0)).isEmpty() ||
+            !ui::PdfViewerWidget::placeOnPage(QPointF(10.0, 10.0), QSizeF(100.0, 60.0), QSizeF(0.0, 792.0)).isEmpty() ||
+            !ui::PdfViewerWidget::placeOnPage(QPointF(10.0, 10.0), QSizeF(0.0, 60.0), QSizeF(612.0, 792.0)).isEmpty()) {
+            std::cerr << "[FAIL] 56a a non-finite anchor or an empty size/page must give an empty rectangle" << std::endl;
+            return 1;
+        }
+
+        // 56b: through the viewer, with a click 5 pt from the bottom-right corner of the page.
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(samplePath));
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 56b document did not finish opening" << std::endl;
+            return 1;
+        }
+        const auto& pl = viewer.layout().getPageLayout(0);
+        const double pw = pl.widthPoints;
+        const double ph = pl.heightPoints;
+        struct Kind { pdf::AnnotationSubtype subtype; double w, h; const char* what; };
+        const Kind kinds[] = {
+            {pdf::AnnotationSubtype::Text, 24.0, 24.0, "sticky note"},
+            {pdf::AnnotationSubtype::Square, 100.0, 60.0, "rectangle"},
+            {pdf::AnnotationSubtype::Circle, 100.0, 60.0, "circle"},
+            {pdf::AnnotationSubtype::FreeText, 0.0, 0.0, "text box"},   // sized by its text (Test 58), not fixed
+        };
+        for (const auto& k : kinds) {
+            if (!viewer.addDefaultAnnotationAt(0, k.subtype, pw - 5.0, 10.0, QStringLiteral("placed in the corner"))) {
+                std::cerr << "[FAIL] 56b adding a " << k.what << " in the corner returned false" << std::endl;
+                return 1;
+            }
+        }
+        if (viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Ink, 100.0, 100.0) ||
+            viewer.addDefaultAnnotationAt(99, pdf::AnnotationSubtype::Square, 100.0, 100.0)) {
+            std::cerr << "[FAIL] 56b an unsupported subtype or a missing page must be refused" << std::endl;
+            return 1;
+        }
+        const auto listed = viewer.renderWorker().listAnnotationsSync(viewer.currentDocumentId(), 0, 15000);
+        if (!listed.success) {
+            std::cerr << "[FAIL] 56b listing annotations failed" << std::endl;
+            return 1;
+        }
+        for (const auto& k : kinds) {
+            bool found = false;
+            for (const auto& a : listed.annotations) {
+                if (a.subtype != k.subtype || !a.name.startsWith(QStringLiteral("pdfr-"))) {
+                    continue;
+                }
+                found = true;
+                const double l = std::min(a.left, a.right), r = std::max(a.left, a.right);
+                const double b = std::min(a.bottom, a.top), t = std::max(a.bottom, a.top);
+                if (l < -1e-6 || b < -1e-6 || r > pw + 1e-6 || t > ph + 1e-6) {
+                    std::cerr << "[FAIL] 56b the " << k.what << " hangs off the page: " << l << "," << b << " - " << r << ","
+                              << t << " on a " << pw << " x " << ph << " page" << std::endl;
+                    return 1;
+                }
+                // PDFium itself shrinks a sticky note to its own 20 x 20 icon inside the box it was given.
+                const bool isNote = k.subtype == pdf::AnnotationSubtype::Text;
+                const bool isTextBox = k.subtype == pdf::AnnotationSubtype::FreeText;
+                const bool sizeOk = isTextBox ? (r - l > 0.0 && t - b > 0.0)
+                                    : isNote  ? (r - l <= k.w + 1e-6 && t - b <= k.h + 1e-6)
+                                              : (near(r - l, k.w) && near(t - b, k.h));
+                if (!sizeOk) {
+                    std::cerr << "[FAIL] 56b the " << k.what << " changed size: " << (r - l) << " x " << (t - b) << std::endl;
+                    return 1;
+                }
+            }
+            if (!found) {
+                std::cerr << "[FAIL] 56b the " << k.what << " is missing from the page" << std::endl;
+                return 1;
+            }
+        }
+        std::cout << "  -> Passed: notes, shapes and text boxes clicked into a page corner are moved onto the page." << std::endl;
+    }
+
+    // Persian needs an installed font with Arabic script (DejaVu Sans has one). Without it the Persian parts of Tests 57
+    // and 58 are skipped (and say so); a build that must not skip them sets PDFR_REQUIRE_ARABIC_FONT=1 and fails instead.
+    const bool haveArabic = !QFontDatabase::families(QFontDatabase::Arabic).isEmpty();
+    if (!haveArabic && qEnvironmentVariableIntValue("PDFR_REQUIRE_ARABIC_FONT") != 0) {
+        std::cerr << "[FAIL] PDFR_REQUIRE_ARABIC_FONT is set but no installed font has Arabic script" << std::endl;
+        return 1;
+    }
+
+    // --- Test 57: a text box's text laid out as outlines: line breaks, wrapping, scripts, what cannot be drawn ---
+    // The worker's own font is Latin-1 and one line, so a text box used to lose every other character and every line
+    // break. The viewer now lays the text out with Qt and hands the worker the outlines.
+    std::cout << "Test 57: Text box layout (line breaks, wrapping, Persian, undrawable characters)..." << std::endl;
+    {
+        using ui::layoutFreeText;
+        using ui::FreeTextLayoutResult;
+        auto ok = [](const FreeTextLayoutResult& r) {
+            return !r.outline.empty() && pdf::isValidTextOutline(r.outline) && !r.tooLarge && r.undrawable.isEmpty();
+        };
+        auto xRange = [](const FreeTextLayoutResult& r, double& lo, double& hi) {
+            lo = 1e18;
+            hi = -1e18;
+            for (const auto& e : r.outline) {
+                lo = std::min(lo, e.x);
+                hi = std::max(hi, e.x);
+            }
+        };
+        auto yRange = [](const FreeTextLayoutResult& r, double& lo, double& hi) {
+            lo = 1e18;
+            hi = -1e18;
+            for (const auto& e : r.outline) {
+                lo = std::min(lo, e.y);
+                hi = std::max(hi, e.y);
+            }
+        };
+
+        // 57a: one line; everything scales with the font size and the outline stays inside its block.
+        const auto one12 = layoutFreeText(QStringLiteral("Hello text box"), 12.0, 0.0);
+        const auto one24 = layoutFreeText(QStringLiteral("Hello text box"), 24.0, 0.0);
+        if (!ok(one12) || one12.lineCount != 1 || !ok(one24)) {
+            std::cerr << "[FAIL] 57a a plain English line did not lay out" << std::endl;
+            return 1;
+        }
+        if (one12.size.height() < 12.0 || one12.size.height() > 12.0 * 1.7 || one12.size.width() < 40.0) {
+            std::cerr << "[FAIL] 57a implausible size for 12 pt text: " << one12.size.width() << " x " << one12.size.height() << std::endl;
+            return 1;
+        }
+        if (std::abs(one24.size.width() / one12.size.width() - 2.0) > 0.02 ||
+            std::abs(one24.size.height() / one12.size.height() - 2.0) > 0.02) {
+            std::cerr << "[FAIL] 57a the layout does not scale with the font size" << std::endl;
+            return 1;
+        }
+        double xlo, xhi, ylo, yhi;
+        xRange(one12, xlo, xhi);
+        yRange(one12, ylo, yhi);
+        if (ylo < -one12.size.height() - 0.5 || yhi > 0.5 || xlo < -1.0 || xhi > one12.size.width() + 1.0) {
+            std::cerr << "[FAIL] 57a the outline leaves its block: x " << xlo << ".." << xhi << " y " << ylo << ".." << yhi << std::endl;
+            return 1;
+        }
+
+        // 57b: a line break starts a new line, a blank line is kept, CR LF is one break.
+        const double lineHeight = layoutFreeText(QStringLiteral("a"), 12.0, 0.0).size.height();
+        const auto two = layoutFreeText(QStringLiteral("a\nb"), 12.0, 0.0);
+        const auto three = layoutFreeText(QStringLiteral("a\n\nb"), 12.0, 0.0);
+        const auto crlf = layoutFreeText(QStringLiteral("a\r\nb"), 12.0, 0.0);
+        if (two.lineCount != 2 || three.lineCount != 3 || crlf.lineCount != 2 ||
+            std::abs(two.size.height() - 2.0 * lineHeight) > 0.5 || std::abs(three.size.height() - 3.0 * lineHeight) > 0.5) {
+            std::cerr << "[FAIL] 57b line breaks: " << two.lineCount << "/" << three.lineCount << "/" << crlf.lineCount
+                      << " lines, heights " << two.size.height() << "/" << three.size.height() << " (one line " << lineHeight << ")" << std::endl;
+            return 1;
+        }
+
+        // 57c: wrapping at word boundaries, and anywhere inside a word that is longer than the line.
+        const auto wrapped = layoutFreeText(
+            QStringLiteral("The quick brown fox jumps over the lazy dog and keeps running through the field"), 12.0, 120.0);
+        xRange(wrapped, xlo, xhi);
+        if (!ok(wrapped) || wrapped.lineCount < 3 || wrapped.size.width() > 120.01 || xhi > 120.5 ||
+            std::abs(wrapped.size.height() - wrapped.lineCount * lineHeight) > 1.0) {
+            std::cerr << "[FAIL] 57c wrapping at 120 pt: " << wrapped.lineCount << " lines, width " << wrapped.size.width()
+                      << ", right edge " << xhi << std::endl;
+            return 1;
+        }
+        const auto longWord = layoutFreeText(QString(60, QLatin1Char('W')), 12.0, 50.0);
+        xRange(longWord, xlo, xhi);
+        if (!ok(longWord) || longWord.lineCount < 2 || xhi > 50.5) {
+            std::cerr << "[FAIL] 57c a word longer than the line must wrap inside it (" << longWord.lineCount << " lines, right edge "
+                      << xhi << ")" << std::endl;
+            return 1;
+        }
+
+        // 57d: a tab is four spaces; control characters are left out.
+        const auto tab = layoutFreeText(QStringLiteral("a\tb"), 12.0, 0.0);
+        const auto spaces = layoutFreeText(QStringLiteral("a    b"), 12.0, 0.0);
+        const auto ctrl = layoutFreeText(QStringLiteral("a\x01\x7f") + QStringLiteral("b"), 12.0, 0.0);
+        const auto plain = layoutFreeText(QStringLiteral("ab"), 12.0, 0.0);
+        if (std::abs(tab.size.width() - spaces.size.width()) > 1e-6 || tab.outline.size() != spaces.outline.size() ||
+            std::abs(ctrl.size.width() - plain.size.width()) > 1e-6 || ctrl.outline.size() != plain.outline.size() || !ctrl.undrawable.isEmpty()) {
+            std::cerr << "[FAIL] 57d a tab must be four spaces and control characters must be dropped without complaint" << std::endl;
+            return 1;
+        }
+
+        // 57e: Persian (needs a font with Arabic script): shaped, drawn, right-to-left paragraphs flush right.
+        if (!haveArabic) {
+            std::cout << "  -> 57e SKIPPED: no installed font has Arabic script, so Persian layout was NOT exercised." << std::endl;
+        } else {
+            const QString fa = QString::fromUtf16(u"سلام دنیا");
+            const auto faLayout = layoutFreeText(fa, 12.0, 200.0);
+            xRange(faLayout, xlo, xhi);
+            if (!ok(faLayout) || faLayout.lineCount != 1) {
+                std::cerr << "[FAIL] 57e the Persian line did not lay out (undrawable: " << faLayout.undrawable.toStdString() << ")" << std::endl;
+                return 1;
+            }
+            if (xhi < 197.0 || xhi > 200.5 || xlo < 200.0 - faLayout.size.width() - 1.0) {
+                std::cerr << "[FAIL] 57e a Persian line must sit flush right against the wrap width (ink " << xlo << ".." << xhi << " of 200)" << std::endl;
+                return 1;
+            }
+            const auto en = layoutFreeText(QStringLiteral("Hello"), 12.0, 200.0);
+            double enLo, enHi;
+            xRange(en, enLo, enHi);
+            if (enLo > 3.0 || enHi > 100.0) {
+                std::cerr << "[FAIL] 57e an English line must sit flush left (ink " << enLo << ".." << enHi << ")" << std::endl;
+                return 1;
+            }
+            const auto mixed = layoutFreeText(QStringLiteral("Hello\n") + QString::fromUtf16(u"سلام"), 12.0, 200.0);
+            xRange(mixed, xlo, xhi);
+            if (!ok(mixed) || mixed.lineCount != 2 || xlo > 3.0 || xhi < 197.0) {
+                std::cerr << "[FAIL] 57e a box with an English and a Persian line must align each its own way" << std::endl;
+                return 1;
+            }
+            // Joiners, non-joiners and Persian digits are not "undrawable".
+            const auto zwnj = layoutFreeText(QString::fromUtf16(u"می‌خواهم ۱۲۳۴۵۶۷۸۹۰"), 12.0, 0.0);
+            if (!ok(zwnj)) {
+                std::cerr << "[FAIL] 57e a zero-width non-joiner or Persian digits were reported undrawable: "
+                          << zwnj.undrawable.toStdString() << std::endl;
+                return 1;
+            }
+        }
+
+        // 57f: a character that no font has is reported, not dropped; marks and joiners alone are not.
+        const char32_t missing = 0x10FFFD;   // last code point of the private use planes: in no font
+        const auto bad = layoutFreeText(QString::fromUcs4(U"ab") + QString::fromUcs4(&missing, 1), 12.0, 0.0);
+        if (bad.undrawable != QString::fromUcs4(&missing, 1)) {
+            std::cerr << "[FAIL] 57f a character in no font was not reported as undrawable" << std::endl;
+            return 1;
+        }
+        if (!layoutFreeText(QString::fromUcs4(U"ab ‍‌́"), 12.0, 0.0).undrawable.isEmpty()) {
+            std::cerr << "[FAIL] 57f spaces, joiners and combining marks must not be reported" << std::endl;
+            return 1;
+        }
+        const auto sizeOnly = layoutFreeText(QStringLiteral("Hello text box"), 12.0, 0.0, false);
+        if (!sizeOnly.outline.empty() || std::abs(sizeOnly.size.width() - one12.size.width()) > 1e-9 ||
+            std::abs(sizeOnly.size.height() - one12.size.height()) > 1e-9) {
+            std::cerr << "[FAIL] 57f measuring only must give the same size without an outline" << std::endl;
+            return 1;
+        }
+
+        // 57g: more outline than the wire format allows is reported, not cut off silently.
+        if (!layoutFreeText(QString(30000, QLatin1Char('W')), 12.0, 500.0).tooLarge) {
+            std::cerr << "[FAIL] 57g 30000 characters must exceed the outline limit" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: line breaks, wrapping, tabs, Persian alignment, undrawable characters and the size limit verified." << std::endl;
+    }
+
+    // --- Test 58: text boxes through the viewer: Persian, line breaks, long text, refusal, undo, save and reload ---
+    std::cout << "Test 58: Text boxes show all their text (Persian, line breaks, wrapping) after save and reload..." << std::endl;
+    {
+        QTemporaryDir tmp;
+        if (!tmp.isValid()) {
+            std::cerr << "[FAIL] 58 could not create temp directory" << std::endl;
+            return 1;
+        }
+        auto renderFile = [](const std::string& path) {
+            auto doc = pdf::createDocument();
+            if (doc->loadFromFile(path) != pdf::DocumentError::None) {
+                return pdf::PixelBuffer{};
+            }
+            auto page = doc->getPage(0);
+            return page ? page->renderWholePage(1.0, 1.0) : pdf::PixelBuffer{};
+        };
+        const pdf::PixelBuffer before = renderFile(samplePath);
+        if (!before.isValid()) {
+            std::cerr << "[FAIL] 58 cannot render the sample page" << std::endl;
+            return 1;
+        }
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(samplePath));
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 58 document did not finish opening" << std::endl;
+            return 1;
+        }
+        QStringList errors;
+        QObject::connect(&viewer, &ui::PdfViewerWidget::loadError, &viewer, [&](const QString& m) { errors << m; });
+
+        struct Box { QString name; QString text; double x, y; bool needsArabic; };
+        const std::vector<Box> boxes = {
+            {QStringLiteral("multi-line"), QStringLiteral("line one\nline two\nline three"), 80.0, 600.0, false},
+            {QStringLiteral("long English"),
+             QStringLiteral("This is a long sentence that cannot fit on one line of a small box, so the text box has to wrap it "
+                            "and grow tall enough to show every word of it."), 80.0, 500.0, false},
+            {QStringLiteral("Persian"), QString::fromUtf16(u"سلام دنیا! این یک متن فارسی است و باید دیده شود."), 80.0, 380.0, true},
+            {QStringLiteral("Persian two paragraphs"), QString::fromUtf16(u"سلام\nدنیا"), 80.0, 280.0, true},
+            {QStringLiteral("mixed"), QStringLiteral("Hello ") + QString::fromUtf16(u"سلام") + QStringLiteral(" world"), 80.0, 200.0, true},
+        };
+        std::vector<Box> added;
+        for (const auto& b : boxes) {
+            if (b.needsArabic && !haveArabic) {
+                std::cout << "  -> 58 SKIPPED the " << b.name.toStdString() << " text box: no installed font has Arabic script." << std::endl;
+                continue;
+            }
+            if (!viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::FreeText, b.x, b.y, b.text)) {
+                std::cerr << "[FAIL] 58 adding the " << b.name.toStdString() << " text box returned false ("
+                          << (errors.isEmpty() ? QString() : errors.last()).toStdString() << ")" << std::endl;
+                return 1;
+            }
+            added.push_back(b);
+        }
+
+        // 58a: every box is on the page, keeps its full text, and is as big as its text needs.
+        const auto& pl = viewer.layout().getPageLayout(0);
+        auto listBoxes = [&]() {
+            const auto listed = viewer.renderWorker().listAnnotationsSync(viewer.currentDocumentId(), 0, 15000);
+            std::vector<pdf::AnnotationItem> out;
+            if (listed.success) {
+                for (const auto& a : listed.annotations) {
+                    if (a.subtype == pdf::AnnotationSubtype::FreeText) {
+                        out.push_back(a);
+                    }
+                }
+            }
+            return out;
+        };
+        auto rectOf = [&](const Box& b, const std::vector<pdf::AnnotationItem>& items, QRectF& r) {
+            for (const auto& a : items) {
+                if (a.contents == b.text) {
+                    r = QRectF(std::min(a.left, a.right), std::min(a.bottom, a.top), std::abs(a.right - a.left), std::abs(a.top - a.bottom));
+                    return true;
+                }
+            }
+            return false;
+        };
+        std::vector<QRectF> rects(added.size());
+        {
+            const auto items = listBoxes();
+            if (items.size() != added.size()) {
+                std::cerr << "[FAIL] 58a expected " << added.size() << " text boxes, found " << items.size() << std::endl;
+                return 1;
+            }
+            const double lineH = ui::layoutFreeText(QStringLiteral("a"), 12.0, 0.0).size.height();
+            for (size_t i = 0; i < added.size(); ++i) {
+                if (!rectOf(added[i], items, rects[i])) {
+                    std::cerr << "[FAIL] 58a the " << added[i].name.toStdString() << " box lost its text (/Contents differs)" << std::endl;
+                    return 1;
+                }
+                const QRectF& r = rects[i];
+                if (r.left() < -1e-6 || r.top() < -1e-6 || r.right() > pl.widthPoints + 1e-6 || r.bottom() > pl.heightPoints + 1e-6) {
+                    std::cerr << "[FAIL] 58a the " << added[i].name.toStdString() << " box hangs off the page" << std::endl;
+                    return 1;
+                }
+                if (r.width() > 300.0 + 2.0 * ui::kFreeTextPadding + 2.0) {
+                    std::cerr << "[FAIL] 58a the " << added[i].name.toStdString() << " box is wider than 300 pt: " << r.width() << std::endl;
+                    return 1;
+                }
+                // The default box is as wide as its text wants (at most 300 pt of text), not a fixed width.
+                if ((added[i].name == QStringLiteral("multi-line") && r.width() > 100.0) ||
+                    (added[i].name == QStringLiteral("long English") && r.width() < 200.0)) {
+                    std::cerr << "[FAIL] 58a the " << added[i].name.toStdString() << " box is " << r.width()
+                              << " pt wide: it should follow its text (under 100 pt for three short lines, over 200 pt for a long sentence)" << std::endl;
+                    return 1;
+                }
+                // One line is about lineH high; the boxes with line breaks or long text must be taller.
+                const int minLines = added[i].name == QStringLiteral("multi-line") ? 3 : added[i].name == QStringLiteral("long English") ? 3
+                                     : added[i].name == QStringLiteral("Persian two paragraphs") ? 2 : 1;
+                if (r.height() < minLines * lineH * 0.9) {
+                    std::cerr << "[FAIL] 58a the " << added[i].name.toStdString() << " box is only " << r.height() << " pt high for at least "
+                              << minLines << " lines of " << lineH << " pt" << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // 58b: a character that no font has is refused with a pointer to sticky notes; nothing is added.
+        {
+            const size_t activeBefore = viewer.editLog().activeCommands().size();
+            const int errorsBefore = errors.size();
+            const char32_t missing = 0x10FFFD;
+            if (viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::FreeText, 80.0, 100.0,
+                                              QStringLiteral("abc ") + QString::fromUcs4(&missing, 1))) {
+                std::cerr << "[FAIL] 58b a text box with a character no font has was created" << std::endl;
+                return 1;
+            }
+            if (errors.size() != errorsBefore + 1 || !errors.last().contains(QStringLiteral("sticky note"), Qt::CaseInsensitive) ||
+                viewer.editLog().activeCommands().size() != activeBefore || listBoxes().size() != added.size()) {
+                std::cerr << "[FAIL] 58b the refusal must say why, point to sticky notes and leave nothing behind" << std::endl;
+                return 1;
+            }
+        }
+
+        // 58c: an explicit box that is too small for its text grows downwards; its top edge stays where it was.
+        {
+            const QString text = QStringLiteral("one two three four five six seven eight nine ten eleven twelve thirteen fourteen");
+            if (!viewer.addFreeTextAnnotation(0, QRectF(300.0, 100.0, 120.0, 14.0), text)) {
+                std::cerr << "[FAIL] 58c adding a too small explicit box returned false" << std::endl;
+                return 1;
+            }
+            bool found = false;
+            for (const auto& a : listBoxes()) {
+                if (a.contents == text) {
+                    found = true;
+                    const double top = std::max(a.top, a.bottom), height = std::abs(a.top - a.bottom);
+                    if (std::abs(top - 114.0) > 1e-6 || height < 3.0 * 12.0) {
+                        std::cerr << "[FAIL] 58c the box must keep its top edge (114) and grow to fit: top " << top << ", height " << height << std::endl;
+                        return 1;
+                    }
+                }
+            }
+            if (!found) {
+                std::cerr << "[FAIL] 58c the grown box is missing" << std::endl;
+                return 1;
+            }
+        }
+
+        // 58d: undo and redo bring a box back with its outlines, so it still draws.
+        if (!viewer.undoEdit() || !viewer.redoEdit()) {
+            std::cerr << "[FAIL] 58d undo / redo of a text box failed" << std::endl;
+            return 1;
+        }
+
+        // 58e: save, reload with the engine, and compare pixels with the original page: ink inside every box, none
+        // anywhere else, nothing cut off at the box edges.
+        const QString savedPath = tmp.filePath(QStringLiteral("textboxes_saved.pdf"));
+        if (!viewer.saveDocument(savedPath)) {
+            std::cerr << "[FAIL] 58e saveDocument failed" << std::endl;
+            return 1;
+        }
+        const pdf::PixelBuffer after = renderFile(savedPath.toStdString());
+        if (!after.isValid() || after.width() != before.width() || after.height() != before.height()) {
+            std::cerr << "[FAIL] 58e cannot render the saved file" << std::endl;
+            return 1;
+        }
+        auto changed = [&](int x, int y) {
+            const uint8_t* a = after.data() + static_cast<size_t>(y) * after.stride() + static_cast<size_t>(x) * 4;
+            const uint8_t* b = before.data() + static_cast<size_t>(y) * before.stride() + static_cast<size_t>(x) * 4;
+            return std::abs(a[0] - b[0]) > 100 || std::abs(a[1] - b[1]) > 100 || std::abs(a[2] - b[2]) > 100;
+        };
+        const int pageH = after.height();
+        // The box with the grown text of 58c also has ink; collect its rectangle too.
+        std::vector<QRectF> allRects = rects;
+        QStringList names;
+        for (const auto& b : added) {
+            names << b.name;
+        }
+        for (const auto& a : listBoxes()) {
+            if (a.contents.startsWith(QStringLiteral("one two three"))) {
+                allRects.push_back(QRectF(std::min(a.left, a.right), std::min(a.bottom, a.top), std::abs(a.right - a.left), std::abs(a.top - a.bottom)));
+                names << QStringLiteral("grown");
+            }
+        }
+        long inRects = 0;
+        for (size_t i = 0; i < allRects.size(); ++i) {
+            const QRectF& r = allRects[i];
+            const int x0 = std::max(0, static_cast<int>(std::floor(r.left())));
+            const int x1 = std::min(after.width() - 1, static_cast<int>(std::ceil(r.right())));
+            const int y0 = std::max(0, static_cast<int>(std::floor(pageH - r.bottom())));
+            const int y1 = std::min(pageH - 1, static_cast<int>(std::ceil(pageH - r.top())));
+            int minX = 1 << 30, maxX = -1, minY = 1 << 30, maxY = -1;
+            long ink = 0;
+            std::vector<bool> rowHasInk(static_cast<size_t>(y1 - y0 + 1), false);
+            for (int y = y0; y <= y1; ++y) {
+                for (int x = x0; x <= x1; ++x) {
+                    if (changed(x, y)) {
+                        ++ink;
+                        minX = std::min(minX, x); maxX = std::max(maxX, x);
+                        minY = std::min(minY, y); maxY = std::max(maxY, y);
+                        rowHasInk[static_cast<size_t>(y - y0)] = true;
+                    }
+                }
+            }
+            inRects += ink;
+            if (ink < 30) {
+                std::cerr << "[FAIL] 58e the " << names[static_cast<int>(i)].toStdString() << " box shows no text (" << ink << " ink pixels)" << std::endl;
+                return 1;
+            }
+            // Ink must keep clear of the box edges: text cut off by the box would touch them.
+            const double inset = 1.0;
+            // QRectF::top() is the lower edge and bottom() the upper edge in PDF user space (y up); pixel rows count down.
+            const double topEdge = pageH - r.bottom();
+            const double bottomEdge = pageH - r.top();
+            if (minX < r.left() + inset || maxX + 1 > r.right() - inset || minY < topEdge + inset || maxY + 1 > bottomEdge - inset) {
+                std::cerr << "[FAIL] 58e the text of the " << names[static_cast<int>(i)].toStdString() << " box touches the box edge (ink x "
+                          << minX << ".." << maxX << " y " << minY << ".." << maxY << " in box x " << r.left() << ".." << r.right()
+                          << " rows " << topEdge << ".." << bottomEdge << "): text is cut off" << std::endl;
+                return 1;
+            }
+            if (names[static_cast<int>(i)] == QStringLiteral("multi-line")) {
+                int bands = 0;
+                bool inBand = false;
+                for (const bool h : rowHasInk) {
+                    if (h && !inBand) ++bands;
+                    inBand = h;
+                }
+                if (bands != 3) {
+                    std::cerr << "[FAIL] 58e the three lines of the multi-line box show as " << bands << " bands of ink" << std::endl;
+                    return 1;
+                }
+            }
+            if (names[static_cast<int>(i)] == QStringLiteral("Persian") && maxX + 1 < r.right() - 4.0 - 4.0) {
+                // A single wrapped Persian paragraph is flush right: the right ink edge is at the right padding.
+                std::cerr << "[FAIL] 58e the Persian box is not flush right (ink ends at " << maxX + 1 << ", box right edge " << r.right() << ")" << std::endl;
+                return 1;
+            }
+        }
+        long total = 0;
+        for (int y = 0; y < pageH; ++y) {
+            for (int x = 0; x < after.width(); ++x) {
+                if (changed(x, y)) {
+                    ++total;
+                }
+            }
+        }
+        if (total != inRects) {
+            std::cerr << "[FAIL] 58e " << (total - inRects) << " changed pixels lie outside every text box" << std::endl;
+            return 1;
+        }
+
+        // 58f / 58g: deleting a text box and undoing the deletion brings it back drawn. The context menu hands the viewer
+        // the box as the worker lists it, and the worker keeps no outline, so the viewer has to keep (a box made in this
+        // session) or rebuild (a box read from a file) the outline, or the engine refuses the multi-line and Persian ones.
+        auto inkIn = [&](const pdf::PixelBuffer& img, const QRectF& r) {
+            long ink = 0;
+            const int h = img.height();
+            for (int y = std::max(0, static_cast<int>(std::floor(h - r.bottom()))); y <= std::min(h - 1, static_cast<int>(std::ceil(h - r.top()))); ++y) {
+                for (int x = std::max(0, static_cast<int>(std::floor(r.left()))); x <= std::min(img.width() - 1, static_cast<int>(std::ceil(r.right()))); ++x) {
+                    const uint8_t* a = img.data() + static_cast<size_t>(y) * img.stride() + static_cast<size_t>(x) * 4;
+                    const uint8_t* b = before.data() + static_cast<size_t>(y) * before.stride() + static_cast<size_t>(x) * 4;
+                    if (std::abs(a[0] - b[0]) > 100 || std::abs(a[1] - b[1]) > 100 || std::abs(a[2] - b[2]) > 100) {
+                        ++ink;
+                    }
+                }
+            }
+            return ink;
+        };
+        auto deleteAndUndoEach = [&](ui::PdfViewerWidget& v, const char* label, const std::vector<QString>& texts) -> bool {
+            QStringList problems;
+            QObject::connect(&v, &ui::PdfViewerWidget::loadError, &v, [&](const QString& m) { problems << m; });
+            for (const QString& text : texts) {
+                pdf::AnnotationItem listed;
+                bool found = false;
+                const auto all = v.renderWorker().listAnnotationsSync(v.currentDocumentId(), 0, 15000);
+                for (const auto& a : all.annotations) {
+                    if (a.subtype == pdf::AnnotationSubtype::FreeText && a.contents == text) {
+                        listed = a;
+                        found = true;
+                    }
+                }
+                if (!found || !listed.textOutline.empty()) {
+                    std::cerr << "[FAIL] 58f/g (" << label << ") the box is missing or the worker listed an outline" << std::endl;
+                    return false;
+                }
+                if (!v.deleteAnnotation(0, listed) || !v.undoEdit()) {
+                    std::cerr << "[FAIL] 58f/g (" << label << ") deleting and undoing the deletion failed for \""
+                              << QString(text.left(24)).replace(QLatin1Char('\n'), QLatin1Char(' ')).toStdString() << "\": " << (problems.isEmpty() ? QString() : problems.last()).toStdString() << std::endl;
+                    return false;
+                }
+            }
+            return true;
+        };
+        auto restoredBoxesDraw = [&](ui::PdfViewerWidget& v, const char* label, const std::vector<QString>& texts, const QString& path) -> bool {
+            if (!v.saveDocument(path)) {
+                std::cerr << "[FAIL] 58f/g (" << label << ") saving after the undo failed" << std::endl;
+                return false;
+            }
+            const pdf::PixelBuffer img = renderFile(path.toStdString());
+            const auto items = [&]() {
+                std::vector<pdf::AnnotationItem> out;
+                for (const auto& a : v.renderWorker().listAnnotationsSync(v.currentDocumentId(), 0, 15000).annotations) {
+                    if (a.subtype == pdf::AnnotationSubtype::FreeText) out.push_back(a);
+                }
+                return out;
+            }();
+            if (!img.isValid() || items.size() != texts.size()) {
+                std::cerr << "[FAIL] 58f/g (" << label << ") expected " << texts.size() << " text boxes after the undo, found " << items.size() << std::endl;
+                return false;
+            }
+            for (const QString& text : texts) {
+                bool ok = false;
+                for (const auto& a : items) {
+                    if (a.contents != text) continue;
+                    const QRectF r(std::min(a.left, a.right), std::min(a.bottom, a.top), std::abs(a.right - a.left), std::abs(a.top - a.bottom));
+                    ok = inkIn(img, r) >= 30;
+                }
+                if (!ok) {
+                    std::cerr << "[FAIL] 58f/g (" << label << ") the restored box \"" << text.left(24).toStdString() << "\" shows no text" << std::endl;
+                    return false;
+                }
+            }
+            return true;
+        };
+        std::vector<QString> texts;
+        for (const auto& b : added) {
+            texts.push_back(b.text);
+        }
+        texts.push_back(QStringLiteral("one two three four five six seven eight nine ten eleven twelve thirteen fourteen"));   // the box of 58c
+        if (!deleteAndUndoEach(viewer, "made in this session", texts) ||
+            !restoredBoxesDraw(viewer, "made in this session", texts, tmp.filePath(QStringLiteral("textboxes_undone.pdf")))) {
+            return 1;
+        }
+        {
+            // The same boxes read back from the saved file are file-loaded: nothing in the edit log knows them.
+            ui::PdfViewerWidget reopened;
+            reopened.resize(800, 600);
+            reopened.show();
+            reopened.openDocument(savedPath);
+            QElapsedTimer t2;
+            t2.start();
+            while (t2.elapsed() < 8000 && !reopened.isDocumentOpen()) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            const std::vector<QString>& fileTexts = texts;
+            if (!reopened.isDocumentOpen() || !reopened.editLog().activeCommands().empty() ||
+                !deleteAndUndoEach(reopened, "read from a file", fileTexts) ||
+                !restoredBoxesDraw(reopened, "read from a file", fileTexts, tmp.filePath(QStringLiteral("textboxes_file_undone.pdf")))) {
+                return 1;
+            }
+        }
+
+        // 58h: the deletion of a box made in this session is recorded as the box was made (size, colour, outline), not as
+        // the worker lists it, so undoing it brings back exactly that box.
+        {
+            const QString text = QStringLiteral("blue text at 14 pt");
+            if (!viewer.addFreeTextAnnotation(0, QRectF(350.0, 60.0, 200.0, 24.0), text, 0xFF003366, 14.0)) {
+                std::cerr << "[FAIL] 58h adding the blue 14 pt box failed" << std::endl;
+                return 1;
+            }
+            pdf::AnnotationItem listed;
+            for (const auto& a : viewer.renderWorker().listAnnotationsSync(viewer.currentDocumentId(), 0, 15000).annotations) {
+                if (a.subtype == pdf::AnnotationSubtype::FreeText && a.contents == text) {
+                    listed = a;
+                }
+            }
+            if (listed.name.isEmpty() || !viewer.deleteAnnotation(0, listed)) {
+                std::cerr << "[FAIL] 58h deleting the blue 14 pt box failed" << std::endl;
+                return 1;
+            }
+            const auto commands = viewer.editLog().activeCommands();
+            const auto& rec = commands.back();
+            if (rec.type != pdf::EditCommandType::DeleteAnnotation || rec.before.textOutline.empty() ||
+                std::abs(rec.before.fontSize - 14.0) > 1e-9 || rec.before.colorArgb != 0xFF003366) {
+                std::cerr << "[FAIL] 58h the recorded deletion lost the box's outline, 14 pt size or blue colour (outline "
+                          << rec.before.textOutline.size() << " elements, size " << rec.before.fontSize << ")" << std::endl;
+                return 1;
+            }
+            if (!viewer.undoEdit()) {
+                std::cerr << "[FAIL] 58h undoing the deletion of the blue 14 pt box failed" << std::endl;
+                return 1;
+            }
+        }
+        std::cout << "  -> Passed: text boxes keep line breaks, wrap, grow to fit, draw Persian (flush right) and survive undo, save and reload; deleting and undoing keeps them drawn." << std::endl;
+    }
+
+    std::cout << " ALL 58 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

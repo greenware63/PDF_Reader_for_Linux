@@ -5,13 +5,15 @@
 namespace pdf::ipc {
 
 constexpr uint32_t IPC_MAGIC = 0x50444657; // 'PDFW'
+// v11 added textOutline to AnnotationItem (a FreeText box's text as glyph outlines, so any script can be drawn).
+// v10 added fontSize to AnnotationItem (FreeText used to smuggle its font size through borderWidth).
 // v9 added borderWidth to AnnotationItem for geometric and ink annotation stroke widths.
 // v8 added compact PDF user-space glyph boxes to PageCharBox for exact annotation geometry.
 // v7 added RemoveAnnotationRequest and RemoveAnnotationResponse (undo of an added annotation).
 // v6 added AddAnnotationRequest, AddAnnotationResponse, SaveDocumentRequest, SaveDocumentResponse and WorkerOp::Save.
 // Bump this whenever a serialised layout changes: the frame-level version check is the only thing
 // that turns a wire mismatch into a clean rejection instead of silent garbage.
-constexpr uint32_t IPC_PROTOCOL_VERSION = 9;
+constexpr uint32_t IPC_PROTOCOL_VERSION = 11;
 constexpr uint32_t MAX_IPC_PAYLOAD_SIZE = 64 * 1024 * 1024;
 
 enum class WorkerOp : uint32_t {

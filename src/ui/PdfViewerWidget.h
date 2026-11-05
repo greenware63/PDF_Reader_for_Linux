@@ -170,6 +170,18 @@ public:
     bool addSquareAnnotation(int pageIndex, const QRectF& pagePointsRect, uint32_t colorArgb = 0xFFFF0000, double borderWidth = 2.0);
     bool addCircleAnnotation(int pageIndex, const QRectF& pagePointsRect, uint32_t colorArgb = 0xFF0000FF, double borderWidth = 2.0);
     bool addInkAnnotation(int pageIndex, const std::vector<std::vector<pdf::AnnotationPoint>>& strokes, uint32_t colorArgb = 0xFF000000, double borderWidth = 2.0);
+    bool addFreeTextAnnotation(int pageIndex, const QRectF& pagePointsRect, const QString& contents, uint32_t colorArgb = 0xFF000000, double fontSize = 12.0);
+    /// Where a new note, shape or text box goes when the user only picked a point: `size` big with its top-left
+    /// corner at `anchor`, moved left and down as far as needed to lie on a page of `pageSizePoints`, and shrunk if
+    /// the page is smaller. Everything is in PDF points in user space (origin bottom-left, y up); as with
+    /// QRectF(userX, userY - h, w, h) the returned rectangle's top() is its LOWER edge and bottom() its upper edge.
+    /// Empty when an argument is not finite or the page has no area.
+    static QRectF placeOnPage(const QPointF& anchor, const QSizeF& size, const QSizeF& pageSizePoints);
+    /// Adds a sticky note, rectangle, circle or text box of the default size with its top-left corner at the given
+    /// point of the page (PDF user space), moved so that it lies fully on the page. `contents` is the note or text
+    /// box text. Returns false for any other subtype.
+    bool addDefaultAnnotationAt(int pageIndex, pdf::AnnotationSubtype subtype, double userX, double userY,
+                                const QString& contents = QString());
     bool deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item);
     bool deleteAnnotationByName(int pageIndex, const QString& annotationName);
     bool modifyTextAnnotation(int pageIndex, const pdf::AnnotationItem& before, const QString& newContents);
@@ -417,6 +429,7 @@ private:
     pdf::EditLog m_editLog;
     bool m_saveInProgress{false};
     bool m_editInProgress{false};
+    bool m_hoverHitTestPending{false};   // a tooltip hit test is waiting for the worker; further ones are skipped
 
     void refreshAfterEdit();
     void recoverAfterWorkerFailure();

@@ -1,5 +1,6 @@
 #include "PdfViewerWidget.h"
 #include "ImageUtils.h"
+#include "FreeTextLayout.h"
 #include <QFileInfo>
 #include <QMenu>
 #include <QContextMenuEvent>
@@ -2704,6 +2705,165 @@ bool PdfViewerWidget::addInkAnnotation(int pageIndex, const std::vector<std::vec
     return true;
 }
 
+namespace {
+enum class TextBoxFit { Ok, Undrawable, TooLarge, NothingToDraw };
+
+// Lays item.contents out at item.fontSize (0 = the 12 pt default) inside the item's rectangle and stores the result as
+// the item's text outline. A text box always shows all of its text, so the rectangle grows downwards (its top edge
+// stays) when the text needs more room than it has. `undrawable` receives the characters no installed font can draw.
+// The item is left as it was unless the result is Ok.
+TextBoxFit fitTextBoxOutline(pdf::AnnotationItem& item, QString* undrawable = nullptr) {
+    const double fontSize = (item.fontSize > 0.0 && item.fontSize <= 144.0) ? item.fontSize : 12.0;
+    const double left = std::min(item.left, item.right);
+    const double right = std::max(item.left, item.right);
+    const double lower = std::min(item.bottom, item.top);
+    const double upper = std::max(item.bottom, item.top);
+    // The text is laid out here, as glyph outlines: that is what lets a text box show any script (Persian, CJK, ...),
+    // wrap inside its width and keep its line breaks. The worker's own font is Latin-1 and puts everything on one line.
+    const double innerWidth = right - left - 2.0 * kFreeTextPadding;
+    FreeTextLayoutResult laid = layoutFreeText(item.contents, fontSize, innerWidth > 0.0 ? innerWidth : 1.0);
+    if (!laid.undrawable.isEmpty()) {
+        if (undrawable) {
+            *undrawable = laid.undrawable;
+        }
+        return TextBoxFit::Undrawable;
+    }
+    if (laid.tooLarge) {
+        return TextBoxFit::TooLarge;
+    }
+    if (laid.outline.empty()) {
+        return TextBoxFit::NothingToDraw;
+    }
+    translateOutline(laid.outline, left + kFreeTextPadding, upper - kFreeTextPadding);
+    item.left = left;
+    item.right = right;
+    item.top = upper;
+    item.bottom = std::min(lower, upper - (laid.size.height() + 2.0 * kFreeTextPadding));
+    item.textOutline = std::move(laid.outline);
+    return TextBoxFit::Ok;
+}
+} // namespace
+
+bool PdfViewerWidget::addFreeTextAnnotation(int pageIndex, const QRectF& pagePointsRect, const QString& contents, uint32_t colorArgb, double fontSize) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    const QRectF normalized = pagePointsRect.normalized();
+    if (pageIndex < 0 || pageIndex >= m_pageCount || normalized.isEmpty() || contents.trimmed().isEmpty()) {
+        return false;
+    }
+
+    if (colorArgb == 0) {
+        colorArgb = 0xFF000000; // Black default text color
+    }
+
+    // In PDF user space QRectF::top() is the lower edge and bottom() the upper edge.
+    pdf::AnnotationItem item;
+    item.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    item.subtype = pdf::AnnotationSubtype::FreeText;
+    item.pageIndex = pageIndex;
+    item.left = normalized.left();
+    item.bottom = normalized.top();
+    item.right = normalized.right();
+    item.top = normalized.bottom();
+    item.fontSize = (fontSize > 0.0 && fontSize <= 144.0) ? fontSize : 12.0;
+    item.contents = contents;
+    item.colorArgb = colorArgb;
+    item.hasColor = true;
+    item.flags = 4; // FPDF_ANNOT_FLAG_PRINT
+
+    QString undrawable;
+    switch (fitTextBoxOutline(item, &undrawable)) {
+        case TextBoxFit::Ok:
+            break;
+        case TextBoxFit::Undrawable:
+            Q_EMIT loadError(tr("Could not add text box: no installed font can draw %1. Use a sticky note for this text.")
+                                 .arg(undrawable));
+            return false;
+        case TextBoxFit::TooLarge:
+            Q_EMIT loadError(tr("Could not add text box: the text is too long for a text box. Use a sticky note for long text."));
+            return false;
+        case TextBoxFit::NothingToDraw:
+            Q_EMIT loadError(tr("Could not add text box: the text has nothing to draw."));
+            return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, item);
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not add text box: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordAddAnnotation(pageIndex, item);
+    refreshAfterEdit();
+    return true;
+}
+
+QRectF PdfViewerWidget::placeOnPage(const QPointF& anchor, const QSizeF& size, const QSizeF& pageSizePoints) {
+    const double values[] = {anchor.x(), anchor.y(), size.width(), size.height(), pageSizePoints.width(), pageSizePoints.height()};
+    for (const double v : values) {
+        if (!std::isfinite(v)) {
+            return {};
+        }
+    }
+    if (size.width() <= 0.0 || size.height() <= 0.0 || pageSizePoints.width() <= 0.0 || pageSizePoints.height() <= 0.0) {
+        return {};
+    }
+
+    // Keep a little air to the page edge whenever the page is big enough to afford it.
+    constexpr double kEdgeMargin = 4.0;
+    const double marginX = pageSizePoints.width() > size.width() + 2.0 * kEdgeMargin ? kEdgeMargin : 0.0;
+    const double marginY = pageSizePoints.height() > size.height() + 2.0 * kEdgeMargin ? kEdgeMargin : 0.0;
+    const double w = std::min(size.width(), pageSizePoints.width());
+    const double h = std::min(size.height(), pageSizePoints.height());
+
+    const double left = std::clamp(anchor.x(), marginX, pageSizePoints.width() - marginX - w);
+    const double upper = std::clamp(anchor.y(), marginY + h, pageSizePoints.height() - marginY);
+    return QRectF(left, upper - h, w, h);
+}
+
+bool PdfViewerWidget::addDefaultAnnotationAt(int pageIndex, pdf::AnnotationSubtype subtype, double userX, double userY,
+                                             const QString& contents) {
+    if (!m_hasDocument || pageIndex < 0 || pageIndex >= m_pageCount) {
+        return false;
+    }
+    const auto& pl = m_layout.getPageLayout(pageIndex);
+    const QSizeF pageSize(pl.widthPoints, pl.heightPoints);
+    QSizeF size;
+    switch (subtype) {
+        case pdf::AnnotationSubtype::Text:     size = QSizeF(24.0, 24.0); break;
+        case pdf::AnnotationSubtype::Square:
+        case pdf::AnnotationSubtype::Circle:   size = QSizeF(100.0, 60.0); break;
+        case pdf::AnnotationSubtype::FreeText: {
+            // As wide as its text wants (at most 300 pt, and never wider than the page), as tall as the wrapped text
+            // needs, so that nothing is clipped. A little slack keeps rounding from wrapping a line that just fits.
+            constexpr double kDefaultFontSize = 12.0;
+            constexpr double kPreferredMaxTextWidth = 300.0;
+            const double maxInner = std::max(20.0, std::min(kPreferredMaxTextWidth, pageSize.width() - 8.0 - 2.0 * kFreeTextPadding));
+            const FreeTextLayoutResult measured = layoutFreeText(contents, kDefaultFontSize, maxInner, false);
+            if (measured.size.isEmpty()) {
+                return false;
+            }
+            size = QSizeF(std::ceil(measured.size.width()) + 1.0 + 2.0 * kFreeTextPadding,
+                          std::ceil(measured.size.height()) + 1.0 + 2.0 * kFreeTextPadding);
+            break;
+        }
+        default: return false;
+    }
+    const QRectF rect = placeOnPage(QPointF(userX, userY), size, pageSize);
+    if (rect.isEmpty()) {
+        return false;
+    }
+    switch (subtype) {
+        case pdf::AnnotationSubtype::Text:     return addTextAnnotation(pageIndex, rect.left(), rect.bottom(), contents);
+        case pdf::AnnotationSubtype::Square:   return addSquareAnnotation(pageIndex, rect);
+        case pdf::AnnotationSubtype::Circle:   return addCircleAnnotation(pageIndex, rect);
+        case pdf::AnnotationSubtype::FreeText: return addFreeTextAnnotation(pageIndex, rect, contents);
+        default: return false;
+    }
+}
+
 bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem& item) {
     if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
@@ -2719,10 +2879,44 @@ bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem&
         return false;
     }
 
-    m_editLog.recordDeleteAnnotation(pageIndex, item);
+    // The worker lists a text box without its outline, but undoing the deletion has to draw it again (the worker refuses
+    // a text box whose text its own font cannot draw). So the deletion is recorded with the whole item when this
+    // session made the box, and otherwise with the text laid out afresh. A box whose text no font can draw stays as it
+    // was listed.
+    pdf::AnnotationItem recorded = item;
+    if (item.subtype == pdf::AnnotationSubtype::FreeText && item.textOutline.empty()) {
+        bool fromLog = false;
+        const auto commands = m_editLog.activeCommands();
+        for (auto it = commands.rbegin(); it != commands.rend() && !fromLog; ++it) {
+            const bool made = it->type == pdf::EditCommandType::AddAnnotation || it->type == pdf::EditCommandType::ModifyAnnotation;
+            if (made && it->pageIndex == pageIndex && it->after.name == item.name && !it->after.textOutline.empty()) {
+                recorded = it->after;
+                fromLog = true;
+            }
+        }
+        if (!fromLog) {
+            pdf::AnnotationItem laidOut = item;
+            if (fitTextBoxOutline(laidOut) == TextBoxFit::Ok) {
+                recorded = std::move(laidOut);
+            }
+        }
+    }
+
+    m_editLog.recordDeleteAnnotation(pageIndex, recorded);
     refreshAfterEdit();
     return true;
 }
+
+namespace {
+// The annotation requests below wait for the worker inside a nested event loop. How long they may wait depends on
+// who is waiting: a tooltip is only a convenience and must give up quickly (a busy worker, for example one rendering
+// tiles, would otherwise leave a tooltip pending for seconds), a context menu or a double click is an explicit action,
+// and listing a page's annotations before a delete is allowed to take as long as a hostile, very large page needs
+// (parsing 24 ink annotations of 100,000 points took about 6 s cold, against the previous 10 s limit).
+constexpr int kHoverHitTestTimeoutMs = 400;
+constexpr int kExplicitHitTestTimeoutMs = 2000;
+constexpr int kAnnotationListTimeoutMs = 30000;
+} // namespace
 
 QString PdfViewerWidget::annotationTooltipHtml(const QString& author, const QString& contents) {
     constexpr qsizetype kMaxTipChars = 1000;
@@ -2760,7 +2954,7 @@ bool PdfViewerWidget::deleteAnnotationByName(int pageIndex, const QString& annot
         }
     }
     if (!found) {
-        const auto list = m_renderWorker.listAnnotationsSync(m_currentDocumentId, pageIndex);
+        const auto list = m_renderWorker.listAnnotationsSync(m_currentDocumentId, pageIndex, kAnnotationListTimeoutMs);
         if (!list.success || list.truncated) {
             Q_EMIT loadError(tr("Could not delete annotation because its complete details could not be loaded."));
             return false;
@@ -2841,7 +3035,7 @@ void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
             const double userX = ax;
             const double userY = pl.heightPoints - ay;
 
-            auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY);
+            auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY, kExplicitHitTestTimeoutMs);
             if (hit.hit && !hit.annotation.name.isEmpty()) {
                 const auto hitItem = hit.annotation;
                 menu.addAction(tr("&Delete Annotation"), this, [this, clickPage, hitItem]() {
@@ -2855,14 +3049,22 @@ void PdfViewerWidget::contextMenuEvent(QContextMenuEvent* event) {
                 const QString text = QInputDialog::getMultiLineText(
                     this, tr("Add Sticky Note"), tr("Note text:"), QString(), &ok);
                 if (ok && !text.trimmed().isEmpty()) {
-                    addTextAnnotation(clickPage, userX, userY, text);
+                    addDefaultAnnotationAt(clickPage, pdf::AnnotationSubtype::Text, userX, userY, text);
                 }
             });
             menu.addAction(tr("Add &Rectangle Here"), this, [this, clickPage, userX, userY]() {
-                addSquareAnnotation(clickPage, QRectF(userX, userY - 60.0, 100.0, 60.0));
+                addDefaultAnnotationAt(clickPage, pdf::AnnotationSubtype::Square, userX, userY);
             });
             menu.addAction(tr("Add &Circle Here"), this, [this, clickPage, userX, userY]() {
-                addCircleAnnotation(clickPage, QRectF(userX, userY - 60.0, 100.0, 60.0));
+                addDefaultAnnotationAt(clickPage, pdf::AnnotationSubtype::Circle, userX, userY);
+            });
+            menu.addAction(tr("Add &Text Box Here"), this, [this, clickPage, userX, userY]() {
+                bool ok = false;
+                const QString text = QInputDialog::getMultiLineText(
+                    this, tr("Add Text Box"), tr("Text:"), QString(), &ok);
+                if (ok && !text.trimmed().isEmpty()) {
+                    addDefaultAnnotationAt(clickPage, pdf::AnnotationSubtype::FreeText, userX, userY, text);
+                }
             });
             menu.addAction(tr("&Draw Freehand Ink"), this, [this]() {
                 setInkDrawingMode(true);
@@ -2888,7 +3090,7 @@ void PdfViewerWidget::mouseDoubleClickEvent(QMouseEvent* event) {
                 const double userX = ax;
                 const double userY = pl.heightPoints - ay;
 
-                auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY);
+                auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, clickPage, userX, userY, kExplicitHitTestTimeoutMs);
                 if (hit.hit && hit.annotation.subtype == pdf::AnnotationSubtype::Text) {
                     bool ok = false;
                     const QString title = hit.annotation.author.isEmpty() ? tr("Sticky Note") : tr("Sticky Note - %1").arg(hit.annotation.author);
@@ -2919,7 +3121,13 @@ bool PdfViewerWidget::viewportEvent(QEvent* event) {
                 const auto& pl = m_layout.getPageLayout(page);
                 const double userX = ax;
                 const double userY = pl.heightPoints - ay;
-                auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, page, userX, userY);
+                // Tooltips repeat while the pointer rests; do not stack a second wait on top of one still pending.
+                if (m_hoverHitTestPending) {
+                    event->ignore();
+                    return true;
+                }
+                QScopedValueRollback<bool> hoverGuard(m_hoverHitTestPending, true);
+                auto hit = m_renderWorker.hitTestAnnotationSync(m_currentDocumentId, page, userX, userY, kHoverHitTestTimeoutMs);
                 if (hit.hit && !hit.annotation.contents.isEmpty()) {
                     const QString tip = annotationTooltipHtml(hit.annotation.author, hit.annotation.contents);
                     QToolTip::showText(helpEvent->globalPos(), tip, viewport());

@@ -32,6 +32,7 @@
 #include <mutex>
 #include "ipc/IpcMessages.h"
 #include <QCoreApplication>
+#include <map>
 #include <QString>
 
 // Generates a multi-page PDF fixture containing:
@@ -3303,12 +3304,17 @@ int main(int argc, char* argv[]) {
 
         // Hit testing
         pdf::AnnotationItem hit;
-        if (!page->hitTestAnnotation(150.0, 650.0, hit) || hit.subtype != pdf::AnnotationSubtype::Square || hit.name != "square-test-35") {
-            std::cerr << "[FAIL] Test 35: Hit test inside square rect failed" << std::endl;
+        // Unfilled shapes are selected by their outline (see Test 40), not by the empty space inside them.
+        if (!page->hitTestAnnotation(101.0, 650.0, hit) || hit.subtype != pdf::AnnotationSubtype::Square || hit.name != "square-test-35") {
+            std::cerr << "[FAIL] Test 35: Hit test on the square outline failed" << std::endl;
             return 1;
         }
-        if (!page->hitTestAnnotation(300.0, 650.0, hit) || hit.subtype != pdf::AnnotationSubtype::Circle || hit.name != "circle-test-35") {
-            std::cerr << "[FAIL] Test 35: Hit test inside circle rect failed" << std::endl;
+        if (!page->hitTestAnnotation(349.0, 650.0, hit) || hit.subtype != pdf::AnnotationSubtype::Circle || hit.name != "circle-test-35") {
+            std::cerr << "[FAIL] Test 35: Hit test on the circle outline failed" << std::endl;
+            return 1;
+        }
+        if (page->hitTestAnnotation(150.0, 650.0, hit) || page->hitTestAnnotation(300.0, 650.0, hit)) {
+            std::cerr << "[FAIL] Test 35: Hit test in the empty interior of a shape unexpectedly succeeded" << std::endl;
             return 1;
         }
         if (page->hitTestAnnotation(50.0, 50.0, hit)) {
@@ -3669,8 +3675,636 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Ink annotations (/Ink) add, list, stroke proximity hit-test, save, reload, removal and hostile bounds verified." << std::endl;
     }
 
+    // --- Test 38: FreeText Annotations (/FreeText) lifecycle and hostile bounds ---
+    std::cout << "Test 38: FreeText Annotations (/FreeText) lifecycle and hostile bounds..." << std::endl;
+    {
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 38: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 38: getPage(0) failed" << std::endl;
+            return 1;
+        }
+
+        // 1. Hostile input tests
+        {
+            // A. NaN in bounds
+            pdf::AnnotationItem badNan;
+            badNan.subtype = pdf::AnnotationSubtype::FreeText;
+            badNan.pageIndex = 0;
+            badNan.left = 100.0; badNan.bottom = std::numeric_limits<double>::quiet_NaN(); badNan.right = 300.0; badNan.top = 650.0;
+            badNan.contents = QStringLiteral("bad nan");
+            if (page->addFreeTextAnnotation(badNan, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted NaN bounds" << std::endl;
+                return 1;
+            }
+
+            // B. Inf in bounds
+            pdf::AnnotationItem badInf;
+            badInf.subtype = pdf::AnnotationSubtype::FreeText;
+            badInf.pageIndex = 0;
+            badInf.left = 100.0; badInf.bottom = 600.0; badInf.right = std::numeric_limits<double>::infinity(); badInf.top = 650.0;
+            badInf.contents = QStringLiteral("bad inf");
+            if (page->addFreeTextAnnotation(badInf, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted Inf bounds" << std::endl;
+                return 1;
+            }
+
+            // C. Extreme bounds (> 1e6)
+            pdf::AnnotationItem badExt;
+            badExt.subtype = pdf::AnnotationSubtype::FreeText;
+            badExt.pageIndex = 0;
+            badExt.left = -1e30; badExt.bottom = 600.0; badExt.right = 1e30; badExt.top = 650.0;
+            badExt.contents = QStringLiteral("bad extreme");
+            if (page->addFreeTextAnnotation(badExt, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted extreme bounds > 1e6" << std::endl;
+                return 1;
+            }
+
+            // D. Inverted bounds (right <= left)
+            pdf::AnnotationItem badInvX;
+            badInvX.subtype = pdf::AnnotationSubtype::FreeText;
+            badInvX.pageIndex = 0;
+            badInvX.left = 300.0; badInvX.bottom = 600.0; badInvX.right = 100.0; badInvX.top = 650.0;
+            badInvX.contents = QStringLiteral("bad inverted x");
+            if (page->addFreeTextAnnotation(badInvX, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted inverted x bounds" << std::endl;
+                return 1;
+            }
+
+            // E. Inverted bounds (top <= bottom)
+            pdf::AnnotationItem badInvY;
+            badInvY.subtype = pdf::AnnotationSubtype::FreeText;
+            badInvY.pageIndex = 0;
+            badInvY.left = 100.0; badInvY.bottom = 650.0; badInvY.right = 300.0; badInvY.top = 600.0;
+            badInvY.contents = QStringLiteral("bad inverted y");
+            if (page->addFreeTextAnnotation(badInvY, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted inverted y bounds" << std::endl;
+                return 1;
+            }
+
+            // F. Hairline bounds (< 0.5 pt)
+            pdf::AnnotationItem badHairline;
+            badHairline.subtype = pdf::AnnotationSubtype::FreeText;
+            badHairline.pageIndex = 0;
+            badHairline.left = 100.0; badHairline.bottom = 600.0; badHairline.right = 100.2; badHairline.top = 650.0;
+            badHairline.contents = QStringLiteral("bad hairline");
+            if (page->addFreeTextAnnotation(badHairline, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted hairline bounds" << std::endl;
+                return 1;
+            }
+
+            // G. Empty contents
+            pdf::AnnotationItem badEmpty;
+            badEmpty.subtype = pdf::AnnotationSubtype::FreeText;
+            badEmpty.pageIndex = 0;
+            badEmpty.left = 100.0; badEmpty.bottom = 600.0; badEmpty.right = 300.0; badEmpty.top = 650.0;
+            badEmpty.contents = QString();
+            if (page->addFreeTextAnnotation(badEmpty, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted empty contents" << std::endl;
+                return 1;
+            }
+
+            // H. Oversized contents (> 32,768 UTF-16 code units)
+            pdf::AnnotationItem badOversized;
+            badOversized.subtype = pdf::AnnotationSubtype::FreeText;
+            badOversized.pageIndex = 0;
+            badOversized.left = 100.0; badOversized.bottom = 600.0; badOversized.right = 300.0; badOversized.top = 650.0;
+            badOversized.contents = QString(32769, QLatin1Char('A'));
+            if (page->addFreeTextAnnotation(badOversized, 12.0)) {
+                std::cerr << "[FAIL] Test 38: Accepted oversized contents > 32768 chars" << std::endl;
+                return 1;
+            }
+
+            // Verify none of the hostile attempts created an annotation
+            if (!page->listAnnotations().empty()) {
+                std::cerr << "[FAIL] Test 38: Rejected hostile input left orphan annotations behind!" << std::endl;
+                return 1;
+            }
+        }
+
+        // 2. Normal FreeText lifecycle
+        pdf::AnnotationItem ft;
+        ft.subtype = pdf::AnnotationSubtype::FreeText;
+        ft.pageIndex = 0;
+        ft.left = 100.0; ft.bottom = 600.0; ft.right = 300.0; ft.top = 650.0;
+        ft.contents = QStringLiteral("Sample FreeText Box");
+        ft.author = QStringLiteral("FreeTextTester");
+        ft.name = QStringLiteral("ft-test-38");
+        ft.colorArgb = 0xFF003366; // Dark blue
+        ft.hasColor = true;
+        ft.flags = 4;
+        ft.fontSize = 14.0;
+
+        if (!page->addFreeTextAnnotation(ft, 14.0)) {
+            std::cerr << "[FAIL] Test 38: addFreeTextAnnotation failed for valid FreeText" << std::endl;
+            return 1;
+        }
+
+        // Verify listed
+        auto annots = page->listAnnotations();
+        if (annots.size() != 1) {
+            std::cerr << "[FAIL] Test 38: Expected 1 annotation, got " << annots.size() << std::endl;
+            return 1;
+        }
+        const auto& listed = annots[0];
+        if (listed.subtype != pdf::AnnotationSubtype::FreeText || listed.name != "ft-test-38" ||
+            listed.contents != "Sample FreeText Box") {
+            std::cerr << "[FAIL] Test 38: Listed annotation properties mismatch" << std::endl;
+            return 1;
+        }
+        // The font size is not a border width: a FreeText that asked for no border must not get a /Border.
+        if (std::abs(listed.borderWidth) > 1e-6) {
+            std::cerr << "[FAIL] Test 38: FreeText got a " << listed.borderWidth << " pt border from its font size" << std::endl;
+            return 1;
+        }
+
+        // Hit testing
+        pdf::AnnotationItem hit;
+        if (!page->hitTestAnnotation(150.0, 625.0, hit) || hit.subtype != pdf::AnnotationSubtype::FreeText || hit.name != "ft-test-38") {
+            std::cerr << "[FAIL] Test 38: Hit test inside FreeText rect failed" << std::endl;
+            return 1;
+        }
+        if (page->hitTestAnnotation(50.0, 50.0, hit)) {
+            std::cerr << "[FAIL] Test 38: Hit test outside rect unexpectedly succeeded" << std::endl;
+            return 1;
+        }
+
+        // Incremental save and verify persistence
+        QTemporaryDir tempDir;
+        const std::string savedPath = tempDir.filePath("freetext_saved.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (saveFd < 0) {
+            std::cerr << "[FAIL] Test 38: Failed to open saveFd" << std::endl;
+            return 1;
+        }
+        uint64_t written = 0;
+        if (!doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
+            std::cerr << "[FAIL] Test 38: saveAsCopy failed" << std::endl;
+            return 1;
+        }
+
+        // Reopen saved file in fresh document and check annotations
+        auto freshDoc = pdf::createDocument();
+        if (freshDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 38: Failed to reload saved FreeText PDF" << std::endl;
+            return 1;
+        }
+        auto freshPage = freshDoc->getPage(0);
+        if (!freshPage) {
+            std::cerr << "[FAIL] Test 38: Failed to get page 0 in fresh document" << std::endl;
+            return 1;
+        }
+        auto freshAnnots = freshPage->listAnnotations();
+        if (freshAnnots.size() != 1) {
+            std::cerr << "[FAIL] Test 38: Reopened annotations size mismatch: expected 1, got " << freshAnnots.size() << std::endl;
+            return 1;
+        }
+        if (freshAnnots[0].subtype != pdf::AnnotationSubtype::FreeText || freshAnnots[0].contents != "Sample FreeText Box") {
+            std::cerr << "[FAIL] Test 38: Reopened annotation content mismatch" << std::endl;
+            return 1;
+        }
+
+        // Verify removeAnnotationByName
+        int removedCount = page->removeAnnotationByName(QStringLiteral("ft-test-38"));
+        if (removedCount != 1) {
+            std::cerr << "[FAIL] Test 38: removeAnnotationByName returned " << removedCount << ", expected 1" << std::endl;
+            return 1;
+        }
+        if (!page->listAnnotations().empty()) {
+            std::cerr << "[FAIL] Test 38: Annotation still present after removal" << std::endl;
+            return 1;
+        }
+
+        // A border that is asked for explicitly is kept, whatever the font size is.
+        pdf::AnnotationItem framed = ft;
+        framed.name = QStringLiteral("ft-test-38-framed");
+        framed.fontSize = 20.0;
+        framed.borderWidth = 3.0;
+        if (!page->addFreeTextAnnotation(framed, 20.0)) {
+            std::cerr << "[FAIL] Test 38: addFreeTextAnnotation failed for a framed FreeText" << std::endl;
+            return 1;
+        }
+        const auto framedList = page->listAnnotations();
+        if (framedList.size() != 1 || std::abs(framedList[0].borderWidth - 3.0) > 1e-3) {
+            std::cerr << "[FAIL] Test 38: an explicit FreeText border of 3 pt was not kept" << std::endl;
+            return 1;
+        }
+        page->removeAnnotationByName(QStringLiteral("ft-test-38-framed"));
+
+        std::cout << "  -> Passed: FreeText annotations (/FreeText) add, list, hit-test, save, reload, removal and hostile bounds verified." << std::endl;
+    }
+
+    // --- Test 39: FreeText must not paint an opaque block (its /C is the background fill, not the text colour) ---
+    std::cout << "Test 39: FreeText box leaves the page visible and draws text..." << std::endl;
+    {
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 39: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 39: getPage(0) failed" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem ft;
+        ft.subtype = pdf::AnnotationSubtype::FreeText;
+        ft.pageIndex = 0;
+        ft.left = 50; ft.bottom = 600; ft.right = 300; ft.top = 640;
+        ft.contents = QStringLiteral("Hello FreeText");
+        ft.colorArgb = 0xFF000000; ft.hasColor = true; ft.flags = 4;
+        ft.name = QStringLiteral("freetext-39");
+        if (!page->addFreeTextAnnotation(ft, 12.0)) {
+            std::cerr << "[FAIL] Test 39: addFreeTextAnnotation failed" << std::endl;
+            return 1;
+        }
+        pdf::PixelBuffer buf = page->renderWholePage(1.0, 1.0);
+        if (!buf.isValid() || buf.data() == nullptr) {
+            std::cerr << "[FAIL] Test 39: render failed" << std::endl;
+            return 1;
+        }
+        // Interior of the box (inset 4 px), in device pixels with the origin at the top-left.
+        const int x0 = 54, x1 = 296;
+        const int y0 = buf.height() - 640 + 4, y1 = buf.height() - 600 - 4;
+        int dark = 0, light = 0;
+        for (int y = y0; y < y1; ++y) {
+            const uint32_t* row = reinterpret_cast<const uint32_t*>(buf.data() + y * buf.stride());
+            for (int x = x0; x < x1; ++x) {
+                const uint32_t px = row[x];
+                const int lum = (static_cast<int>(px & 0xFF) + static_cast<int>((px >> 8) & 0xFF) + static_cast<int>((px >> 16) & 0xFF)) / 3;
+                (lum < 100 ? dark : light)++;
+            }
+        }
+        const int total = dark + light;
+        if (total <= 0 || dark > total / 2) {
+            std::cerr << "[FAIL] Test 39: FreeText painted an opaque block over its text (dark=" << dark << " of " << total << ")" << std::endl;
+            return 1;
+        }
+        if (dark < 20) {
+            std::cerr << "[FAIL] Test 39: no text pixels were drawn inside the FreeText box (dark=" << dark << ")" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: FreeText shows its text over a transparent background." << std::endl;
+    }
+
+    // --- Test 40: Square/Circle are selected by their outline, not by their empty interior ---
+    std::cout << "Test 40: Square/Circle hit-testing follows the outline unless the shape is filled..." << std::endl;
+    {
+        // 40a: pure geometry on an unfilled rectangle 100..200 x 600..700 with a 2 pt stroke.
+        pdf::AnnotationItem sq;
+        sq.subtype = pdf::AnnotationSubtype::Square;
+        sq.left = 100; sq.bottom = 600; sq.right = 200; sq.top = 700;
+        sq.borderWidth = 2.0;
+        struct Probe { double x, y; bool hit; const char* what; };
+        const Probe sqProbes[] = {
+            {101, 650, true, "left edge"}, {199, 650, true, "right edge"}, {150, 601, true, "bottom edge"},
+            {150, 699, true, "top edge"}, {100, 600, true, "corner"}, {98.5, 650, true, "just outside the stroke"},
+            {150, 650, false, "centre of the empty rectangle"}, {120, 620, false, "inside, away from the stroke"},
+            {95, 650, false, "well outside"}, {150, 710, false, "above"},
+        };
+        for (const auto& p : sqProbes) {
+            if (sq.contains(p.x, p.y) != p.hit) {
+                std::cerr << "[FAIL] Test 40a Square " << p.what << " expected " << (p.hit ? "hit" : "miss") << std::endl;
+                return 1;
+            }
+        }
+        pdf::AnnotationItem sqFilled = sq;
+        sqFilled.interiorFilled = true;
+        if (!sqFilled.contains(150, 650) || sqFilled.contains(95, 650)) {
+            std::cerr << "[FAIL] Test 40a filled Square must hit inside and miss outside" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem tiny = sq;
+        tiny.left = 10; tiny.right = 16; tiny.bottom = 10; tiny.top = 16;   // narrower than the stroke band
+        if (!tiny.contains(13, 13)) {
+            std::cerr << "[FAIL] Test 40a a tiny Square must stay selectable" << std::endl;
+            return 1;
+        }
+
+        // 40b: circle inscribed in 250..350 x 600..700 (radius 50, centre 300,650) and an ellipse 200 x 100.
+        pdf::AnnotationItem ci;
+        ci.subtype = pdf::AnnotationSubtype::Circle;
+        ci.left = 250; ci.bottom = 600; ci.right = 350; ci.top = 700;
+        ci.borderWidth = 2.0;
+        const Probe ciProbes[] = {
+            {349, 650, true, "3 o'clock on the circle"}, {300, 699, true, "12 o'clock on the circle"},
+            {251, 650, true, "9 o'clock on the circle"}, {300, 601, true, "6 o'clock on the circle"},
+            {300, 650, false, "centre of the empty circle"}, {320, 650, false, "inside, away from the stroke"},
+            {251, 601, false, "corner of the bounding box (outside the circle)"}, {349, 699, false, "far corner"},
+        };
+        for (const auto& p : ciProbes) {
+            if (ci.contains(p.x, p.y) != p.hit) {
+                std::cerr << "[FAIL] Test 40b Circle " << p.what << " expected " << (p.hit ? "hit" : "miss") << std::endl;
+                return 1;
+            }
+        }
+        pdf::AnnotationItem ciFilled = ci;
+        ciFilled.interiorFilled = true;
+        if (!ciFilled.contains(300, 650) || ciFilled.contains(251, 601)) {
+            std::cerr << "[FAIL] Test 40b filled Circle must hit the middle but not the box corner" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem ell = ci;
+        ell.left = 100; ell.right = 300; ell.bottom = 200; ell.top = 300;   // 200 wide, 100 tall, centre 200,250
+        if (!ell.contains(299, 250) || !ell.contains(200, 299) || ell.contains(200, 250) || ell.contains(110, 210)) {
+            std::cerr << "[FAIL] Test 40b ellipse outline hit-test is wrong" << std::endl;
+            return 1;
+        }
+
+        // 40c: shapes read from a file: /IC decides whether the inside is clickable.
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        auto sdoc = pdf::createDocument();
+        if (sdoc->loadFromFile(root + "/tests/fixtures/shapes_filled_and_empty.pdf") != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 40c cannot open the shapes fixture" << std::endl;
+            return 1;
+        }
+        auto spage = sdoc->getPage(0);
+        if (!spage) {
+            std::cerr << "[FAIL] Test 40c getPage(0) failed" << std::endl;
+            return 1;
+        }
+        const auto listed = spage->listAnnotations();
+        std::map<std::string, bool> filledByName;
+        for (const auto& a : listed) {
+            filledByName[a.name.toStdString()] = a.interiorFilled;
+        }
+        const std::pair<const char*, bool> expectFilled[] = {
+            {"filled-square", true}, {"empty-square", false}, {"filled-circle", true},
+            {"empty-circle", false}, {"clear-fill-square", false}, {"black-fill-square", true},
+            {"empty-ic-square", false}, {"ap-filled-square", true}, {"ap-outline-square", false},
+        };
+        for (const auto& e : expectFilled) {
+            auto it = filledByName.find(e.first);
+            if (it == filledByName.end() || it->second != e.second) {
+                std::cerr << "[FAIL] Test 40c interiorFilled wrong for " << e.first << std::endl;
+                return 1;
+            }
+        }
+        struct Hit { double x, y; const char* expectName; const char* what; };   // expectName == nullptr: no annotation
+        const Hit hits[] = {
+            {150, 650, "filled-square", "inside the filled square"},
+            {350, 650, nullptr, "inside the empty square"},
+            {301, 650, "empty-square", "on the empty square's outline"},
+            {150, 450, "filled-circle", "middle of the filled circle"},
+            {350, 450, nullptr, "middle of the empty circle"},
+            {399, 450, "empty-circle", "on the empty circle's outline"},
+            {150, 250, nullptr, "inside the square with a clear fill"},
+            {350, 250, "black-fill-square", "inside the square filled with black"},
+            {500, 250, nullptr, "inside the square with an empty /IC"},
+            {500, 650, "ap-filled-square", "inside the square whose own appearance fills it"},
+            {500, 450, nullptr, "inside the square whose own appearance only strokes it"},
+            {451, 450, "ap-outline-square", "on the outline of the stroke-only square"},
+        };
+        for (const auto& h : hits) {
+            pdf::AnnotationItem got;
+            const bool hit = spage->hitTestAnnotation(h.x, h.y, got);
+            const bool ok = h.expectName ? (hit && got.name == QString::fromLatin1(h.expectName)) : !hit;
+            if (!ok) {
+                std::cerr << "[FAIL] Test 40c " << h.what << ": got " << (hit ? got.name.toStdString() : std::string("nothing"))
+                          << std::endl;
+                return 1;
+            }
+        }
+
+        // 40d: a rectangle drawn around a sticky note must not hide the note (the topmost hit used to win).
+        auto doc40 = pdf::createDocument();
+        if (doc40->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 40d loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page40 = doc40->getPage(0);
+        pdf::AnnotationItem note;
+        note.subtype = pdf::AnnotationSubtype::Text;
+        note.pageIndex = 0;
+        note.left = 138; note.bottom = 638; note.right = 162; note.top = 662;
+        note.colorArgb = 0xFFFFD700; note.hasColor = true; note.flags = 4;
+        note.contents = QStringLiteral("note under a rectangle");
+        note.name = QStringLiteral("note-40d");
+        pdf::AnnotationItem frame;
+        frame.subtype = pdf::AnnotationSubtype::Square;
+        frame.pageIndex = 0;
+        frame.left = 100; frame.bottom = 600; frame.right = 200; frame.top = 700;
+        frame.colorArgb = 0xFFFF0000; frame.hasColor = true; frame.flags = 4;
+        frame.name = QStringLiteral("frame-40d");
+        if (!page40 || !page40->addTextAnnotation(note) || !page40->addGeometricAnnotation(frame, 2.0)) {
+            std::cerr << "[FAIL] Test 40d could not create the note and the rectangle" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem under;
+        if (!page40->hitTestAnnotation(150, 650, under) || under.name != QStringLiteral("note-40d")) {
+            std::cerr << "[FAIL] Test 40d the rectangle hides the note drawn under it (got "
+                      << (under.name.isEmpty() ? std::string("nothing") : under.name.toStdString()) << ")" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem edge;
+        if (!page40->hitTestAnnotation(101, 650, edge) || edge.name != QStringLiteral("frame-40d")) {
+            std::cerr << "[FAIL] Test 40d the rectangle's own outline is not selectable" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: outline hit-testing, fill detection (own and PDFium-built appearances, /IC, clear fill) and note-under-rectangle verified." << std::endl;
+    }
+
+    // --- Test 41: a FreeText box can carry its text as glyph outlines; text the built-in font cannot draw is refused ---
+    std::cout << "Test 41: FreeText from supplied outlines, and no silently dropped text without them..." << std::endl;
+    {
+        using Kind = pdf::AnnotationPathElement::Kind;
+        auto el = [](Kind k, double x, double y) { pdf::AnnotationPathElement e; e.kind = k; e.x = x; e.y = y; return e; };
+        const auto M = [&](double x, double y) { return el(Kind::MoveTo, x, y); };
+        const auto L = [&](double x, double y) { return el(Kind::LineTo, x, y); };
+        const auto C = [&](double x, double y) { return el(Kind::CurveTo, x, y); };
+
+        // Box 100..300 x 600..660 (200 x 60 pt) with: a block with a hole (the hole wound the other way, as in
+        // the letter "o"), and a circle of radius 8 at (250, 630) made of four cubic curves.
+        std::vector<pdf::AnnotationPathElement> outline = {
+            M(120, 620), L(180, 620), L(180, 640), L(120, 640),             // block, counter-clockwise
+            M(140, 625), L(140, 635), L(160, 635), L(160, 625),             // hole, clockwise
+            M(258, 630),
+            C(258, 634.4), C(254.4, 638), C(250, 638),
+            C(245.6, 638), C(242, 634.4), C(242, 630),
+            C(242, 625.6), C(245.6, 622), C(250, 622),
+            C(254.4, 622), C(258, 625.6), C(258, 630),
+            // Two overlapping rectangles wound the same way (glyphs of some fonts overlap like this): the overlap
+            // is part of the shape under the non-zero rule and must not turn into a hole.
+            M(200, 645), L(230, 645), L(230, 655), L(200, 655),
+            M(215, 645), L(245, 645), L(245, 655), L(215, 655),
+        };
+        pdf::AnnotationItem ft;
+        ft.subtype = pdf::AnnotationSubtype::FreeText;
+        ft.pageIndex = 0;
+        ft.left = 100; ft.bottom = 600; ft.right = 300; ft.top = 660;
+        ft.contents = QString::fromUtf8("\xd8\xb3\xd9\x84\xd8\xa7\xd9\x85 Persian");   // Persian "salam" and Latin: Helvetica cannot draw it
+        ft.colorArgb = 0xFF000000; ft.hasColor = true; ft.flags = 4;
+        ft.fontSize = 12.0;
+        ft.name = QStringLiteral("freetext-41");
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(samplePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 41: loadFromFile failed" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 41: getPage(0) failed" << std::endl;
+            return 1;
+        }
+        const pdf::PixelBuffer before = page->renderWholePage(1.0, 1.0);
+        if (!before.isValid()) {
+            std::cerr << "[FAIL] Test 41: render before failed" << std::endl;
+            return 1;
+        }
+        // Luminance at a point given in PDF user space (the page is rendered at 1 pixel per point).
+        auto lum = [](const pdf::PixelBuffer& b, double x, double y) {
+            const uint32_t px = reinterpret_cast<const uint32_t*>(b.data() + (b.height() - 1 - static_cast<int>(y)) * b.stride())[static_cast<int>(x)];
+            return (static_cast<int>(px & 0xFF) + static_cast<int>((px >> 8) & 0xFF) + static_cast<int>((px >> 16) & 0xFF)) / 3;
+        };
+        // The probes must lie on blank paper for the checks to mean anything.
+        const double probes[][2] = {{130, 630}, {150, 630}, {250, 630}, {290, 610}, {222, 650}, {110, 650}};
+        for (const auto& p : probes) {
+            if (lum(before, p[0], p[1]) < 240) {
+                std::cerr << "[FAIL] Test 41: the sample page is not blank at (" << p[0] << ", " << p[1] << ")" << std::endl;
+                return 1;
+            }
+        }
+
+        // 41a: refused without outlines (Persian is not Latin-1), nothing is left behind.
+        if (page->addFreeTextAnnotation(ft, 12.0) || !page->listAnnotations().empty()) {
+            std::cerr << "[FAIL] Test 41a: Persian text without outlines was accepted (PDFium would drop it)" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem multiline = ft;
+        multiline.contents = QStringLiteral("line one\nline two");
+        if (page->addFreeTextAnnotation(multiline, 12.0) || !page->listAnnotations().empty()) {
+            std::cerr << "[FAIL] Test 41a: a line break without outlines was accepted (PDFium would join the lines)" << std::endl;
+            return 1;
+        }
+        pdf::AnnotationItem latin1 = ft;
+        latin1.contents = QString::fromUtf8("Caf\xc3\xa9 \xc3\xbc");
+        latin1.name = QStringLiteral("freetext-41-latin1");
+        if (!page->addFreeTextAnnotation(latin1, 12.0)) {
+            std::cerr << "[FAIL] Test 41a: Latin-1 text without outlines was refused" << std::endl;
+            return 1;
+        }
+        page->removeAnnotationByName(QStringLiteral("freetext-41-latin1"));
+
+        // 41b: hostile outlines are refused and leave nothing behind.
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        std::vector<std::pair<const char*, std::vector<pdf::AnnotationPathElement>>> hostile;
+        hostile.push_back({"NaN coordinate", {M(120, 620), L(nan, 640)}});
+        hostile.push_back({"does not start with a MoveTo", {L(120, 620), L(130, 630)}});
+        hostile.push_back({"two curve points only", {M(120, 620), C(130, 630), C(140, 640)}});
+        hostile.push_back({"a curve cut short by a line", {M(120, 620), C(130, 630), C(140, 640), L(150, 650)}});
+        hostile.push_back({"a coordinate of 1e9", {M(120, 620), L(1.0e9, 640)}});
+        std::vector<pdf::AnnotationPathElement> tooMany(pdf::kMaxTextOutlineElements + 1, L(130, 630));
+        tooMany[0] = M(120, 620);
+        hostile.push_back({"more elements than allowed", std::move(tooMany)});
+        for (auto& h : hostile) {
+            pdf::AnnotationItem bad = ft;
+            bad.textOutline = h.second;
+            if (page->addFreeTextAnnotation(bad, 12.0) || !page->listAnnotations().empty()) {
+                std::cerr << "[FAIL] Test 41b: an outline with " << h.first << " was accepted" << std::endl;
+                return 1;
+            }
+        }
+
+        // 41c: the outline is what is drawn: ink in the block, none in the hole or outside the shapes.
+        ft.textOutline = outline;
+        if (!page->addFreeTextAnnotation(ft, 12.0)) {
+            std::cerr << "[FAIL] Test 41c: addFreeTextAnnotation with outlines failed" << std::endl;
+            return 1;
+        }
+        auto checkInk = [&](const pdf::PixelBuffer& after, const char* when) {
+            if (!after.isValid()) {
+                std::cerr << "[FAIL] Test 41c: render " << when << " failed" << std::endl;
+                return false;
+            }
+            if (lum(after, 130, 630) > 60) {
+                std::cerr << "[FAIL] Test 41c: the block is not drawn " << when << std::endl;
+                return false;
+            }
+            if (lum(after, 150, 630) < 240) {
+                std::cerr << "[FAIL] Test 41c: the hole of the block is filled " << when << " (non-zero winding expected)" << std::endl;
+                return false;
+            }
+            if (lum(after, 250, 630) > 60) {
+                std::cerr << "[FAIL] Test 41c: the curved shape is not drawn " << when << std::endl;
+                return false;
+            }
+            if (lum(after, 222, 650) > 60) {
+                std::cerr << "[FAIL] Test 41c: the overlap of two same-wound contours is not filled " << when << " (non-zero winding expected)" << std::endl;
+                return false;
+            }
+            if (lum(after, 290, 610) < 240 || lum(after, 110, 650) < 240) {
+                std::cerr << "[FAIL] Test 41c: ink where the outline has none " << when << std::endl;
+                return false;
+            }
+            return true;
+        };
+        if (!checkInk(page->renderWholePage(1.0, 1.0), "after adding the box")) {
+            return 1;
+        }
+        const auto listed = page->listAnnotations();
+        if (listed.size() != 1 || listed[0].contents != ft.contents) {
+            std::cerr << "[FAIL] Test 41c: the Persian /Contents was not kept" << std::endl;
+            return 1;
+        }
+
+        // 41d: the appearance and the text survive saving and reloading.
+        QTemporaryDir tempDir;
+        const std::string savedPath = tempDir.filePath("freetext_outline.pdf").toStdString();
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+        uint64_t written = 0;
+        if (saveFd < 0 || !doc->saveAsCopy(saveFd, true, written, nullptr) || written == 0) {
+            std::cerr << "[FAIL] Test 41d: saveAsCopy failed" << std::endl;
+            return 1;
+        }
+        auto freshDoc = pdf::createDocument();
+        if (freshDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 41d: reload failed" << std::endl;
+            return 1;
+        }
+        auto freshPage = freshDoc->getPage(0);
+        const auto freshList = freshPage ? freshPage->listAnnotations() : std::vector<pdf::AnnotationItem>{};
+        if (freshList.size() != 1 || freshList[0].contents != ft.contents) {
+            std::cerr << "[FAIL] Test 41d: the reloaded box or its Persian text is wrong" << std::endl;
+            return 1;
+        }
+        if (!checkInk(freshPage->renderWholePage(1.0, 1.0), "after save and reload")) {
+            return 1;
+        }
+
+        // 41e: a requested border is drawn around the box, in the text colour; without one there is no frame.
+        if (lum(page->renderWholePage(1.0, 1.0), 101, 630) < 240) {
+            std::cerr << "[FAIL] Test 41e: a text box that asked for no border has a frame" << std::endl;
+            return 1;
+        }
+        page->removeAnnotationByName(QStringLiteral("freetext-41"));
+        pdf::AnnotationItem framed = ft;
+        framed.name = QStringLiteral("freetext-41-framed");
+        framed.borderWidth = 3.0;
+        if (!page->addFreeTextAnnotation(framed, 12.0)) {
+            std::cerr << "[FAIL] Test 41e: adding the framed box failed" << std::endl;
+            return 1;
+        }
+        const pdf::PixelBuffer framedRender = page->renderWholePage(1.0, 1.0);
+        if (lum(framedRender, 101, 630) > 60 || lum(framedRender, 200, 658) > 60 || lum(framedRender, 200, 640 + 15) < 240) {
+            std::cerr << "[FAIL] Test 41e: the 3 pt frame of the box is not drawn where expected" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: outlines are drawn (holes, curves), survive save and reload; unsupported text and hostile outlines are refused." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 37 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 41 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

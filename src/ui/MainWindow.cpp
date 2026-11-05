@@ -572,6 +572,10 @@ void MainWindow::setupActions() {
     m_drawInkAction->setCheckable(true);
     m_drawInkAction->setEnabled(false);
 
+    m_addFreeTextAction = editMenu->addAction(tr("Add &Text Box..."), this, &MainWindow::addFreeText);
+    m_addFreeTextAction->setObjectName(QStringLiteral("addFreeTextAction"));
+    m_addFreeTextAction->setEnabled(false);
+
     editMenu->addSeparator();
     QAction* copyAction = editMenu->addAction(tr("&Copy"), this, [this]() {
         if (auto* v = currentViewer()) {
@@ -1488,6 +1492,9 @@ void MainWindow::updateStickyNoteAction() {
         m_drawInkAction->setEnabled(open);
         m_drawInkAction->setChecked(viewer && viewer->isInkDrawingMode());
     }
+    if (m_addFreeTextAction) {
+        m_addFreeTextAction->setEnabled(open);
+    }
 }
 
 void MainWindow::onDocumentOpenFailed(const QString& filePath, pdf::DocumentError error) {
@@ -1828,6 +1835,16 @@ void MainWindow::squigglySelection() {
     }
 }
 
+namespace {
+// Where the toolbar and menu actions put a new note, shape or text box: one inch from the top-left corner of the
+// current page (PDF user space, origin bottom-left). PdfViewerWidget::addDefaultAnnotationAt moves it onto the page
+// when the page is too small for that.
+QPointF defaultAnnotationAnchor(const ui::PdfViewerWidget& viewer, int page) {
+    const auto& pl = viewer.layout().getPageLayout(page);
+    return QPointF(72.0, pl.heightPoints - 72.0);
+}
+} // namespace
+
 void MainWindow::addStickyNote() {
     auto* v = currentViewer();
     if (!v || !v->isDocumentOpen()) return;
@@ -1837,30 +1854,24 @@ void MainWindow::addStickyNote() {
     if (!ok || text.trimmed().isEmpty()) return;
 
     const int page = v->currentPage();
-    const auto& pl = v->layout().getPageLayout(page);
-    const double userX = 72.0;
-    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
-    v->addTextAnnotation(page, userX, userY, text);
+    const QPointF at = defaultAnnotationAnchor(*v, page);
+    v->addDefaultAnnotationAt(page, pdf::AnnotationSubtype::Text, at.x(), at.y(), text);
 }
 
 void MainWindow::addRectangle() {
     auto* v = currentViewer();
     if (!v || !v->isDocumentOpen()) return;
     const int page = v->currentPage();
-    const auto& pl = v->layout().getPageLayout(page);
-    const double userX = 72.0;
-    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
-    v->addSquareAnnotation(page, QRectF(userX, userY - 60.0, 100.0, 60.0));
+    const QPointF at = defaultAnnotationAnchor(*v, page);
+    v->addDefaultAnnotationAt(page, pdf::AnnotationSubtype::Square, at.x(), at.y());
 }
 
 void MainWindow::addCircle() {
     auto* v = currentViewer();
     if (!v || !v->isDocumentOpen()) return;
     const int page = v->currentPage();
-    const auto& pl = v->layout().getPageLayout(page);
-    const double userX = 72.0;
-    const double userY = pl.heightPoints > 100.0 ? pl.heightPoints - 72.0 : 500.0;
-    v->addCircleAnnotation(page, QRectF(userX, userY - 60.0, 100.0, 60.0));
+    const QPointF at = defaultAnnotationAnchor(*v, page);
+    v->addDefaultAnnotationAt(page, pdf::AnnotationSubtype::Circle, at.x(), at.y());
 }
 
 void MainWindow::toggleInkDrawing() {
@@ -1870,6 +1881,19 @@ void MainWindow::toggleInkDrawing() {
     if (m_drawInkAction) {
         m_drawInkAction->setChecked(v->isInkDrawingMode());
     }
+}
+
+void MainWindow::addFreeText() {
+    auto* v = currentViewer();
+    if (!v || !v->isDocumentOpen()) return;
+    bool ok = false;
+    const QString text = QInputDialog::getMultiLineText(
+        this, tr("Add Text Box"), tr("Text:"), QString(), &ok);
+    if (!ok || text.trimmed().isEmpty()) return;
+
+    const int page = v->currentPage();
+    const QPointF at = defaultAnnotationAnchor(*v, page);
+    v->addDefaultAnnotationAt(page, pdf::AnnotationSubtype::FreeText, at.x(), at.y(), text);
 }
 
 void MainWindow::undoEdit() {

@@ -9,7 +9,10 @@
 #include <QThread>
 #include <iostream>
 #include <functional>
+#include <atomic>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include "ipc/IpcProtocol.h"
 #include "ipc/IpcMessages.h"
 #include "ipc/WorkerClient.h"
@@ -2811,14 +2814,19 @@ int main(int argc, char* argv[]) {
         }
 
         // Hit testing
-        auto hitSq = client.hitTestAnnotationSync(31, 0, 150.0, 650.0);
+        // Unfilled shapes are selected by their outline, not by the empty space inside them.
+        auto hitSq = client.hitTestAnnotationSync(31, 0, 101.0, 650.0);
         if (!hitSq.hit || hitSq.annotation.subtype != pdf::AnnotationSubtype::Square || hitSq.annotation.name != "square-ipc-31") {
-            std::cerr << "[FAIL] 31: Hit test inside square rect failed" << std::endl;
+            std::cerr << "[FAIL] 31: Hit test on the square outline failed" << std::endl;
             return 1;
         }
-        auto hitCr = client.hitTestAnnotationSync(31, 0, 300.0, 650.0);
+        auto hitCr = client.hitTestAnnotationSync(31, 0, 349.0, 650.0);
         if (!hitCr.hit || hitCr.annotation.subtype != pdf::AnnotationSubtype::Circle || hitCr.annotation.name != "circle-ipc-31") {
-            std::cerr << "[FAIL] 31: Hit test inside circle rect failed" << std::endl;
+            std::cerr << "[FAIL] 31: Hit test on the circle outline failed" << std::endl;
+            return 1;
+        }
+        if (client.hitTestAnnotationSync(31, 0, 150.0, 650.0).hit || client.hitTestAnnotationSync(31, 0, 300.0, 650.0).hit) {
+            std::cerr << "[FAIL] 31: Hit test in the empty interior of a shape unexpectedly succeeded" << std::endl;
             return 1;
         }
 
@@ -2971,6 +2979,451 @@ int main(int argc, char* argv[]) {
         client.closeDocumentSync();
         client.stop();
         std::cout << "  -> Passed: Ink annotations (/Ink) add, list, hit-test, remove, and hostile input rejection over IPC verified." << std::endl;
+    }
+
+    // --- Test 33: FreeText Annotations (/FreeText) over IPC and hostile input rejection ---
+    std::cout << "Test 33: FreeText Annotations (/FreeText) over IPC and hostile input rejection..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto openRes = client.openDocumentSync(33, samplePdf.toStdString());
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 33: openDocumentSync failed" << std::endl;
+            return 1;
+        }
+
+        pdf::AnnotationItem ft;
+        ft.subtype = pdf::AnnotationSubtype::FreeText;
+        ft.pageIndex = 0;
+        ft.left = 100.0; ft.bottom = 600.0; ft.right = 300.0; ft.top = 650.0;
+        ft.contents = QStringLiteral("FreeText over IPC");
+        ft.author = QStringLiteral("IpcTester");
+        ft.name = QStringLiteral("ft-ipc-33");
+        ft.colorArgb = 0xFF003366;
+        ft.hasColor = true;
+        ft.flags = 4;
+        ft.fontSize = 14.0;
+
+        auto respFt = client.addAnnotationSync(33, 0, ft);
+        if (!respFt.success || respFt.annotationName != "ft-ipc-33") {
+            std::cerr << "[FAIL] 33: addAnnotationSync failed for FreeText" << std::endl;
+            return 1;
+        }
+
+        // List annotations
+        auto listResp = client.listAnnotationsSync(33, 0);
+        if (!listResp.success || listResp.annotations.size() != 1) {
+            std::cerr << "[FAIL] 33: listAnnotationsSync failed, expected 1, got " << listResp.annotations.size() << std::endl;
+            return 1;
+        }
+        const auto& listed = listResp.annotations[0];
+        if (listed.subtype != pdf::AnnotationSubtype::FreeText || listed.name != "ft-ipc-33" ||
+            listed.contents != "FreeText over IPC") {
+            std::cerr << "[FAIL] 33: Listed FreeText annotation properties mismatch" << std::endl;
+            return 1;
+        }
+        if (std::abs(listed.borderWidth) > 1e-6) {
+            std::cerr << "[FAIL] 33: FreeText got a " << listed.borderWidth << " pt border from its font size" << std::endl;
+            return 1;
+        }
+
+        // Hit testing over IPC
+        auto hit = client.hitTestAnnotationSync(33, 0, 150.0, 625.0);
+        if (!hit.hit || hit.annotation.subtype != pdf::AnnotationSubtype::FreeText || hit.annotation.name != "ft-ipc-33") {
+            std::cerr << "[FAIL] 33: Hit test inside FreeText rect failed over IPC" << std::endl;
+            return 1;
+        }
+
+        // Remove annotation
+        auto rem = client.removeAnnotationSync(33, 0, "ft-ipc-33");
+        if (!rem.success || rem.removedCount != 1) {
+            std::cerr << "[FAIL] 33: removeAnnotationSync failed for FreeText" << std::endl;
+            return 1;
+        }
+        auto listAfter = client.listAnnotationsSync(33, 0);
+        if (!listAfter.success || !listAfter.annotations.empty()) {
+            std::cerr << "[FAIL] 33: FreeText annotation still present after removal" << std::endl;
+            return 1;
+        }
+
+        // Hostile input tests over IPC
+        // A. Reject empty contents
+        pdf::AnnotationItem badEmpty;
+        badEmpty.subtype = pdf::AnnotationSubtype::FreeText;
+        badEmpty.pageIndex = 0;
+        badEmpty.left = 100.0; badEmpty.bottom = 600.0; badEmpty.right = 300.0; badEmpty.top = 650.0;
+        badEmpty.contents = QString();
+        auto badEmptyResp = client.addAnnotationSync(33, 0, badEmpty);
+        if (badEmptyResp.success) {
+            std::cerr << "[FAIL] 33: Worker accepted empty contents over IPC" << std::endl;
+            return 1;
+        }
+
+        // B. Reject inverted bounds
+        pdf::AnnotationItem badInv;
+        badInv.subtype = pdf::AnnotationSubtype::FreeText;
+        badInv.pageIndex = 0;
+        badInv.left = 300.0; badInv.bottom = 600.0; badInv.right = 100.0; badInv.top = 650.0;
+        badInv.contents = QStringLiteral("bad inverted");
+        auto badInvResp = client.addAnnotationSync(33, 0, badInv);
+        if (badInvResp.success) {
+            std::cerr << "[FAIL] 33: Worker accepted inverted bounds over IPC" << std::endl;
+            return 1;
+        }
+
+        // C. Reject NaN bounds
+        pdf::AnnotationItem badNan;
+        badNan.subtype = pdf::AnnotationSubtype::FreeText;
+        badNan.pageIndex = 0;
+        badNan.left = 100.0; badNan.bottom = std::numeric_limits<double>::quiet_NaN(); badNan.right = 300.0; badNan.top = 650.0;
+        badNan.contents = QStringLiteral("bad nan");
+        auto badNanResp = client.addAnnotationSync(33, 0, badNan);
+        if (badNanResp.success) {
+            std::cerr << "[FAIL] 33: Worker accepted NaN bounds over IPC" << std::endl;
+            return 1;
+        }
+
+        // Worker health check after hostile packets
+        auto healthResp = client.addAnnotationSync(33, 0, ft);
+        if (!healthResp.success || healthResp.annotationName != "ft-ipc-33") {
+            std::cerr << "[FAIL] 33: Worker unresponsive after hostile packets" << std::endl;
+            return 1;
+        }
+        client.removeAnnotationSync(33, 0, "ft-ipc-33");
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: FreeText annotations (/FreeText) add, list, hit-test, remove, and hostile input rejection over IPC verified." << std::endl;
+    }
+
+    // --- Test 34: waitForIdle() must not return before the replies of the work it waited for ---
+    // The worker delivers engine results to its socket thread as queued signals. A control request that arrived
+    // in the same read as the work it waits for used to be answered ahead of those results, so a caller that
+    // waited for idle and then looked for its answer sometimes found nothing (several percent of the time).
+    std::cout << "Test 34: waitForIdle orders its reply after the replies of finished work..." << std::endl;
+    {
+        pdf::ipc::WorkerClient client;
+        auto openRes = client.openDocumentSync(34, samplePdf.toStdString());
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 34: openDocumentSync failed" << std::endl;
+            return 1;
+        }
+        std::atomic<int> answers{0};
+        QMetaObject::Connection answerConn = QObject::connect(
+            &client, &pdf::ipc::WorkerClient::pageTextReady, &client,
+            [&](int64_t, int, std::shared_ptr<pdf::PageText>) { ++answers; }, Qt::DirectConnection);
+        constexpr int kIterations = 3000;
+        int late = 0;
+        for (int i = 0; i < kIterations; ++i) {
+            answers = 0;
+            client.requestPageText(34, 99999);   // a missing page is answered with empty text, very quickly
+            client.waitForIdle();
+            if (answers.load() != 1) {
+                ++late;
+                QElapsedTimer drain;
+                drain.start();
+                while (answers.load() < 1 && drain.elapsed() < 2000) {
+                    QCoreApplication::processEvents();
+                }
+            }
+        }
+        QObject::disconnect(answerConn);
+        client.closeDocumentSync();
+        client.stop();
+        if (late != 0) {
+            std::cerr << "[FAIL] 34: waitForIdle returned before the reply in " << late << " of " << kIterations
+                      << " iterations" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: " << kIterations << " waitForIdle round trips each saw their reply first." << std::endl;
+    }
+
+    // --- Test 35: non-Latin text in sticky notes survives add, save and reload ---
+    // A sticky note is how a document is annotated in Persian today (the text box cannot draw it). The text is
+    // stored as a PDF text string in /Contents and has to come back exactly: right-to-left runs, Persian letters and
+    // digits, a zero-width non-joiner, a right-to-left / left-to-right mix, an astral emoji (a UTF-16 surrogate pair
+    // with a skin-tone modifier) and line breaks. The literals are written as escapes so that the test does not
+    // depend on the compiler's source character set.
+    std::cout << "Test 35: Sticky notes keep Persian, mixed-direction and emoji text through save and reload..." << std::endl;
+    {
+        struct NoteText { const char* tag; QString text; };
+        const NoteText notes[] = {
+            // Persian sentence with the Persian-only letters (pe, che, zhe, gaf, keheh, yeh) and Persian digits
+            {"fa", QString::fromUtf16(u"سلام دنیا! این یک یادداشت فارسی است: پ چ ژ گ ک ی ۱۲۳۴۵۶۷۸۹۰")},
+            // Latin and Persian in one line, with Persian digits, a euro sign and ASCII digits and punctuation
+            {"mixed", QString::fromUtf16(u"Invoice شماره ۴۲ paid, مبلغ 1,250.50 €")},
+            {"emoji", QString::fromUtf16(u"ok \U0001F44D\U0001F3FD done \U0001F389 ✔")},
+            {"lines", QString::fromUtf16(u"first line\nخط دوم\nthird line")},
+            // U+200C ZERO WIDTH NON-JOINER is part of normal Persian spelling
+            {"zwnj", QString::fromUtf16(u"می‌خواهم نیم‌فاصله")},
+        };
+        auto hexOf = [](const QString& text) {
+            QString out;
+            for (const QChar c : text) {
+                out += QString::number(c.unicode(), 16) + QLatin1Char(' ');
+            }
+            return out.toStdString();
+        };
+        auto check = [&](const std::vector<pdf::AnnotationItem>& listed, const char* when) -> bool {
+            for (const auto& n : notes) {
+                const QString name = QStringLiteral("note-ipc-35-") + QString::fromLatin1(n.tag);
+                bool found = false;
+                for (const auto& a : listed) {
+                    if (a.name != name) {
+                        continue;
+                    }
+                    found = true;
+                    if (a.contents != n.text) {
+                        std::cerr << "[FAIL] 35: note '" << n.tag << "' changed " << when << ": expected [" << hexOf(n.text)
+                                  << "] got [" << hexOf(a.contents) << "]" << std::endl;
+                        return false;
+                    }
+                }
+                if (!found) {
+                    std::cerr << "[FAIL] 35: note '" << n.tag << "' is missing " << when << std::endl;
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] 35: Failed to create temp dir" << std::endl;
+            return 1;
+        }
+        const QString savedPath = tempDir.filePath("ipc_unicode_notes.pdf");
+        {
+            pdf::ipc::WorkerClient client;
+            if (client.openDocumentSync(35, samplePdf.toStdString()).error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 35: openDocumentSync failed" << std::endl;
+                return 1;
+            }
+            double left = 40.0;
+            for (const auto& n : notes) {
+                pdf::AnnotationItem note;
+                note.subtype = pdf::AnnotationSubtype::Text;
+                note.pageIndex = 0;
+                note.left = left; note.bottom = 680.0; note.right = left + 24.0; note.top = 704.0;
+                note.colorArgb = 0xFFFFD700;
+                note.hasColor = true;
+                note.flags = 4;
+                note.contents = n.text;
+                note.name = QStringLiteral("note-ipc-35-") + QString::fromLatin1(n.tag);
+                left += 40.0;
+                const auto added = client.addAnnotationSync(35, 0, note);
+                if (!added.success) {
+                    std::cerr << "[FAIL] 35: adding note '" << n.tag << "' failed: " << added.errorMessage.toStdString() << std::endl;
+                    return 1;
+                }
+            }
+            const auto listed = client.listAnnotationsSync(35, 0);
+            if (!listed.success || !check(listed.annotations, "when listed right after adding")) {
+                return 1;
+            }
+#ifdef Q_OS_LINUX
+            int writeFd = ::open(savedPath.toLocal8Bit().constData(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+            if (writeFd < 0) {
+                std::cerr << "[FAIL] 35: Failed to open saveFd" << std::endl;
+                return 1;
+            }
+            const auto saved = client.saveDocumentSync(35, writeFd, true, "");
+#else
+            const auto saved = client.saveDocumentSync(35, -1, true, savedPath);
+#endif
+            if (!saved.success || saved.bytesWritten == 0) {
+                std::cerr << "[FAIL] 35: saveDocumentSync failed: " << saved.errorMessage.toStdString() << std::endl;
+                return 1;
+            }
+            client.closeDocumentSync();
+            client.stop();
+        }
+        {
+            pdf::ipc::WorkerClient reader;
+            if (reader.openDocumentSync(135, savedPath.toStdString()).error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 35: the saved file does not open again" << std::endl;
+                return 1;
+            }
+            const auto listed = reader.listAnnotationsSync(135, 0);
+            if (!listed.success || !check(listed.annotations, "after saving and reopening the file")) {
+                return 1;
+            }
+            reader.closeDocumentSync();
+            reader.stop();
+        }
+        std::cout << "  -> Passed: Persian, mixed-direction, emoji and multi-line note text round-trips exactly." << std::endl;
+    }
+
+    // --- Test 36: the FreeText font size has its own field on the wire ---
+    // It used to travel in borderWidth, so every text box also got a /Border as wide as its font size.
+    std::cout << "Test 36: AnnotationItem carries the FreeText font size separately from the border width..." << std::endl;
+    {
+        using namespace pdf::ipc;
+        AddAnnotationRequest req;
+        req.documentId = 36;
+        req.pageIndex = 0;
+        req.annotation.subtype = pdf::AnnotationSubtype::FreeText;
+        req.annotation.left = 10.0; req.annotation.bottom = 10.0; req.annotation.right = 110.0; req.annotation.top = 50.0;
+        req.annotation.contents = QStringLiteral("size on the wire");
+        req.annotation.fontSize = 18.0;
+        req.annotation.borderWidth = 0.0;
+
+        AddAnnotationRequest back;
+        if (!deserialize(serialize(req), back) || std::abs(back.annotation.fontSize - 18.0) > 1e-9 ||
+            back.annotation.borderWidth != 0.0) {
+            std::cerr << "[FAIL] 36: fontSize / borderWidth did not round-trip separately" << std::endl;
+            return 1;
+        }
+        req.annotation.borderWidth = 2.5;
+        if (!deserialize(serialize(req), back) || std::abs(back.annotation.fontSize - 18.0) > 1e-9 ||
+            std::abs(back.annotation.borderWidth - 2.5) > 1e-9) {
+            std::cerr << "[FAIL] 36: a text box with both a font size and a border lost one of them" << std::endl;
+            return 1;
+        }
+        for (const double bad : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -3.0, 1.0e9}) {
+            req.annotation.fontSize = bad;
+            AddAnnotationRequest hostile;
+            if (!deserialize(serialize(req), hostile) || hostile.annotation.fontSize != 0.0) {
+                std::cerr << "[FAIL] 36: a hostile font size (" << bad << ") was not reset to the default" << std::endl;
+                return 1;
+            }
+        }
+        std::cout << "  -> Passed: font size and border width travel separately; hostile sizes fall back to the default." << std::endl;
+    }
+
+    // --- Test 37: a text box's glyph outlines cross the wire intact and hostile ones are rejected ---
+    // The UI draws a text box's text itself (any script, wrapping, line breaks) and sends the outlines; the worker
+    // turns them into the appearance. Without outlines the worker has only its built-in Latin-1 font and must refuse
+    // text it cannot draw instead of leaving part of it out.
+    std::cout << "Test 37: FreeText outlines over IPC (wire, hostile input, worker)..." << std::endl;
+    {
+        using namespace pdf::ipc;
+        using Kind = pdf::AnnotationPathElement::Kind;
+        auto el = [](Kind k, double x, double y) { pdf::AnnotationPathElement e; e.kind = k; e.x = x; e.y = y; return e; };
+        const auto M = [&](double x, double y) { return el(Kind::MoveTo, x, y); };
+        const auto L = [&](double x, double y) { return el(Kind::LineTo, x, y); };
+        const auto C = [&](double x, double y) { return el(Kind::CurveTo, x, y); };
+
+        AddAnnotationRequest req;
+        req.documentId = 37;
+        req.pageIndex = 0;
+        req.annotation.subtype = pdf::AnnotationSubtype::FreeText;
+        req.annotation.left = 50.0; req.annotation.bottom = 600.0; req.annotation.right = 250.0; req.annotation.top = 650.0;
+        req.annotation.contents = QString::fromUtf16(u"سلام دنیا");
+        req.annotation.fontSize = 14.0;
+        req.annotation.textOutline = {M(60, 610), L(120.25, 610), L(120.25, 640.5), L(60, 640.5),
+                                      M(200, 620), C(210, 620), C(220, 630), C(220, 640)};
+
+        // 37a: the outline round-trips exactly.
+        AddAnnotationRequest back;
+        if (!deserialize(serialize(req), back) || back.annotation.textOutline.size() != req.annotation.textOutline.size() ||
+            back.annotation.contents != req.annotation.contents) {
+            std::cerr << "[FAIL] 37a: the outline did not round-trip" << std::endl;
+            return 1;
+        }
+        for (size_t i = 0; i < req.annotation.textOutline.size(); ++i) {
+            const auto& a = req.annotation.textOutline[i];
+            const auto& b = back.annotation.textOutline[i];
+            if (a.kind != b.kind || a.x != b.x || a.y != b.y) {
+                std::cerr << "[FAIL] 37a: outline element " << i << " changed on the wire" << std::endl;
+                return 1;
+            }
+        }
+
+        // 37b: hostile outlines are rejected by the decoder.
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        std::vector<std::pair<const char*, std::vector<pdf::AnnotationPathElement>>> hostile;
+        hostile.push_back({"a NaN coordinate", {M(60, 610), L(nan, 640)}});
+        hostile.push_back({"no leading MoveTo", {L(60, 610), L(70, 620)}});
+        hostile.push_back({"two curve points only", {M(60, 610), C(70, 620), C(80, 630)}});
+        hostile.push_back({"a curve cut short by a line", {M(60, 610), C(70, 620), C(80, 630), L(90, 640)}});
+        hostile.push_back({"a coordinate of 1e9", {M(60, 610), L(1.0e9, 640)}});
+        hostile.push_back({"an unknown element kind", {M(60, 610), el(static_cast<Kind>(7), 70, 620)}});
+        std::vector<pdf::AnnotationPathElement> tooMany(pdf::kMaxTextOutlineElements + 1, L(70, 620));
+        tooMany[0] = M(60, 610);
+        hostile.push_back({"more elements than allowed", std::move(tooMany)});
+        for (auto& h : hostile) {
+            AddAnnotationRequest bad = req;
+            bad.annotation.textOutline = h.second;
+            AddAnnotationRequest out;
+            if (deserialize(serialize(bad), out)) {
+                std::cerr << "[FAIL] 37b: an outline with " << h.first << " was accepted by the decoder" << std::endl;
+                return 1;
+            }
+        }
+        QByteArray truncated = serialize(req);
+        truncated.chop(5);
+        AddAnnotationRequest cut;
+        if (deserialize(truncated, cut)) {
+            std::cerr << "[FAIL] 37b: a payload cut in the middle of the outline was accepted" << std::endl;
+            return 1;
+        }
+
+        // 37c: through a real worker. The outline makes the Persian box possible; without it the worker refuses.
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] 37: Failed to create temp dir" << std::endl;
+            return 1;
+        }
+        const QString savedPath = tempDir.filePath("ipc_freetext_outline.pdf");
+        {
+            pdf::ipc::WorkerClient client;
+            if (client.openDocumentSync(37, samplePdf.toStdString()).error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 37c: openDocumentSync failed" << std::endl;
+                return 1;
+            }
+            pdf::AnnotationItem withOutline = req.annotation;
+            withOutline.name = QStringLiteral("ft-ipc-37");
+            withOutline.colorArgb = 0xFF003366; withOutline.hasColor = true; withOutline.flags = 4;
+            pdf::AnnotationItem without = withOutline;
+            without.name = QStringLiteral("ft-ipc-37-bare");
+            without.textOutline.clear();
+            if (client.addAnnotationSync(37, 0, without).success) {
+                std::cerr << "[FAIL] 37c: Persian text without outlines was accepted by the worker" << std::endl;
+                return 1;
+            }
+            const auto added = client.addAnnotationSync(37, 0, withOutline);
+            if (!added.success) {
+                std::cerr << "[FAIL] 37c: the box with outlines was refused: " << added.errorMessage.toStdString() << std::endl;
+                return 1;
+            }
+            const auto listed = client.listAnnotationsSync(37, 0);
+            if (!listed.success || listed.annotations.size() != 1 || listed.annotations[0].name != "ft-ipc-37" ||
+                listed.annotations[0].contents != withOutline.contents) {
+                std::cerr << "[FAIL] 37c: the listed box is wrong (the refused one must not be there)" << std::endl;
+                return 1;
+            }
+#ifdef Q_OS_LINUX
+            int writeFd = ::open(savedPath.toLocal8Bit().constData(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+            if (writeFd < 0) {
+                std::cerr << "[FAIL] 37c: Failed to open saveFd" << std::endl;
+                return 1;
+            }
+            const auto saved = client.saveDocumentSync(37, writeFd, true, "");
+#else
+            const auto saved = client.saveDocumentSync(37, -1, true, savedPath);
+#endif
+            if (!saved.success || saved.bytesWritten == 0) {
+                std::cerr << "[FAIL] 37c: saveDocumentSync failed: " << saved.errorMessage.toStdString() << std::endl;
+                return 1;
+            }
+            client.closeDocumentSync();
+            client.stop();
+        }
+        {
+            pdf::ipc::WorkerClient reader;
+            if (reader.openDocumentSync(137, savedPath.toStdString()).error != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 37c: the saved file does not open again" << std::endl;
+                return 1;
+            }
+            const auto listed = reader.listAnnotationsSync(137, 0);
+            if (!listed.success || listed.annotations.size() != 1 || listed.annotations[0].contents != req.annotation.contents) {
+                std::cerr << "[FAIL] 37c: the Persian text box did not survive saving and reopening" << std::endl;
+                return 1;
+            }
+            reader.closeDocumentSync();
+            reader.stop();
+        }
+        std::cout << "  -> Passed: outlines round-trip; hostile outlines are rejected; the worker refuses text it cannot draw." << std::endl;
     }
 
     std::cout << "========================================" << std::endl;
