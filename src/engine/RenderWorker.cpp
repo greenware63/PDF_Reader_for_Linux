@@ -877,6 +877,10 @@ void RenderWorker::requestAddAnnotation(int64_t documentId, int pageIndex, const
         } else if (annotItem.subtype == AnnotationSubtype::FreeText) {
             const double fs = (annotItem.fontSize > 0.0) ? annotItem.fontSize : 12.0;
             ok = page->addFreeTextAnnotation(annotItem, fs);
+        } else if (annotItem.subtype == AnnotationSubtype::Stamp) {
+            ok = page->addStampAnnotation(annotItem);
+        } else if (annotItem.subtype == AnnotationSubtype::FileAttachment) {
+            ok = page->addFileAttachmentAnnotation(annotItem);
         } else {
             Q_EMIT annotationAddFailed(documentId, pageIndex, QStringLiteral("Unsupported annotation subtype"));
             return;

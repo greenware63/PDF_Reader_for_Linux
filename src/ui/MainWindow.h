@@ -119,6 +119,8 @@ public Q_SLOTS:
     void addCircle();
     void toggleInkDrawing();
     void addFreeText();
+    void addStamp();
+    void addFileAttachment();
     void undoEdit();
     void redoEdit();
 
@@ -197,6 +199,8 @@ private:
     QAction* m_addCircleAction{nullptr};
     QAction* m_drawInkAction{nullptr};
     QAction* m_addFreeTextAction{nullptr};
+    QAction* m_addStampAction{nullptr};
+    QAction* m_addAttachmentAction{nullptr};
 };
 
 } // namespace ui

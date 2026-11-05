@@ -171,6 +171,8 @@ public:
     bool addCircleAnnotation(int pageIndex, const QRectF& pagePointsRect, uint32_t colorArgb = 0xFF0000FF, double borderWidth = 2.0);
     bool addInkAnnotation(int pageIndex, const std::vector<std::vector<pdf::AnnotationPoint>>& strokes, uint32_t colorArgb = 0xFF000000, double borderWidth = 2.0);
     bool addFreeTextAnnotation(int pageIndex, const QRectF& pagePointsRect, const QString& contents, uint32_t colorArgb = 0xFF000000, double fontSize = 12.0);
+    bool addStampAnnotation(int pageIndex, const QRectF& pagePointsRect, const QString& stampText, uint32_t colorArgb = 0xFFCC0000);
+    bool addFileAttachmentAnnotation(int pageIndex, double userX, double userY, const QString& fileName, const QByteArray& data, uint32_t colorArgb = 0xFF336699);
     /// Where a new note, shape or text box goes when the user only picked a point: `size` big with its top-left
     /// corner at `anchor`, moved left and down as far as needed to lie on a page of `pageSizePoints`, and shrunk if
     /// the page is smaller. Everything is in PDF points in user space (origin bottom-left, y up); as with

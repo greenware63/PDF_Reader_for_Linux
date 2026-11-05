@@ -6571,7 +6571,244 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: text boxes keep line breaks, wrap, grow to fit, draw Persian (flush right) and survive undo, save and reload; deleting and undoing keeps them drawn." << std::endl;
     }
 
-    std::cout << " ALL 58 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- Test 59: Stamp and FileAttachment Annotations on PdfViewerWidget ---
+    std::cout << "Test 59: Stamp and FileAttachment Annotations on PdfViewerWidget..." << std::endl;
+    {
+        QTemporaryDir tmp;
+        if (!tmp.isValid()) {
+            std::cerr << "[FAIL] 59 could not create temp directory" << std::endl;
+            return 1;
+        }
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(samplePath));
+
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 59 document did not finish opening" << std::endl;
+            return 1;
+        }
+
+        // 59a: Add Stamp annotation via addStampAnnotation and addDefaultAnnotationAt
+        const QRectF stampRect(100.0, 500.0, 150.0, 45.0);
+        if (!viewer.addStampAnnotation(0, stampRect, QStringLiteral("DRAFT"), 0xFFCC0000)) {
+            std::cerr << "[FAIL] 59a addStampAnnotation returned false" << std::endl;
+            return 1;
+        }
+
+        // Test hostile / invalid stamp rejection
+        const QString tooLongStamp(pdf::kMaxStampTextCharacters + 1, QLatin1Char('A'));
+        if (viewer.addStampAnnotation(0, stampRect, tooLongStamp)) {
+            std::cerr << "[FAIL] 59a oversized stamp text (>128 chars) was accepted" << std::endl;
+            return 1;
+        }
+        if (viewer.addStampAnnotation(99, stampRect, QStringLiteral("OOB_PAGE"))) {
+            std::cerr << "[FAIL] 59a stamp on non-existent page was accepted" << std::endl;
+            return 1;
+        }
+        if (viewer.addStampAnnotation(0, QRectF(100.0, 500.0, 0.0, 45.0), QStringLiteral("ZERO_W"))) {
+            std::cerr << "[FAIL] 59a stamp with zero width was accepted" << std::endl;
+            return 1;
+        }
+        if (viewer.addStampAnnotation(0, stampRect, QStringLiteral("   "))) {
+            std::cerr << "[FAIL] 59a whitespace-only stamp was accepted" << std::endl;
+            return 1;
+        }
+
+        // Add second stamp via addDefaultAnnotationAt
+        if (!viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Stamp, 200.0, 400.0, QStringLiteral("APPROVED"))) {
+            std::cerr << "[FAIL] 59a addDefaultAnnotationAt Stamp returned false" << std::endl;
+            return 1;
+        }
+
+        // Verify EditLog and Worker state for stamps
+        auto cmds = viewer.editLog().activeCommands();
+        if (cmds.size() != 2 ||
+            cmds[0].after.subtype != pdf::AnnotationSubtype::Stamp ||
+            cmds[0].after.contents != QStringLiteral("DRAFT") ||
+            cmds[1].after.subtype != pdf::AnnotationSubtype::Stamp ||
+            cmds[1].after.contents != QStringLiteral("APPROVED")) {
+            std::cerr << "[FAIL] 59a EditLog did not record both stamps correctly" << std::endl;
+            return 1;
+        }
+
+        // 59b: Add FileAttachment annotation via addFileAttachmentAnnotation
+        const QByteArray testPayload("M4 Widget Attachment Payload\x00\xFF\x42", 31);
+        const QString testFileName = QStringLiteral("report_2026.dat");
+        if (!viewer.addFileAttachmentAnnotation(0, 150.0, 300.0, testFileName, testPayload, 0xFF336699)) {
+            std::cerr << "[FAIL] 59b addFileAttachmentAnnotation returned false" << std::endl;
+            return 1;
+        }
+
+        // Test hostile / invalid attachment rejection
+        if (viewer.addFileAttachmentAnnotation(0, 150.0, 300.0, QStringLiteral("../traversal.txt"), testPayload)) {
+            std::cerr << "[FAIL] 59b path traversal filename was accepted" << std::endl;
+            return 1;
+        }
+        if (viewer.addFileAttachmentAnnotation(0, 150.0, 300.0, QStringLiteral("slash/traversal.txt"), testPayload)) {
+            std::cerr << "[FAIL] 59b slash filename was accepted" << std::endl;
+            return 1;
+        }
+        if (viewer.addFileAttachmentAnnotation(0, 150.0, 300.0, QStringLiteral("backslash\\traversal.txt"), testPayload)) {
+            std::cerr << "[FAIL] 59b backslash filename was accepted" << std::endl;
+            return 1;
+        }
+        if (viewer.addFileAttachmentAnnotation(0, 150.0, 300.0, QString(256, QLatin1Char('n')), testPayload)) {
+            std::cerr << "[FAIL] 59b oversized filename (>255 bytes) was accepted" << std::endl;
+            return 1;
+        }
+        if (viewer.addFileAttachmentAnnotation(0, 150.0, 300.0, testFileName, QByteArray())) {
+            std::cerr << "[FAIL] 59b empty attachment payload was accepted" << std::endl;
+            return 1;
+        }
+        if (viewer.addFileAttachmentAnnotation(0, 150.0, 300.0, testFileName, QByteArray(pdf::kMaxAnnotationAttachmentBytes + 1, 'x'))) {
+            std::cerr << "[FAIL] 59b oversized attachment payload (>16 MiB) was accepted" << std::endl;
+            return 1;
+        }
+
+        cmds = viewer.editLog().activeCommands();
+        if (cmds.size() != 3 ||
+            cmds[2].after.subtype != pdf::AnnotationSubtype::FileAttachment ||
+            cmds[2].after.attachmentFileName != testFileName ||
+            cmds[2].after.binaryPayload != testPayload) {
+            std::cerr << "[FAIL] 59b EditLog did not record FileAttachment correctly" << std::endl;
+            return 1;
+        }
+        if ((cmds[2].after.flags & pdf::AnnotationFlag::NoView) != 0 ||
+            (cmds[2].after.flags & pdf::AnnotationFlag::Print) == 0) {
+            std::cerr << "[FAIL] 59b FileAttachment has NoView set or Print missing: flags=" << cmds[2].after.flags << std::endl;
+            return 1;
+        }
+
+        // Verify Worker listAnnotations returns metadata-only for attachment (no eager binary transfer)
+        auto listed = viewer.renderWorker().listAnnotationsSync(viewer.currentDocumentId(), 0, 15000);
+        if (!listed.success || listed.annotations.size() != 3) {
+            std::cerr << "[FAIL] 59b worker listAnnotations did not list 3 annotations" << std::endl;
+            return 1;
+        }
+        bool foundAtt = false;
+        for (const auto& a : listed.annotations) {
+            if (a.subtype == pdf::AnnotationSubtype::FileAttachment) {
+                foundAtt = true;
+                if (a.attachmentFileName != testFileName) {
+                    std::cerr << "[FAIL] 59b listed attachment filename mismatch: " << a.attachmentFileName.toStdString() << std::endl;
+                    return 1;
+                }
+                if (!a.binaryPayload.isEmpty()) {
+                    std::cerr << "[FAIL] 59b listed attachment unexpectedly transferred binary payload over IPC" << std::endl;
+                    return 1;
+                }
+            }
+        }
+        if (!foundAtt) {
+            std::cerr << "[FAIL] 59b FileAttachment not found in worker annotation list" << std::endl;
+            return 1;
+        }
+
+        // 59c: Undo and Redo
+        // Undo FileAttachment
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 59c undoEdit FileAttachment failed" << std::endl;
+            return 1;
+        }
+        listed = viewer.renderWorker().listAnnotationsSync(viewer.currentDocumentId(), 0, 15000);
+        if (!listed.success || listed.annotations.size() != 2) {
+            std::cerr << "[FAIL] 59c worker still lists 3 annotations after undoing FileAttachment" << std::endl;
+            return 1;
+        }
+
+        // Redo FileAttachment
+        if (!viewer.redoEdit()) {
+            std::cerr << "[FAIL] 59c redoEdit FileAttachment failed" << std::endl;
+            return 1;
+        }
+        listed = viewer.renderWorker().listAnnotationsSync(viewer.currentDocumentId(), 0, 15000);
+        if (!listed.success || listed.annotations.size() != 3) {
+            std::cerr << "[FAIL] 59c worker does not list 3 annotations after redoing FileAttachment" << std::endl;
+            return 1;
+        }
+
+        // 59d: Save document and reload in fresh viewer
+        const QString savedPath = tmp.filePath(QStringLiteral("m4_stamp_attachment_saved.pdf"));
+        if (!viewer.saveDocument(savedPath)) {
+            std::cerr << "[FAIL] 59d saveDocument failed" << std::endl;
+            return 1;
+        }
+        if (viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 59d EditLog dirty after save" << std::endl;
+            return 1;
+        }
+
+        {
+            ui::PdfViewerWidget reopened;
+            reopened.resize(800, 600);
+            reopened.show();
+            reopened.openDocument(savedPath);
+
+            QElapsedTimer t2;
+            t2.start();
+            while (t2.elapsed() < 8000 && !reopened.isDocumentOpen()) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            if (!reopened.isDocumentOpen()) {
+                std::cerr << "[FAIL] 59d reopened document failed to open" << std::endl;
+                return 1;
+            }
+
+            const auto reloadedList = reopened.renderWorker().listAnnotationsSync(reopened.currentDocumentId(), 0, 15000);
+            if (!reloadedList.success || reloadedList.annotations.size() != 3) {
+                std::cerr << "[FAIL] 59d reloaded document annotations count mismatch: " << reloadedList.annotations.size() << std::endl;
+                return 1;
+            }
+
+            int stampCount = 0;
+            bool attachmentFound = false;
+            for (const auto& a : reloadedList.annotations) {
+                if (a.subtype == pdf::AnnotationSubtype::Stamp) {
+                    ++stampCount;
+                } else if (a.subtype == pdf::AnnotationSubtype::FileAttachment) {
+                    attachmentFound = true;
+                    if (a.attachmentFileName != testFileName) {
+                        std::cerr << "[FAIL] 59d reloaded attachment filename mismatch: " << a.attachmentFileName.toStdString() << std::endl;
+                        return 1;
+                    }
+                }
+            }
+            if (stampCount != 2 || !attachmentFound) {
+                std::cerr << "[FAIL] 59d reloaded document missing stamp (count=" << stampCount << ") or attachment" << std::endl;
+                return 1;
+            }
+
+            // 59e: Delete stamp and attachment, undo deletion
+            const auto itemToDelete = reloadedList.annotations[0];
+            if (!reopened.deleteAnnotation(0, itemToDelete)) {
+                std::cerr << "[FAIL] 59e deleteAnnotation failed" << std::endl;
+                return 1;
+            }
+            if (!reopened.undoEdit()) {
+                std::cerr << "[FAIL] 59e undo deleteAnnotation failed" << std::endl;
+                return 1;
+            }
+            const auto afterUndoList = reopened.renderWorker().listAnnotationsSync(reopened.currentDocumentId(), 0, 15000);
+            if (!afterUndoList.success || afterUndoList.annotations.size() != 3) {
+                std::cerr << "[FAIL] 59e undo delete did not restore annotation count" << std::endl;
+                return 1;
+            }
+        }
+
+        std::cout << "  -> Passed: Stamp and FileAttachment annotations creation, hostile input rejection, undo/redo, save/reload, and deletion verified." << std::endl;
+    }
+
+    std::cout << " ALL 59 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

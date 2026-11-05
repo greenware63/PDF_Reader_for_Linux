@@ -505,6 +505,9 @@ QByteArray serialize(const T& msg) {
     QDataStream stream(&buffer, QIODevice::WriteOnly);
     stream.setVersion(QDataStream::Qt_6_4);
     stream << msg;
+    if (stream.status() != QDataStream::Ok) {
+        return {};
+    }
     return buffer;
 }
 

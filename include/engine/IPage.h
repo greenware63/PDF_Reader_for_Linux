@@ -162,6 +162,30 @@ public:
     }
 
     /**
+     * @brief Creates a rubber stamp or custom text stamp annotation (/Stamp) on this page.
+     * Generates bounding box (/Rect), vector normal appearance stream (/AP), flags, /NM identifier,
+     * contents (/Contents), and author (/T).
+     * @param item Annotation properties with stamp outline and metadata populated.
+     * @return true if successfully created, false otherwise.
+     */
+    virtual bool addStampAnnotation(const AnnotationItem& item) {
+        (void)item;
+        return false;
+    }
+
+    /**
+     * @brief Creates an embedded file attachment annotation (/FileAttachment) on this page.
+     * Sets bounding box (/Rect), attachment payload via /FS file specification, flags, /NM identifier,
+     * contents (/Contents), and author (/T).
+     * @param item Annotation properties with attachmentFileName and binaryPayload populated.
+     * @return true if successfully created, false otherwise.
+     */
+    virtual bool addFileAttachmentAnnotation(const AnnotationItem& item) {
+        (void)item;
+        return false;
+    }
+
+    /**
      * @brief Removes every annotation on this page whose /NM equals `name` (undo of an added annotation).
      * @return the number removed (0 if none matched or the name is empty).
      */
