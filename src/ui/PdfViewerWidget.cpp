@@ -3022,6 +3022,40 @@ bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem&
             }
         }
     }
+    if (item.subtype == pdf::AnnotationSubtype::Stamp && item.textOutline.empty() && !item.contents.trimmed().isEmpty()) {
+        bool fromLog = false;
+        const auto commands = m_editLog.activeCommands();
+        for (auto it = commands.rbegin(); it != commands.rend() && !fromLog; ++it) {
+            const bool made = it->type == pdf::EditCommandType::AddAnnotation || it->type == pdf::EditCommandType::ModifyAnnotation;
+            if (made && it->pageIndex == pageIndex && it->after.name == item.name && !it->after.textOutline.empty()) {
+                recorded = it->after;
+                fromLog = true;
+            }
+        }
+        if (!fromLog) {
+            const double innerW = std::abs(item.right - item.left) - 8.0;
+            const double innerH = std::abs(item.top - item.bottom) - 8.0;
+            const double targetFontSize = std::clamp(innerH * 0.5, 8.0, 72.0);
+            FreeTextLayoutResult laid = layoutFreeText(item.contents, targetFontSize, innerW > 0.0 ? innerW : 100.0);
+            if (!laid.outline.empty() && laid.outline.size() <= pdf::kMaxStampVectorElements) {
+                const double midX = item.left + 4.0 + (innerW - laid.size.width()) / 2.0;
+                const double midY = item.top - 4.0 - (innerH - laid.size.height()) / 2.0;
+                translateOutline(laid.outline, midX > item.left ? midX : item.left + 4.0,
+                                 midY < item.top ? midY : item.top - 4.0);
+                recorded.textOutline = std::move(laid.outline);
+            }
+        }
+    }
+    if (item.subtype == pdf::AnnotationSubtype::FileAttachment && item.binaryPayload.isEmpty()) {
+        const auto commands = m_editLog.activeCommands();
+        for (auto it = commands.rbegin(); it != commands.rend(); ++it) {
+            const bool made = it->type == pdf::EditCommandType::AddAnnotation || it->type == pdf::EditCommandType::ModifyAnnotation;
+            if (made && it->pageIndex == pageIndex && it->after.name == item.name && !it->after.binaryPayload.isEmpty()) {
+                recorded = it->after;
+                break;
+            }
+        }
+    }
 
     m_editLog.recordDeleteAnnotation(pageIndex, recorded);
     refreshAfterEdit();
