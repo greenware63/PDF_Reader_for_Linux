@@ -2866,8 +2866,7 @@ bool PdfViewerWidget::addFileAttachmentAnnotation(int pageIndex, double userX, d
     if (pageIndex < 0 || pageIndex >= m_pageCount) {
         return false;
     }
-    const QString cleanName = QFileInfo(fileName).fileName();
-    if (!pdf::isValidAttachmentFileName(cleanName)) {
+    if (!pdf::isValidAttachmentFileName(fileName)) {
         Q_EMIT loadError(tr("Could not attach file: invalid attachment filename."));
         return false;
     }
@@ -2896,9 +2895,9 @@ bool PdfViewerWidget::addFileAttachmentAnnotation(int pageIndex, double userX, d
     item.bottom = rect.top();
     item.right = rect.right();
     item.top = rect.bottom();
-    item.attachmentFileName = cleanName;
+    item.attachmentFileName = fileName;
     item.binaryPayload = data;
-    item.contents = cleanName;
+    item.contents = fileName;
     item.colorArgb = colorArgb;
     item.hasColor = true;
     item.flags = 4 | 16 | 32; // PRINT | NOZOOM | NOROTATE
