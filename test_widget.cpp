@@ -6002,6 +6002,14 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: notes, shapes and text boxes clicked into a page corner are moved onto the page." << std::endl;
     }
 
+    // Persian needs an installed font with Arabic script (DejaVu Sans has one). Without it the Persian parts of Tests 57
+    // and 58 are skipped (and say so); a build that must not skip them sets PDFR_REQUIRE_ARABIC_FONT=1 and fails instead.
+    const bool haveArabic = !QFontDatabase::families(QFontDatabase::Arabic).isEmpty();
+    if (!haveArabic && qEnvironmentVariableIntValue("PDFR_REQUIRE_ARABIC_FONT") != 0) {
+        std::cerr << "[FAIL] PDFR_REQUIRE_ARABIC_FONT is set but no installed font has Arabic script" << std::endl;
+        return 1;
+    }
+
     // --- Test 57: a text box's text laid out as outlines: line breaks, wrapping, scripts, what cannot be drawn ---
     // The worker's own font is Latin-1 and one line, so a text box used to lose every other character and every line
     // break. The viewer now lays the text out with Qt and hands the worker the outlines.
@@ -6095,7 +6103,7 @@ int main(int argc, char* argv[]) {
         }
 
         // 57e: Persian (needs a font with Arabic script): shaped, drawn, right-to-left paragraphs flush right.
-        if (QFontDatabase::families(QFontDatabase::Arabic).isEmpty()) {
+        if (!haveArabic) {
             std::cout << "  -> 57e SKIPPED: no installed font has Arabic script, so Persian layout was NOT exercised." << std::endl;
         } else {
             const QString fa = QString::fromUtf16(u"سلام دنیا");
@@ -6196,7 +6204,6 @@ int main(int argc, char* argv[]) {
         QStringList errors;
         QObject::connect(&viewer, &ui::PdfViewerWidget::loadError, &viewer, [&](const QString& m) { errors << m; });
 
-        const bool haveArabic = !QFontDatabase::families(QFontDatabase::Arabic).isEmpty();
         struct Box { QString name; QString text; double x, y; bool needsArabic; };
         const std::vector<Box> boxes = {
             {QStringLiteral("multi-line"), QStringLiteral("line one\nline two\nline three"), 80.0, 600.0, false},
