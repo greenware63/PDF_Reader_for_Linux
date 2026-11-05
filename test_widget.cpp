@@ -6427,7 +6427,141 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] 58e " << (total - inRects) << " changed pixels lie outside every text box" << std::endl;
             return 1;
         }
-        std::cout << "  -> Passed: text boxes keep line breaks, wrap, grow to fit, draw Persian (flush right) and survive undo, save and reload." << std::endl;
+
+        // 58f / 58g: deleting a text box and undoing the deletion brings it back drawn. The context menu hands the viewer
+        // the box as the worker lists it, and the worker keeps no outline, so the viewer has to keep (a box made in this
+        // session) or rebuild (a box read from a file) the outline, or the engine refuses the multi-line and Persian ones.
+        auto inkIn = [&](const pdf::PixelBuffer& img, const QRectF& r) {
+            long ink = 0;
+            const int h = img.height();
+            for (int y = std::max(0, static_cast<int>(std::floor(h - r.bottom()))); y <= std::min(h - 1, static_cast<int>(std::ceil(h - r.top()))); ++y) {
+                for (int x = std::max(0, static_cast<int>(std::floor(r.left()))); x <= std::min(img.width() - 1, static_cast<int>(std::ceil(r.right()))); ++x) {
+                    const uint8_t* a = img.data() + static_cast<size_t>(y) * img.stride() + static_cast<size_t>(x) * 4;
+                    const uint8_t* b = before.data() + static_cast<size_t>(y) * before.stride() + static_cast<size_t>(x) * 4;
+                    if (std::abs(a[0] - b[0]) > 100 || std::abs(a[1] - b[1]) > 100 || std::abs(a[2] - b[2]) > 100) {
+                        ++ink;
+                    }
+                }
+            }
+            return ink;
+        };
+        auto deleteAndUndoEach = [&](ui::PdfViewerWidget& v, const char* label, const std::vector<QString>& texts) -> bool {
+            QStringList problems;
+            QObject::connect(&v, &ui::PdfViewerWidget::loadError, &v, [&](const QString& m) { problems << m; });
+            for (const QString& text : texts) {
+                pdf::AnnotationItem listed;
+                bool found = false;
+                const auto all = v.renderWorker().listAnnotationsSync(v.currentDocumentId(), 0, 15000);
+                for (const auto& a : all.annotations) {
+                    if (a.subtype == pdf::AnnotationSubtype::FreeText && a.contents == text) {
+                        listed = a;
+                        found = true;
+                    }
+                }
+                if (!found || !listed.textOutline.empty()) {
+                    std::cerr << "[FAIL] 58f/g (" << label << ") the box is missing or the worker listed an outline" << std::endl;
+                    return false;
+                }
+                if (!v.deleteAnnotation(0, listed) || !v.undoEdit()) {
+                    std::cerr << "[FAIL] 58f/g (" << label << ") deleting and undoing the deletion failed for \""
+                              << QString(text.left(24)).replace(QLatin1Char('\n'), QLatin1Char(' ')).toStdString() << "\": " << (problems.isEmpty() ? QString() : problems.last()).toStdString() << std::endl;
+                    return false;
+                }
+            }
+            return true;
+        };
+        auto restoredBoxesDraw = [&](ui::PdfViewerWidget& v, const char* label, const std::vector<QString>& texts, const QString& path) -> bool {
+            if (!v.saveDocument(path)) {
+                std::cerr << "[FAIL] 58f/g (" << label << ") saving after the undo failed" << std::endl;
+                return false;
+            }
+            const pdf::PixelBuffer img = renderFile(path.toStdString());
+            const auto items = [&]() {
+                std::vector<pdf::AnnotationItem> out;
+                for (const auto& a : v.renderWorker().listAnnotationsSync(v.currentDocumentId(), 0, 15000).annotations) {
+                    if (a.subtype == pdf::AnnotationSubtype::FreeText) out.push_back(a);
+                }
+                return out;
+            }();
+            if (!img.isValid() || items.size() != texts.size()) {
+                std::cerr << "[FAIL] 58f/g (" << label << ") expected " << texts.size() << " text boxes after the undo, found " << items.size() << std::endl;
+                return false;
+            }
+            for (const QString& text : texts) {
+                bool ok = false;
+                for (const auto& a : items) {
+                    if (a.contents != text) continue;
+                    const QRectF r(std::min(a.left, a.right), std::min(a.bottom, a.top), std::abs(a.right - a.left), std::abs(a.top - a.bottom));
+                    ok = inkIn(img, r) >= 30;
+                }
+                if (!ok) {
+                    std::cerr << "[FAIL] 58f/g (" << label << ") the restored box \"" << text.left(24).toStdString() << "\" shows no text" << std::endl;
+                    return false;
+                }
+            }
+            return true;
+        };
+        std::vector<QString> texts;
+        for (const auto& b : added) {
+            texts.push_back(b.text);
+        }
+        texts.push_back(QStringLiteral("one two three four five six seven eight nine ten eleven twelve thirteen fourteen"));   // the box of 58c
+        if (!deleteAndUndoEach(viewer, "made in this session", texts) ||
+            !restoredBoxesDraw(viewer, "made in this session", texts, tmp.filePath(QStringLiteral("textboxes_undone.pdf")))) {
+            return 1;
+        }
+        {
+            // The same boxes read back from the saved file are file-loaded: nothing in the edit log knows them.
+            ui::PdfViewerWidget reopened;
+            reopened.resize(800, 600);
+            reopened.show();
+            reopened.openDocument(savedPath);
+            QElapsedTimer t2;
+            t2.start();
+            while (t2.elapsed() < 8000 && !reopened.isDocumentOpen()) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            const std::vector<QString>& fileTexts = texts;
+            if (!reopened.isDocumentOpen() || !reopened.editLog().activeCommands().empty() ||
+                !deleteAndUndoEach(reopened, "read from a file", fileTexts) ||
+                !restoredBoxesDraw(reopened, "read from a file", fileTexts, tmp.filePath(QStringLiteral("textboxes_file_undone.pdf")))) {
+                return 1;
+            }
+        }
+
+        // 58h: the deletion of a box made in this session is recorded as the box was made (size, colour, outline), not as
+        // the worker lists it, so undoing it brings back exactly that box.
+        {
+            const QString text = QStringLiteral("blue text at 14 pt");
+            if (!viewer.addFreeTextAnnotation(0, QRectF(350.0, 60.0, 200.0, 24.0), text, 0xFF003366, 14.0)) {
+                std::cerr << "[FAIL] 58h adding the blue 14 pt box failed" << std::endl;
+                return 1;
+            }
+            pdf::AnnotationItem listed;
+            for (const auto& a : viewer.renderWorker().listAnnotationsSync(viewer.currentDocumentId(), 0, 15000).annotations) {
+                if (a.subtype == pdf::AnnotationSubtype::FreeText && a.contents == text) {
+                    listed = a;
+                }
+            }
+            if (listed.name.isEmpty() || !viewer.deleteAnnotation(0, listed)) {
+                std::cerr << "[FAIL] 58h deleting the blue 14 pt box failed" << std::endl;
+                return 1;
+            }
+            const auto commands = viewer.editLog().activeCommands();
+            const auto& rec = commands.back();
+            if (rec.type != pdf::EditCommandType::DeleteAnnotation || rec.before.textOutline.empty() ||
+                std::abs(rec.before.fontSize - 14.0) > 1e-9 || rec.before.colorArgb != 0xFF003366) {
+                std::cerr << "[FAIL] 58h the recorded deletion lost the box's outline, 14 pt size or blue colour (outline "
+                          << rec.before.textOutline.size() << " elements, size " << rec.before.fontSize << ")" << std::endl;
+                return 1;
+            }
+            if (!viewer.undoEdit()) {
+                std::cerr << "[FAIL] 58h undoing the deletion of the blue 14 pt box failed" << std::endl;
+                return 1;
+            }
+        }
+        std::cout << "  -> Passed: text boxes keep line breaks, wrap, grow to fit, draw Persian (flush right) and survive undo, save and reload; deleting and undoing keeps them drawn." << std::endl;
     }
 
     std::cout << " ALL 58 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;

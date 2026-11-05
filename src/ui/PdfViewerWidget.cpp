@@ -2705,6 +2705,45 @@ bool PdfViewerWidget::addInkAnnotation(int pageIndex, const std::vector<std::vec
     return true;
 }
 
+namespace {
+enum class TextBoxFit { Ok, Undrawable, TooLarge, NothingToDraw };
+
+// Lays item.contents out at item.fontSize (0 = the 12 pt default) inside the item's rectangle and stores the result as
+// the item's text outline. A text box always shows all of its text, so the rectangle grows downwards (its top edge
+// stays) when the text needs more room than it has. `undrawable` receives the characters no installed font can draw.
+// The item is left as it was unless the result is Ok.
+TextBoxFit fitTextBoxOutline(pdf::AnnotationItem& item, QString* undrawable = nullptr) {
+    const double fontSize = (item.fontSize > 0.0 && item.fontSize <= 144.0) ? item.fontSize : 12.0;
+    const double left = std::min(item.left, item.right);
+    const double right = std::max(item.left, item.right);
+    const double lower = std::min(item.bottom, item.top);
+    const double upper = std::max(item.bottom, item.top);
+    // The text is laid out here, as glyph outlines: that is what lets a text box show any script (Persian, CJK, ...),
+    // wrap inside its width and keep its line breaks. The worker's own font is Latin-1 and puts everything on one line.
+    const double innerWidth = right - left - 2.0 * kFreeTextPadding;
+    FreeTextLayoutResult laid = layoutFreeText(item.contents, fontSize, innerWidth > 0.0 ? innerWidth : 1.0);
+    if (!laid.undrawable.isEmpty()) {
+        if (undrawable) {
+            *undrawable = laid.undrawable;
+        }
+        return TextBoxFit::Undrawable;
+    }
+    if (laid.tooLarge) {
+        return TextBoxFit::TooLarge;
+    }
+    if (laid.outline.empty()) {
+        return TextBoxFit::NothingToDraw;
+    }
+    translateOutline(laid.outline, left + kFreeTextPadding, upper - kFreeTextPadding);
+    item.left = left;
+    item.right = right;
+    item.top = upper;
+    item.bottom = std::min(lower, upper - (laid.size.height() + 2.0 * kFreeTextPadding));
+    item.textOutline = std::move(laid.outline);
+    return TextBoxFit::Ok;
+}
+} // namespace
+
 bool PdfViewerWidget::addFreeTextAnnotation(int pageIndex, const QRectF& pagePointsRect, const QString& contents, uint32_t colorArgb, double fontSize) {
     if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
@@ -2713,51 +2752,42 @@ bool PdfViewerWidget::addFreeTextAnnotation(int pageIndex, const QRectF& pagePoi
     if (pageIndex < 0 || pageIndex >= m_pageCount || normalized.isEmpty() || contents.trimmed().isEmpty()) {
         return false;
     }
-    const double fs = (fontSize > 0.0 && fontSize <= 144.0) ? fontSize : 12.0;
-
-    // The text is laid out here, as glyph outlines: that is what lets a text box show any script (Persian, CJK, ...),
-    // wrap inside its width and keep its line breaks. The worker's own font is Latin-1 and puts everything on one line.
-    const double innerWidth = normalized.width() - 2.0 * kFreeTextPadding;
-    FreeTextLayoutResult laid = layoutFreeText(contents, fs, innerWidth > 0.0 ? innerWidth : 1.0);
-    if (!laid.undrawable.isEmpty()) {
-        Q_EMIT loadError(tr("Could not add text box: no installed font can draw %1. Use a sticky note for this text.")
-                             .arg(laid.undrawable));
-        return false;
-    }
-    if (laid.tooLarge) {
-        Q_EMIT loadError(tr("Could not add text box: the text is too long for a text box. Use a sticky note for long text."));
-        return false;
-    }
-    if (laid.outline.empty()) {
-        Q_EMIT loadError(tr("Could not add text box: the text has nothing to draw."));
-        return false;
-    }
-    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
 
     if (colorArgb == 0) {
         colorArgb = 0xFF000000; // Black default text color
     }
 
-    // A text box always shows all of its text: it grows downwards when the text needs more room than the box has.
-    // (In PDF user space QRectF::top() is the lower edge and bottom() the upper edge.)
-    const double upper = normalized.bottom();
-    const double lower = std::min(normalized.top(), upper - (laid.size.height() + 2.0 * kFreeTextPadding));
-    translateOutline(laid.outline, normalized.left() + kFreeTextPadding, upper - kFreeTextPadding);
-
+    // In PDF user space QRectF::top() is the lower edge and bottom() the upper edge.
     pdf::AnnotationItem item;
     item.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
     item.subtype = pdf::AnnotationSubtype::FreeText;
     item.pageIndex = pageIndex;
     item.left = normalized.left();
-    item.bottom = lower;
+    item.bottom = normalized.top();
     item.right = normalized.right();
-    item.top = upper;
-    item.fontSize = fs;
-    item.textOutline = std::move(laid.outline);
+    item.top = normalized.bottom();
+    item.fontSize = (fontSize > 0.0 && fontSize <= 144.0) ? fontSize : 12.0;
     item.contents = contents;
     item.colorArgb = colorArgb;
     item.hasColor = true;
     item.flags = 4; // FPDF_ANNOT_FLAG_PRINT
+
+    QString undrawable;
+    switch (fitTextBoxOutline(item, &undrawable)) {
+        case TextBoxFit::Ok:
+            break;
+        case TextBoxFit::Undrawable:
+            Q_EMIT loadError(tr("Could not add text box: no installed font can draw %1. Use a sticky note for this text.")
+                                 .arg(undrawable));
+            return false;
+        case TextBoxFit::TooLarge:
+            Q_EMIT loadError(tr("Could not add text box: the text is too long for a text box. Use a sticky note for long text."));
+            return false;
+        case TextBoxFit::NothingToDraw:
+            Q_EMIT loadError(tr("Could not add text box: the text has nothing to draw."));
+            return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
 
     const auto response = m_renderWorker.addAnnotationSync(m_currentDocumentId, pageIndex, item);
     if (!response.success) {
@@ -2849,7 +2879,30 @@ bool PdfViewerWidget::deleteAnnotation(int pageIndex, const pdf::AnnotationItem&
         return false;
     }
 
-    m_editLog.recordDeleteAnnotation(pageIndex, item);
+    // The worker lists a text box without its outline, but undoing the deletion has to draw it again (the worker refuses
+    // a text box whose text its own font cannot draw). So the deletion is recorded with the whole item when this
+    // session made the box, and otherwise with the text laid out afresh. A box whose text no font can draw stays as it
+    // was listed.
+    pdf::AnnotationItem recorded = item;
+    if (item.subtype == pdf::AnnotationSubtype::FreeText && item.textOutline.empty()) {
+        bool fromLog = false;
+        const auto commands = m_editLog.activeCommands();
+        for (auto it = commands.rbegin(); it != commands.rend() && !fromLog; ++it) {
+            const bool made = it->type == pdf::EditCommandType::AddAnnotation || it->type == pdf::EditCommandType::ModifyAnnotation;
+            if (made && it->pageIndex == pageIndex && it->after.name == item.name && !it->after.textOutline.empty()) {
+                recorded = it->after;
+                fromLog = true;
+            }
+        }
+        if (!fromLog) {
+            pdf::AnnotationItem laidOut = item;
+            if (fitTextBoxOutline(laidOut) == TextBoxFit::Ok) {
+                recorded = std::move(laidOut);
+            }
+        }
+    }
+
+    m_editLog.recordDeleteAnnotation(pageIndex, recorded);
     refreshAfterEdit();
     return true;
 }
