@@ -1,5 +1,6 @@
 #include "PdfViewerWidget.h"
 #include "ImageUtils.h"
+#include "FreeTextLayout.h"
 #include <QFileInfo>
 #include <QMenu>
 #include <QContextMenuEvent>
@@ -2713,21 +2714,46 @@ bool PdfViewerWidget::addFreeTextAnnotation(int pageIndex, const QRectF& pagePoi
         return false;
     }
     const double fs = (fontSize > 0.0 && fontSize <= 144.0) ? fontSize : 12.0;
+
+    // The text is laid out here, as glyph outlines: that is what lets a text box show any script (Persian, CJK, ...),
+    // wrap inside its width and keep its line breaks. The worker's own font is Latin-1 and puts everything on one line.
+    const double innerWidth = normalized.width() - 2.0 * kFreeTextPadding;
+    FreeTextLayoutResult laid = layoutFreeText(contents, fs, innerWidth > 0.0 ? innerWidth : 1.0);
+    if (!laid.undrawable.isEmpty()) {
+        Q_EMIT loadError(tr("Could not add text box: no installed font can draw %1. Use a sticky note for this text.")
+                             .arg(laid.undrawable));
+        return false;
+    }
+    if (laid.tooLarge) {
+        Q_EMIT loadError(tr("Could not add text box: the text is too long for a text box. Use a sticky note for long text."));
+        return false;
+    }
+    if (laid.outline.empty()) {
+        Q_EMIT loadError(tr("Could not add text box: the text has nothing to draw."));
+        return false;
+    }
     QScopedValueRollback<bool> editGuard(m_editInProgress, true);
 
     if (colorArgb == 0) {
         colorArgb = 0xFF000000; // Black default text color
     }
 
+    // A text box always shows all of its text: it grows downwards when the text needs more room than the box has.
+    // (In PDF user space QRectF::top() is the lower edge and bottom() the upper edge.)
+    const double upper = normalized.bottom();
+    const double lower = std::min(normalized.top(), upper - (laid.size.height() + 2.0 * kFreeTextPadding));
+    translateOutline(laid.outline, normalized.left() + kFreeTextPadding, upper - kFreeTextPadding);
+
     pdf::AnnotationItem item;
     item.name = QStringLiteral("pdfr-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
     item.subtype = pdf::AnnotationSubtype::FreeText;
     item.pageIndex = pageIndex;
     item.left = normalized.left();
-    item.bottom = normalized.top();
+    item.bottom = lower;
     item.right = normalized.right();
-    item.top = normalized.bottom();
+    item.top = upper;
     item.fontSize = fs;
+    item.textOutline = std::move(laid.outline);
     item.contents = contents;
     item.colorArgb = colorArgb;
     item.hasColor = true;
@@ -2772,16 +2798,30 @@ bool PdfViewerWidget::addDefaultAnnotationAt(int pageIndex, pdf::AnnotationSubty
     if (!m_hasDocument || pageIndex < 0 || pageIndex >= m_pageCount) {
         return false;
     }
+    const auto& pl = m_layout.getPageLayout(pageIndex);
+    const QSizeF pageSize(pl.widthPoints, pl.heightPoints);
     QSizeF size;
     switch (subtype) {
         case pdf::AnnotationSubtype::Text:     size = QSizeF(24.0, 24.0); break;
         case pdf::AnnotationSubtype::Square:
         case pdf::AnnotationSubtype::Circle:   size = QSizeF(100.0, 60.0); break;
-        case pdf::AnnotationSubtype::FreeText: size = QSizeF(150.0, 40.0); break;
+        case pdf::AnnotationSubtype::FreeText: {
+            // As wide as its text wants (at most 300 pt, and never wider than the page), as tall as the wrapped text
+            // needs, so that nothing is clipped. A little slack keeps rounding from wrapping a line that just fits.
+            constexpr double kDefaultFontSize = 12.0;
+            constexpr double kPreferredMaxTextWidth = 300.0;
+            const double maxInner = std::max(20.0, std::min(kPreferredMaxTextWidth, pageSize.width() - 8.0 - 2.0 * kFreeTextPadding));
+            const FreeTextLayoutResult measured = layoutFreeText(contents, kDefaultFontSize, maxInner, false);
+            if (measured.size.isEmpty()) {
+                return false;
+            }
+            size = QSizeF(std::ceil(measured.size.width()) + 1.0 + 2.0 * kFreeTextPadding,
+                          std::ceil(measured.size.height()) + 1.0 + 2.0 * kFreeTextPadding);
+            break;
+        }
         default: return false;
     }
-    const auto& pl = m_layout.getPageLayout(pageIndex);
-    const QRectF rect = placeOnPage(QPointF(userX, userY), size, QSizeF(pl.widthPoints, pl.heightPoints));
+    const QRectF rect = placeOnPage(QPointF(userX, userY), size, pageSize);
     if (rect.isEmpty()) {
         return false;
     }
