@@ -13,6 +13,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_set>
+#include <iostream>
 #include <QHash>
 
 namespace pdf {
@@ -1058,12 +1059,37 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
         for (int i = 0; i < originalVal.size(); ++i) {
             origWide[i] = originalVal.at(i).unicode();
         }
-        if (FORM_SetFocusedAnnot(m_form->handle, annot)) {
-            if (FORM_SelectAllText(m_form->handle, m_page)) {
-                FORM_ReplaceSelection(m_form->handle, m_page, origWide.data());
-            }
-            FORM_ForceToKillFocus(m_form->handle);
+        bool rbFocused = (FORM_SetFocusedAnnot(m_form->handle, annot) != 0);
+        bool rbSelected = rbFocused && (FORM_SelectAllText(m_form->handle, m_page) != 0);
+        if (rbSelected) {
+            FORM_ReplaceSelection(m_form->handle, m_page, origWide.data());
         }
+        bool rbKilled = (FORM_ForceToKillFocus(m_form->handle) != 0);
+
+        // Verify that the restored value actually matches originalVal
+        unsigned long rbLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
+        QString restoredVal;
+        if (rbLen > 2) {
+            std::vector<unsigned char> rbBuf(rbLen + 2, 0);
+            unsigned long actual = FPDFAnnot_GetFormFieldValue(m_form->handle, annot,
+                reinterpret_cast<FPDF_WCHAR*>(rbBuf.data()), rbLen);
+            if (actual > 2) {
+                const char16_t* u16 = reinterpret_cast<const char16_t*>(rbBuf.data());
+                restoredVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
+            }
+        }
+
+        const bool rollbackOk = (rbFocused && rbSelected && rbKilled && (restoredVal == originalVal));
+        if (!rollbackOk) {
+            std::cerr << "[PdfiumPage] FATAL: Form field rollback failed for '"
+                      << fieldName.toStdString() << "'. Inconsistent worker state: expected '"
+                      << originalVal.toStdString() << "', but held '"
+                      << restoredVal.toStdString() << "'. Aborting to prevent unlogged mutation."
+                      << std::endl;
+            FPDFPage_CloseAnnot(annot);
+            std::abort();
+        }
+
         FPDFPage_CloseAnnot(annot);
         return false;
     }
@@ -1210,6 +1236,14 @@ bool PdfiumPage::setFormFieldChoice(const QString& fieldName, int controlIndex,
         }
     }
 
+    // Capture prior selection for rollback in case commit or verification fails
+    std::unordered_set<int> origSelected;
+    for (int i = 0; i < optCount; ++i) {
+        if (FPDFAnnot_IsOptionSelected(m_form->handle, annot, i)) {
+            origSelected.insert(i);
+        }
+    }
+
     if (!FORM_SetFocusedAnnot(m_form->handle, annot)) {
         FPDFPage_CloseAnnot(annot);
         return false;
@@ -1220,19 +1254,46 @@ bool PdfiumPage::setFormFieldChoice(const QString& fieldName, int controlIndex,
         FORM_SetIndexSelected(m_form->handle, m_page, i, sel);
     }
     const bool killed = (FORM_ForceToKillFocus(m_form->handle) != 0);
-    if (!killed) {
-        FPDFPage_CloseAnnot(annot);
-        return false;
-    }
 
     // Verify selection commit succeeded
+    bool selectionVerified = true;
     for (int i = 0; i < optCount; ++i) {
         bool expected = (seen.find(i) != seen.end());
         bool actual = (FPDFAnnot_IsOptionSelected(m_form->handle, annot, i) != 0);
         if (expected != actual) {
-            FPDFPage_CloseAnnot(annot);
-            return false;
+            selectionVerified = false;
+            break;
         }
+    }
+
+    if (!killed || !selectionVerified) {
+        // Rollback to prior selection
+        bool rbFocused = (FORM_SetFocusedAnnot(m_form->handle, annot) != 0);
+        if (rbFocused) {
+            for (int i = 0; i < optCount; ++i) {
+                bool sel = (origSelected.find(i) != origSelected.end());
+                FORM_SetIndexSelected(m_form->handle, m_page, i, sel);
+            }
+            FORM_ForceToKillFocus(m_form->handle);
+        }
+        bool rbVerified = true;
+        for (int i = 0; i < optCount; ++i) {
+            bool expected = (origSelected.find(i) != origSelected.end());
+            bool actual = (FPDFAnnot_IsOptionSelected(m_form->handle, annot, i) != 0);
+            if (expected != actual) {
+                rbVerified = false;
+                break;
+            }
+        }
+        if (!rbFocused || !rbVerified) {
+            std::cerr << "[PdfiumPage] FATAL: Form field choice rollback failed for '"
+                      << fieldName.toStdString() << "'. Inconsistent worker state. Aborting."
+                      << std::endl;
+            FPDFPage_CloseAnnot(annot);
+            std::abort();
+        }
+        FPDFPage_CloseAnnot(annot);
+        return false;
     }
 
     FPDFPage_CloseAnnot(annot);
