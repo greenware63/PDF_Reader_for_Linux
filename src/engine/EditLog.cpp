@@ -97,7 +97,8 @@ uint64_t EditLog::recordModifyAnnotation(int pageIndex, const AnnotationItem& be
 
 uint64_t EditLog::recordSetFormFieldText(int pageIndex, const QString& fieldName, int controlIndex,
                                          const QString& before, const QString& after,
-                                         const std::vector<AnnotationPathElement>& vectorOutlines) {
+                                         const std::vector<AnnotationPathElement>& vectorOutlines,
+                                         const std::vector<AnnotationPathElement>& vectorOutlinesBefore) {
     if (m_cursor < m_commands.size()) {
         const size_t savedBase = m_savedValid ? m_savedCursor : m_savedPrefix;
         if (savedBase > m_cursor) {
@@ -119,6 +120,7 @@ uint64_t EditLog::recordSetFormFieldText(int pageIndex, const QString& fieldName
     cmd.textBefore = before;
     cmd.textAfter = after;
     cmd.vectorOutlines = vectorOutlines;
+    cmd.vectorOutlinesBefore = vectorOutlinesBefore;
 
     m_commands.push_back(std::move(cmd));
     m_cursor = m_commands.size();
@@ -273,7 +275,7 @@ std::vector<EditOp> EditLog::opsSinceSave() const {
             ops.push_back({EditOp::Kind::AddAnnotation, true, it->pageIndex, it->before, it->before.name, {}, 0, {}, {}, false, {}, -1});
         } else if (it->type == EditCommandType::SetFormFieldText) {
             EditOp op; op.kind = EditOp::Kind::SetFormFieldText; op.pageIndex = it->pageIndex; op.fieldName = it->fieldName;
-            op.controlIndex = it->controlIndex; op.text = it->textBefore; op.vectorOutlines = it->vectorOutlines;
+            op.controlIndex = it->controlIndex; op.text = it->textBefore; op.vectorOutlines = it->vectorOutlinesBefore;
             ops.push_back(std::move(op));
         } else if (it->type == EditCommandType::ToggleFormField) {
             EditOp op; op.kind = EditOp::Kind::ToggleFormField; op.pageIndex = it->pageIndex; op.fieldName = it->fieldName;
@@ -322,7 +324,7 @@ std::vector<EditOp> EditLog::opsSinceSave() const {
                 ops.push_back({EditOp::Kind::AddAnnotation, true, cmd.pageIndex, cmd.before, cmd.before.name, {}, 0, {}, {}, false, {}, -1});
             } else if (cmd.type == EditCommandType::SetFormFieldText) {
                 EditOp op; op.kind = EditOp::Kind::SetFormFieldText; op.pageIndex = cmd.pageIndex; op.fieldName = cmd.fieldName;
-                op.controlIndex = cmd.controlIndex; op.text = cmd.textBefore; op.vectorOutlines = cmd.vectorOutlines;
+                op.controlIndex = cmd.controlIndex; op.text = cmd.textBefore; op.vectorOutlines = cmd.vectorOutlinesBefore;
                 ops.push_back(std::move(op));
             } else if (cmd.type == EditCommandType::ToggleFormField) {
                 EditOp op; op.kind = EditOp::Kind::ToggleFormField; op.pageIndex = cmd.pageIndex; op.fieldName = cmd.fieldName;

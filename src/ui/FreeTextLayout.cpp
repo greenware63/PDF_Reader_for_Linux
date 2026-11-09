@@ -84,6 +84,9 @@ bool leavesNoInk(char32_t cp) {
 // in any installed font comes out as the font's "missing" box (glyph 0), and a bitmap glyph (a colour emoji) has an
 // index but no outline: neither can be put into a text box as vector shapes.
 bool canDrawAsOutline(const QFont& font, char32_t cp) {
+    if (QChar::category(cp) == QChar::Other_PrivateUse) {
+        return false;
+    }
     const QString s = QString::fromUcs4(&cp, 1);
     QTextLayout layout(s, font);
     layout.beginLayout();
@@ -97,6 +100,9 @@ bool canDrawAsOutline(const QFont& font, char32_t cp) {
     }
     for (const QGlyphRun& run : line.glyphRuns()) {
         const QRawFont raw = run.rawFont();
+        if (!raw.isValid() || !raw.supportsCharacter(cp)) {
+            continue;
+        }
         for (const quint32 glyph : run.glyphIndexes()) {
             if (glyph != 0 && !raw.pathForGlyph(glyph).isEmpty()) {
                 return true;
