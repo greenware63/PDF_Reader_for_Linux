@@ -4316,7 +4316,7 @@ void PdfViewerWidget::commitActiveFormFieldEditor() {
     } else if (type == pdf::FormFieldType::ComboBox) {
         if (auto* combo = qobject_cast<QComboBox*>(editor)) {
             if (combo->isEditable()) {
-                const QString newText = combo->currentText();
+                const QString newText = (combo->lineEdit() ? combo->lineEdit()->text() : combo->currentText());
                 if (newText != initialText) {
                     setFormFieldText(page, fieldName, controlIdx, newText);
                 }

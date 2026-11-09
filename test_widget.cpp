@@ -7061,7 +7061,7 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] 60f: in-place editor for 'editable_combo' is not an editable QComboBox" << std::endl;
             return 1;
         }
-        editCombo->lineEdit()->setText(QStringLiteral("Mango"));
+        editCombo->setEditText(QStringLiteral("Mango"));
         viewer.commitActiveFormFieldEditor();
         if (viewer.hasActiveFormFieldEditor()) {
             std::cerr << "[FAIL] 60f: editor still active after commit for 'editable_combo'" << std::endl;
