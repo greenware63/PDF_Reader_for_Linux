@@ -12,6 +12,9 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <unordered_set>
+#include <iostream>
+#include <QHash>
 
 namespace pdf {
 
@@ -788,6 +791,539 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations(bool* truncated) {
     }
 
     return result;
+}
+
+std::vector<FormFieldItem> PdfiumPage::listFormFields(bool* truncated) {
+    bool clippedAny = false;
+    uint64_t budgetUsed = 0;
+    struct TruncGuard {
+        bool* out; const bool& flag;
+        ~TruncGuard() { if (out) *out = flag; }
+    } truncGuard{truncated, clippedAny};
+
+    if (!m_page || !m_form || !m_form->handle) {
+        return {};
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    int annotCount = FPDFPage_GetAnnotCount(m_page);
+    if (annotCount <= 0) {
+        return {};
+    }
+
+    std::vector<FormFieldItem> result;
+    QHash<QString, int> fieldNameToControlIndex;
+
+    auto readWideField = [&](auto&& getter, size_t maxChars) -> QString {
+        unsigned long reqLen = getter(nullptr, 0);
+        if (reqLen <= 2) {
+            return {};
+        }
+        if (reqLen > 1024 * 1024) {
+            clippedAny = true;
+            return {};
+        }
+        std::vector<unsigned char> buf(reqLen + 2, 0);
+        unsigned long actual = getter(reinterpret_cast<FPDF_WCHAR*>(buf.data()), reqLen);
+        if (actual == 0 || actual <= 2) {
+            return {};
+        }
+        const char16_t* u16 = reinterpret_cast<const char16_t*>(buf.data());
+        size_t charCount = (actual - 2) / sizeof(char16_t);
+        QString str = QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
+        if (static_cast<size_t>(str.size()) > maxChars) {
+            clippedAny = true;
+            str.truncate(static_cast<qsizetype>(maxChars));
+        }
+        return str;
+    };
+
+    for (int i = 0; i < annotCount; ++i) {
+        FPDF_ANNOTATION annot = FPDFPage_GetAnnot(m_page, i);
+        if (!annot) {
+            continue;
+        }
+
+        if (FPDFAnnot_GetSubtype(annot) != FPDF_ANNOT_WIDGET) {
+            FPDFPage_CloseAnnot(annot);
+            continue;
+        }
+
+        if (result.size() >= kMaxFormFieldsPerPage) {
+            clippedAny = true;
+            FPDFPage_CloseAnnot(annot);
+            break;
+        }
+
+        FormFieldItem item;
+        item.pageIndex = m_pageIndex;
+
+        FS_RECTF rect{};
+        if (!FPDFAnnot_GetRect(annot, &rect) ||
+            !std::isfinite(rect.left) || !std::isfinite(rect.top) ||
+            !std::isfinite(rect.right) || !std::isfinite(rect.bottom)) {
+            clippedAny = true;
+            FPDFPage_CloseAnnot(annot);
+            continue;
+        }
+        item.left = rect.left;
+        item.top = rect.top;
+        item.right = rect.right;
+        item.bottom = rect.bottom;
+
+        int rawType = FPDFAnnot_GetFormFieldType(m_form->handle, annot);
+        switch (rawType) {
+            case FPDF_FORMFIELD_PUSHBUTTON:  item.type = FormFieldType::PushButton; break;
+            case FPDF_FORMFIELD_CHECKBOX:    item.type = FormFieldType::CheckBox; break;
+            case FPDF_FORMFIELD_RADIOBUTTON: item.type = FormFieldType::RadioButton; break;
+            case FPDF_FORMFIELD_COMBOBOX:    item.type = FormFieldType::ComboBox; break;
+            case FPDF_FORMFIELD_LISTBOX:     item.type = FormFieldType::ListBox; break;
+            case FPDF_FORMFIELD_TEXTFIELD:   item.type = FormFieldType::TextField; break;
+            case FPDF_FORMFIELD_SIGNATURE:   item.type = FormFieldType::Signature; break;
+            default:                         item.type = FormFieldType::Unknown; break;
+        }
+
+        int flags = FPDFAnnot_GetFormFieldFlags(m_form->handle, annot);
+        if (flags > 0) {
+            item.flags = static_cast<uint32_t>(flags);
+        }
+
+        item.fieldName = readWideField([&](FPDF_WCHAR* b, unsigned long l) {
+            return FPDFAnnot_GetFormFieldName(m_form->handle, annot, b, l);
+        }, kMaxFormFieldNameChars);
+
+        item.controlIndex = fieldNameToControlIndex[item.fieldName]++;
+
+        item.value = readWideField([&](FPDF_WCHAR* b, unsigned long l) {
+            return FPDFAnnot_GetFormFieldValue(m_form->handle, annot, b, l);
+        }, kMaxFormFieldTextCodeUnits);
+
+        if (item.type == FormFieldType::CheckBox || item.type == FormFieldType::RadioButton) {
+            item.isChecked = (FPDFAnnot_IsChecked(m_form->handle, annot) != 0);
+        }
+
+        if (item.type == FormFieldType::ComboBox || item.type == FormFieldType::ListBox) {
+            int optCount = FPDFAnnot_GetOptionCount(m_form->handle, annot);
+            if (optCount > 0) {
+                if (static_cast<size_t>(optCount) > kMaxFormFieldOptions) {
+                    clippedAny = true;
+                    optCount = static_cast<int>(kMaxFormFieldOptions);
+                }
+                item.options.reserve(static_cast<size_t>(optCount));
+                for (int o = 0; o < optCount; ++o) {
+                    QString optStr = readWideField([&](FPDF_WCHAR* b, unsigned long l) {
+                        return FPDFAnnot_GetOptionLabel(m_form->handle, annot, o, b, l);
+                    }, kMaxFormFieldOptionChars);
+                    item.options.push_back(std::move(optStr));
+
+                    if (FPDFAnnot_IsOptionSelected(m_form->handle, annot, o)) {
+                        item.selectedIndices.push_back(o);
+                    }
+                }
+            }
+        }
+
+        FPDFPage_CloseAnnot(annot);
+
+        if (item.isValid()) {
+            const uint64_t cost = formFieldBudgetCost(item);
+            if (budgetUsed + cost > kMaxFormFieldListBytes) {
+                clippedAny = true;
+                break;
+            }
+            budgetUsed += cost;
+            result.push_back(std::move(item));
+        } else {
+            clippedAny = true;
+        }
+    }
+
+    return result;
+}
+
+namespace {
+
+FPDF_ANNOTATION findWidgetAnnot(FPDF_PAGE page, FPDF_FORMHANDLE form, const QString& fieldName, int controlIndex) {
+    if (!page || !form || fieldName.isEmpty() || controlIndex < 0) {
+        return nullptr;
+    }
+    const int count = FPDFPage_GetAnnotCount(page);
+    QHash<QString, int> controlIndices;
+    for (int i = 0; i < count; ++i) {
+        FPDF_ANNOTATION annot = FPDFPage_GetAnnot(page, i);
+        if (!annot) continue;
+        if (FPDFAnnot_GetSubtype(annot) != FPDF_ANNOT_WIDGET) {
+            FPDFPage_CloseAnnot(annot);
+            continue;
+        }
+        unsigned long reqLen = FPDFAnnot_GetFormFieldName(form, annot, nullptr, 0);
+        QString name;
+        if (reqLen > 2 && reqLen <= 1024 * 1024) {
+            std::vector<unsigned char> buf(reqLen + 2, 0);
+            unsigned long actual = FPDFAnnot_GetFormFieldName(form, annot, reinterpret_cast<FPDF_WCHAR*>(buf.data()), reqLen);
+            if (actual > 2) {
+                const char16_t* u16 = reinterpret_cast<const char16_t*>(buf.data());
+                size_t charCount = (actual - 2) / sizeof(char16_t);
+                name = QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
+            }
+        }
+        int cIdx = controlIndices[name]++;
+        if (name == fieldName && cIdx == controlIndex) {
+            return annot;
+        }
+        FPDFPage_CloseAnnot(annot);
+    }
+    return nullptr;
+}
+
+} // namespace
+
+bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, const QString& text,
+                                  const std::vector<AnnotationPathElement>& vectorOutlines) {
+    (void)vectorOutlines; // Outlines deferred to Slice 4
+    if (!m_page || !m_form || !m_form->handle || fieldName.isEmpty() || controlIndex < 0 ||
+        text.size() > static_cast<qsizetype>(kMaxFormFieldTextCodeUnits)) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    FPDF_ANNOTATION annot = findWidgetAnnot(m_page, m_form->handle, fieldName, controlIndex);
+    if (!annot) {
+        return false;
+    }
+
+    int flags = FPDFAnnot_GetFormFieldFlags(m_form->handle, annot);
+    if (flags & FormFieldFlag::ReadOnly) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    int rawType = FPDFAnnot_GetFormFieldType(m_form->handle, annot);
+    const bool isTextField = (rawType == FPDF_FORMFIELD_TEXTFIELD);
+    const bool isEditableCombo = (rawType == FPDF_FORMFIELD_COMBOBOX && (flags & FormFieldFlag::Edit));
+    if (!isTextField && !isEditableCombo) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    std::vector<unsigned short> wideText(text.size() + 1, 0);
+    for (int i = 0; i < text.size(); ++i) {
+        wideText[i] = text.at(i).unicode();
+    }
+
+    // Capture prior value for rollback in case a later commit or verification step fails
+    unsigned long origLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
+    QString originalVal;
+    if (origLen > 2) {
+        std::vector<unsigned char> origBuf(origLen + 2, 0);
+        unsigned long actual = FPDFAnnot_GetFormFieldValue(m_form->handle, annot,
+            reinterpret_cast<FPDF_WCHAR*>(origBuf.data()), origLen);
+        if (actual > 2) {
+            const char16_t* u16 = reinterpret_cast<const char16_t*>(origBuf.data());
+            originalVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
+        }
+    }
+
+    bool killed = false;
+    if (isEditableCombo) {
+        FORM_ForceToKillFocus(m_form->handle);
+        FPDFAnnot_SetStringValue(annot, "V", reinterpret_cast<FPDF_WIDESTRING>(wideText.data()));
+        killed = true;
+    } else {
+        if (!FORM_SetFocusedAnnot(m_form->handle, annot)) {
+            FPDFPage_CloseAnnot(annot);
+            return false;
+        }
+
+        if (!FORM_SelectAllText(m_form->handle, m_page)) {
+            FORM_ForceToKillFocus(m_form->handle);
+            FPDFPage_CloseAnnot(annot);
+            return false;
+        }
+
+        FORM_ReplaceSelection(m_form->handle, m_page, wideText.data());
+        killed = (FORM_ForceToKillFocus(m_form->handle) != 0);
+    }
+
+    // Verify the commit succeeded by reading back the field value
+    unsigned long reqLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
+    QString committedVal;
+    if (reqLen > 2) {
+        std::vector<unsigned char> valBuf(reqLen + 2, 0);
+        unsigned long actual = FPDFAnnot_GetFormFieldValue(m_form->handle, annot,
+            reinterpret_cast<FPDF_WCHAR*>(valBuf.data()), reqLen);
+        if (actual > 2) {
+            const char16_t* u16 = reinterpret_cast<const char16_t*>(valBuf.data());
+            committedVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
+        }
+    }
+
+    const bool success = (killed && committedVal == text);
+    if (!success) {
+        // Rollback to prior value to avoid leaving an unlogged mutation
+        std::vector<unsigned short> origWide(originalVal.size() + 1, 0);
+        for (int i = 0; i < originalVal.size(); ++i) {
+            origWide[i] = originalVal.at(i).unicode();
+        }
+
+        bool rollbackOk = false;
+        if (isEditableCombo) {
+            FORM_ForceToKillFocus(m_form->handle);
+            FPDFAnnot_SetStringValue(annot, "V", reinterpret_cast<FPDF_WIDESTRING>(origWide.data()));
+
+            unsigned long rbLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
+            QString restoredVal;
+            if (rbLen > 2) {
+                std::vector<unsigned char> rbBuf(rbLen + 2, 0);
+                unsigned long actual = FPDFAnnot_GetFormFieldValue(m_form->handle, annot,
+                    reinterpret_cast<FPDF_WCHAR*>(rbBuf.data()), rbLen);
+                if (actual > 2) {
+                    const char16_t* u16 = reinterpret_cast<const char16_t*>(rbBuf.data());
+                    restoredVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
+                }
+            }
+            rollbackOk = (restoredVal == originalVal);
+        } else {
+            bool rbFocused = (FORM_SetFocusedAnnot(m_form->handle, annot) != 0);
+            bool rbSelected = rbFocused && (FORM_SelectAllText(m_form->handle, m_page) != 0);
+            if (rbSelected) {
+                FORM_ReplaceSelection(m_form->handle, m_page, origWide.data());
+            }
+            bool rbKilled = (FORM_ForceToKillFocus(m_form->handle) != 0);
+
+            // Verify that the restored value actually matches originalVal
+            unsigned long rbLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
+            QString restoredVal;
+            if (rbLen > 2) {
+                std::vector<unsigned char> rbBuf(rbLen + 2, 0);
+                unsigned long actual = FPDFAnnot_GetFormFieldValue(m_form->handle, annot,
+                    reinterpret_cast<FPDF_WCHAR*>(rbBuf.data()), rbLen);
+                if (actual > 2) {
+                    const char16_t* u16 = reinterpret_cast<const char16_t*>(rbBuf.data());
+                    restoredVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
+                }
+            }
+
+            rollbackOk = (rbFocused && rbSelected && rbKilled && (restoredVal == originalVal));
+        }
+
+        if (!rollbackOk) {
+            std::cerr << "[PdfiumPage] FATAL: Form field rollback failed for '"
+                      << fieldName.toStdString() << "'. Inconsistent worker state. Aborting to prevent unlogged mutation."
+                      << std::endl;
+            FPDFPage_CloseAnnot(annot);
+            std::abort();
+        }
+
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
+}
+
+bool PdfiumPage::toggleFormField(const QString& fieldName, int controlIndex, bool checked) {
+    if (!m_page || !m_form || !m_form->handle || fieldName.isEmpty() || controlIndex < 0) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    FPDF_ANNOTATION annot = findWidgetAnnot(m_page, m_form->handle, fieldName, controlIndex);
+    if (!annot) {
+        return false;
+    }
+
+    int flags = FPDFAnnot_GetFormFieldFlags(m_form->handle, annot);
+    if (flags & FormFieldFlag::ReadOnly) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    int rawType = FPDFAnnot_GetFormFieldType(m_form->handle, annot);
+    if (rawType != FPDF_FORMFIELD_CHECKBOX && rawType != FPDF_FORMFIELD_RADIOBUTTON) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    bool currentlyChecked = (FPDFAnnot_IsChecked(m_form->handle, annot) != 0);
+
+    if (rawType == FPDF_FORMFIELD_RADIOBUTTON) {
+        if (!checked && (flags & FormFieldFlag::NoToggleToOff)) {
+            // Cannot directly turn off a radio button in a group with NoToggleToOff
+            FPDFPage_CloseAnnot(annot);
+            return false;
+        }
+        if (checked == currentlyChecked) {
+            FPDFPage_CloseAnnot(annot);
+            return true;
+        }
+    } else { // CheckBox
+        if (checked == currentlyChecked) {
+            FPDFPage_CloseAnnot(annot);
+            return true;
+        }
+    }
+
+    FS_RECTF rect{};
+    if (!FPDFAnnot_GetRect(annot, &rect)) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    double cx = (rect.left + rect.right) / 2.0;
+    double cy = (rect.top + rect.bottom) / 2.0;
+
+    FORM_OnLButtonDown(m_form->handle, m_page, 0, cx, cy);
+    FORM_OnLButtonUp(m_form->handle, m_page, 0, cx, cy);
+    FORM_ForceToKillFocus(m_form->handle);
+
+    bool newChecked = (FPDFAnnot_IsChecked(m_form->handle, annot) != 0);
+    FPDFPage_CloseAnnot(annot);
+
+    if (rawType == FPDF_FORMFIELD_RADIOBUTTON && checked) {
+        if (!newChecked) {
+            return false;
+        }
+        // Verify siblings in the same radio group on this page are no longer checked
+        const int annotCount = FPDFPage_GetAnnotCount(m_page);
+        QHash<QString, int> controlIndices;
+        for (int i = 0; i < annotCount; ++i) {
+            FPDF_ANNOTATION sib = FPDFPage_GetAnnot(m_page, i);
+            if (!sib) continue;
+            if (FPDFAnnot_GetSubtype(sib) != FPDF_ANNOT_WIDGET) {
+                FPDFPage_CloseAnnot(sib);
+                continue;
+            }
+            unsigned long reqLen = FPDFAnnot_GetFormFieldName(m_form->handle, sib, nullptr, 0);
+            QString name;
+            if (reqLen > 2 && reqLen <= 1024 * 1024) {
+                std::vector<unsigned char> buf(reqLen + 2, 0);
+                unsigned long actual = FPDFAnnot_GetFormFieldName(m_form->handle, sib, reinterpret_cast<FPDF_WCHAR*>(buf.data()), reqLen);
+                if (actual > 2) {
+                    const char16_t* u16 = reinterpret_cast<const char16_t*>(buf.data());
+                    size_t charCount = (actual - 2) / sizeof(char16_t);
+                    name = QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
+                }
+            }
+            int cIdx = controlIndices[name]++;
+            if (name == fieldName && cIdx != controlIndex) {
+                if (FPDFAnnot_IsChecked(m_form->handle, sib) != 0) {
+                    FPDFPage_CloseAnnot(sib);
+                    return false;
+                }
+            }
+            FPDFPage_CloseAnnot(sib);
+        }
+    }
+
+    return (newChecked == checked);
+}
+
+bool PdfiumPage::setFormFieldChoice(const QString& fieldName, int controlIndex,
+                                    const std::vector<int>& selectedIndices) {
+    if (!m_page || !m_form || !m_form->handle || fieldName.isEmpty() || controlIndex < 0 ||
+        selectedIndices.size() > kMaxFormFieldOptions) {
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    FPDF_ANNOTATION annot = findWidgetAnnot(m_page, m_form->handle, fieldName, controlIndex);
+    if (!annot) {
+        return false;
+    }
+
+    int flags = FPDFAnnot_GetFormFieldFlags(m_form->handle, annot);
+    if (flags & FormFieldFlag::ReadOnly) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    int rawType = FPDFAnnot_GetFormFieldType(m_form->handle, annot);
+    if (rawType != FPDF_FORMFIELD_COMBOBOX && rawType != FPDF_FORMFIELD_LISTBOX) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    int optCount = FPDFAnnot_GetOptionCount(m_form->handle, annot);
+    if (optCount < 0) optCount = 0;
+
+    if (!(flags & FormFieldFlag::MultiSelect) && selectedIndices.size() > 1) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    std::unordered_set<int> seen;
+    for (int idx : selectedIndices) {
+        if (idx < 0 || idx >= optCount || !seen.insert(idx).second) {
+            FPDFPage_CloseAnnot(annot);
+            return false;
+        }
+    }
+
+    // Capture prior selection for rollback in case commit or verification fails
+    std::unordered_set<int> origSelected;
+    for (int i = 0; i < optCount; ++i) {
+        if (FPDFAnnot_IsOptionSelected(m_form->handle, annot, i)) {
+            origSelected.insert(i);
+        }
+    }
+
+    if (!FORM_SetFocusedAnnot(m_form->handle, annot)) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    for (int i = 0; i < optCount; ++i) {
+        bool sel = (seen.find(i) != seen.end());
+        FORM_SetIndexSelected(m_form->handle, m_page, i, sel);
+    }
+    const bool killed = (FORM_ForceToKillFocus(m_form->handle) != 0);
+
+    // Verify selection commit succeeded
+    bool selectionVerified = true;
+    for (int i = 0; i < optCount; ++i) {
+        bool expected = (seen.find(i) != seen.end());
+        bool actual = (FPDFAnnot_IsOptionSelected(m_form->handle, annot, i) != 0);
+        if (expected != actual) {
+            selectionVerified = false;
+            break;
+        }
+    }
+
+    if (!killed || !selectionVerified) {
+        // Rollback to prior selection
+        bool rbFocused = (FORM_SetFocusedAnnot(m_form->handle, annot) != 0);
+        if (rbFocused) {
+            for (int i = 0; i < optCount; ++i) {
+                bool sel = (origSelected.find(i) != origSelected.end());
+                FORM_SetIndexSelected(m_form->handle, m_page, i, sel);
+            }
+            FORM_ForceToKillFocus(m_form->handle);
+        }
+        bool rbVerified = true;
+        for (int i = 0; i < optCount; ++i) {
+            bool expected = (origSelected.find(i) != origSelected.end());
+            bool actual = (FPDFAnnot_IsOptionSelected(m_form->handle, annot, i) != 0);
+            if (expected != actual) {
+                rbVerified = false;
+                break;
+            }
+        }
+        if (!rbFocused || !rbVerified) {
+            std::cerr << "[PdfiumPage] FATAL: Form field choice rollback failed for '"
+                      << fieldName.toStdString() << "'. Inconsistent worker state. Aborting."
+                      << std::endl;
+            FPDFPage_CloseAnnot(annot);
+            std::abort();
+        }
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    return true;
 }
 
 bool PdfiumPage::hitTestAnnotation(double xPoints, double yPoints, AnnotationItem& out) {

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "ipc/IpcProtocol.h"
 #include "engine/IDocument.h"
@@ -7,6 +7,7 @@
 #include "engine/SearchTypes.h"
 #include "engine/OutlineTypes.h"
 #include "engine/AnnotationTypes.h"
+#include "engine/FormFieldTypes.h"
 #include "engine/RenderWorker.h"
 #include "cache/TileCache.h"
 
@@ -362,6 +363,74 @@ struct SaveDocumentResponse {
     QString errorMessage;
 };
 
+// AcroForms (Phase 2 M5 Slice 1 Read-Only)
+struct ListFormFieldsRequest {
+    int64_t documentId{0};
+    int pageIndex{0};
+};
+
+struct ListFormFieldsResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+    bool success{false};
+    bool truncated{false};   // list is incomplete (caps or response budget reached)
+    std::vector<pdf::FormFieldItem> fields;
+};
+
+// AcroForms Mutations (Phase 2 M5 Slice 2)
+struct SetFormFieldTextRequest {
+    int64_t documentId{0};
+    int pageIndex{0};
+    QString fieldName;
+    int controlIndex{0};
+    QString text;
+    // Optional vector outlines (wire limit 250,000; deferred to Slice 4, stored with zero appearance writing in Slice 2)
+    std::vector<pdf::AnnotationPathElement> vectorOutlines;
+};
+
+struct SetFormFieldTextResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+    QString fieldName;
+    int controlIndex{0};
+    bool success{false};
+    QString errorMessage;
+};
+
+struct ToggleFormFieldRequest {
+    int64_t documentId{0};
+    int pageIndex{0};
+    QString fieldName;
+    int controlIndex{0};
+    bool checked{false};
+};
+
+struct ToggleFormFieldResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+    QString fieldName;
+    int controlIndex{0};
+    bool success{false};
+    QString errorMessage;
+};
+
+struct SetFormFieldChoiceRequest {
+    int64_t documentId{0};
+    int pageIndex{0};
+    QString fieldName;
+    int controlIndex{0};
+    std::vector<int> selectedIndices;
+};
+
+struct SetFormFieldChoiceResponse {
+    int64_t documentId{0};
+    int pageIndex{0};
+    QString fieldName;
+    int controlIndex{0};
+    bool success{false};
+    QString errorMessage;
+};
+
 
 // Message stream operators
 QDataStream& operator<<(QDataStream& out, const ExtractPagesRequest& req);
@@ -496,6 +565,27 @@ QDataStream& operator>>(QDataStream& in, SaveDocumentRequest& req);
 
 QDataStream& operator<<(QDataStream& out, const SaveDocumentResponse& res);
 QDataStream& operator>>(QDataStream& in, SaveDocumentResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const ListFormFieldsRequest& req);
+QDataStream& operator>>(QDataStream& in, ListFormFieldsRequest& req);
+
+QDataStream& operator<<(QDataStream& out, const ListFormFieldsResponse& res);
+QDataStream& operator>>(QDataStream& in, ListFormFieldsResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const SetFormFieldTextRequest& req);
+QDataStream& operator>>(QDataStream& in, SetFormFieldTextRequest& req);
+QDataStream& operator<<(QDataStream& out, const SetFormFieldTextResponse& res);
+QDataStream& operator>>(QDataStream& in, SetFormFieldTextResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const ToggleFormFieldRequest& req);
+QDataStream& operator>>(QDataStream& in, ToggleFormFieldRequest& req);
+QDataStream& operator<<(QDataStream& out, const ToggleFormFieldResponse& res);
+QDataStream& operator>>(QDataStream& in, ToggleFormFieldResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const SetFormFieldChoiceRequest& req);
+QDataStream& operator>>(QDataStream& in, SetFormFieldChoiceRequest& req);
+QDataStream& operator<<(QDataStream& out, const SetFormFieldChoiceResponse& res);
+QDataStream& operator>>(QDataStream& in, SetFormFieldChoiceResponse& res);
 
 // --- Serialization Templates ---
 

@@ -1,10 +1,11 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 
 namespace pdf::ipc {
 
 constexpr uint32_t IPC_MAGIC = 0x50444657; // 'PDFW'
+// v13 added ListFormFieldsRequest and ListFormFieldsResponse for M5 Slice 1 (read-only form fields).
 // v12 added bounded attachment filename and binary payload fields to AnnotationItem for M4.
 // v11 added textOutline to AnnotationItem (a FreeText box's text as glyph outlines, so any script can be drawn).
 // v10 added fontSize to AnnotationItem (FreeText used to smuggle its font size through borderWidth).
@@ -14,7 +15,7 @@ constexpr uint32_t IPC_MAGIC = 0x50444657; // 'PDFW'
 // v6 added AddAnnotationRequest, AddAnnotationResponse, SaveDocumentRequest, SaveDocumentResponse and WorkerOp::Save.
 // Bump this whenever a serialised layout changes: the frame-level version check is the only thing
 // that turns a wire mismatch into a clean rejection instead of silent garbage.
-constexpr uint32_t IPC_PROTOCOL_VERSION = 12;
+constexpr uint32_t IPC_PROTOCOL_VERSION = 13;
 constexpr uint32_t MAX_IPC_PAYLOAD_SIZE = 64 * 1024 * 1024;
 
 enum class WorkerOp : uint32_t {
@@ -94,6 +95,16 @@ enum class MessageType : uint32_t {
     RemoveAnnotationResponse = 100,
     SaveDocumentRequest = 96,
     SaveDocumentResponse = 97,
+
+    // AcroForms (Phase 2 M5)
+    ListFormFieldsRequest = 110,
+    ListFormFieldsResponse = 111,
+    SetFormFieldTextRequest = 112,
+    SetFormFieldTextResponse = 113,
+    ToggleFormFieldRequest = 114,
+    ToggleFormFieldResponse = 115,
+    SetFormFieldChoiceRequest = 116,
+    SetFormFieldChoiceResponse = 117,
 
     // Error / Diagnostic
     WorkerError = 99

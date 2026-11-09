@@ -50,6 +50,10 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::RedactDocumentResponse:
         case MessageType::RedactDocumentFailedResponse:
         case MessageType::ListAnnotationsResponse:
+        case MessageType::ListFormFieldsResponse:
+        case MessageType::SetFormFieldTextResponse:
+        case MessageType::ToggleFormFieldResponse:
+        case MessageType::SetFormFieldChoiceResponse:
         case MessageType::HitTestAnnotationResponse:
         case MessageType::AddAnnotationResponse:
         case MessageType::RemoveAnnotationResponse:
@@ -526,6 +530,242 @@ ListAnnotationsResponse WorkerClient::listAnnotationsSync(int64_t documentId, in
     loop.exec();
 
     disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    return result;
+}
+
+void WorkerClient::requestListFormFields(int64_t documentId, int pageIndex) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT formFieldsFailed(documentId, pageIndex);
+        return;
+    }
+    sendMessage(MessageType::ListFormFieldsRequest,
+                serialize(ListFormFieldsRequest{documentId, pageIndex}));
+}
+
+ListFormFieldsResponse WorkerClient::listFormFieldsSync(int64_t documentId, int pageIndex, int timeoutMs) {
+    if (!ensureConnected()) {
+        ListFormFieldsResponse failed;
+        failed.documentId = documentId;
+        failed.pageIndex = pageIndex;
+        failed.success = false;
+        return failed;
+    }
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    ListFormFieldsResponse result;
+    result.documentId = documentId;
+    result.pageIndex = pageIndex;
+    result.success = false;
+
+    const auto readyConn = connect(this, &WorkerClient::formFieldsReady, &loop,
+        [&](int64_t docId, int pIdx, const std::vector<pdf::FormFieldItem>& fields, bool trunc) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.success = true;
+                result.truncated = trunc;
+                result.fields = fields;
+                loop.quit();
+            }
+        });
+    const auto failConn = connect(this, &WorkerClient::formFieldsFailed, &loop,
+        [&](int64_t docId, int pIdx) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.success = false;
+                loop.quit();
+            }
+        });
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestListFormFields(documentId, pageIndex);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    return result;
+}
+
+void WorkerClient::requestSetFormFieldText(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex,
+                                           const QString& text, const std::vector<pdf::AnnotationPathElement>& vectorOutlines) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT formFieldTextFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Worker stopped"));
+        return;
+    }
+    SetFormFieldTextRequest req{documentId, pageIndex, fieldName, controlIndex, text, vectorOutlines};
+    sendMessage(MessageType::SetFormFieldTextRequest, serialize(req));
+}
+
+SetFormFieldTextResponse WorkerClient::setFormFieldTextSync(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex,
+                                                            const QString& text, const std::vector<pdf::AnnotationPathElement>& vectorOutlines,
+                                                            int timeoutMs) {
+    if (!ensureConnected()) {
+        SetFormFieldTextResponse failed;
+        failed.documentId = documentId;
+        failed.pageIndex = pageIndex;
+        failed.fieldName = fieldName;
+        failed.controlIndex = controlIndex;
+        failed.success = false;
+        failed.errorMessage = QStringLiteral("Not connected");
+        return failed;
+    }
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    SetFormFieldTextResponse result;
+    result.documentId = documentId;
+    result.pageIndex = pageIndex;
+    result.fieldName = fieldName;
+    result.controlIndex = controlIndex;
+    result.success = false;
+
+    const auto setConn = connect(this, &WorkerClient::formFieldTextSet, &loop,
+        [&](int64_t docId, int pIdx, const QString& fName, int cIdx) {
+            if (docId == documentId && pIdx == pageIndex && fName == fieldName && cIdx == controlIndex) {
+                result.success = true;
+                loop.quit();
+            }
+        });
+    const auto failConn = connect(this, &WorkerClient::formFieldTextFailed, &loop,
+        [&](int64_t docId, int pIdx, const QString& fName, int cIdx, const QString& err) {
+            if (docId == documentId && pIdx == pageIndex && fName == fieldName && cIdx == controlIndex) {
+                result.success = false;
+                result.errorMessage = err;
+                loop.quit();
+            }
+        });
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestSetFormFieldText(documentId, pageIndex, fieldName, controlIndex, text, vectorOutlines);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(setConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    return result;
+}
+
+void WorkerClient::requestToggleFormField(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, bool checked) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT formFieldToggleFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Worker stopped"));
+        return;
+    }
+    ToggleFormFieldRequest req{documentId, pageIndex, fieldName, controlIndex, checked};
+    sendMessage(MessageType::ToggleFormFieldRequest, serialize(req));
+}
+
+ToggleFormFieldResponse WorkerClient::toggleFormFieldSync(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex,
+                                                          bool checked, int timeoutMs) {
+    if (!ensureConnected()) {
+        ToggleFormFieldResponse failed;
+        failed.documentId = documentId;
+        failed.pageIndex = pageIndex;
+        failed.fieldName = fieldName;
+        failed.controlIndex = controlIndex;
+        failed.success = false;
+        failed.errorMessage = QStringLiteral("Not connected");
+        return failed;
+    }
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    ToggleFormFieldResponse result;
+    result.documentId = documentId;
+    result.pageIndex = pageIndex;
+    result.fieldName = fieldName;
+    result.controlIndex = controlIndex;
+    result.success = false;
+
+    const auto setConn = connect(this, &WorkerClient::formFieldToggled, &loop,
+        [&](int64_t docId, int pIdx, const QString& fName, int cIdx, bool chk) {
+            (void)chk;
+            if (docId == documentId && pIdx == pageIndex && fName == fieldName && cIdx == controlIndex) {
+                result.success = true;
+                loop.quit();
+            }
+        });
+    const auto failConn = connect(this, &WorkerClient::formFieldToggleFailed, &loop,
+        [&](int64_t docId, int pIdx, const QString& fName, int cIdx, const QString& err) {
+            if (docId == documentId && pIdx == pageIndex && fName == fieldName && cIdx == controlIndex) {
+                result.success = false;
+                result.errorMessage = err;
+                loop.quit();
+            }
+        });
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestToggleFormField(documentId, pageIndex, fieldName, controlIndex, checked);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(setConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    return result;
+}
+
+void WorkerClient::requestSetFormFieldChoice(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex,
+                                             const std::vector<int>& selectedIndices) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT formFieldChoiceFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Worker stopped"));
+        return;
+    }
+    SetFormFieldChoiceRequest req{documentId, pageIndex, fieldName, controlIndex, selectedIndices};
+    sendMessage(MessageType::SetFormFieldChoiceRequest, serialize(req));
+}
+
+SetFormFieldChoiceResponse WorkerClient::setFormFieldChoiceSync(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex,
+                                                                const std::vector<int>& selectedIndices, int timeoutMs) {
+    if (!ensureConnected()) {
+        SetFormFieldChoiceResponse failed;
+        failed.documentId = documentId;
+        failed.pageIndex = pageIndex;
+        failed.fieldName = fieldName;
+        failed.controlIndex = controlIndex;
+        failed.success = false;
+        failed.errorMessage = QStringLiteral("Not connected");
+        return failed;
+    }
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    SetFormFieldChoiceResponse result;
+    result.documentId = documentId;
+    result.pageIndex = pageIndex;
+    result.fieldName = fieldName;
+    result.controlIndex = controlIndex;
+    result.success = false;
+
+    const auto setConn = connect(this, &WorkerClient::formFieldChoiceSet, &loop,
+        [&](int64_t docId, int pIdx, const QString& fName, int cIdx, const std::vector<int>& sel) {
+            (void)sel;
+            if (docId == documentId && pIdx == pageIndex && fName == fieldName && cIdx == controlIndex) {
+                result.success = true;
+                loop.quit();
+            }
+        });
+    const auto failConn = connect(this, &WorkerClient::formFieldChoiceFailed, &loop,
+        [&](int64_t docId, int pIdx, const QString& fName, int cIdx, const QString& err) {
+            if (docId == documentId && pIdx == pageIndex && fName == fieldName && cIdx == controlIndex) {
+                result.success = false;
+                result.errorMessage = err;
+                loop.quit();
+            }
+        });
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestSetFormFieldChoice(documentId, pageIndex, fieldName, controlIndex, selectedIndices);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(setConn);
     disconnect(failConn);
     disconnect(workerFailConn);
     return result;
@@ -1375,6 +1615,62 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
                 }
             } else {
                 Q_EMIT annotationsFailed(0, 0);
+            }
+            break;
+        }
+
+        case MessageType::ListFormFieldsResponse: {
+            ListFormFieldsResponse response;
+            if (deserialize(payload, response)) {
+                if (response.success) {
+                    Q_EMIT formFieldsReady(response.documentId, response.pageIndex, response.fields, response.truncated);
+                } else {
+                    Q_EMIT formFieldsFailed(response.documentId, response.pageIndex);
+                }
+            } else {
+                Q_EMIT formFieldsFailed(0, 0);
+            }
+            break;
+        }
+
+        case MessageType::SetFormFieldTextResponse: {
+            SetFormFieldTextResponse response;
+            if (deserialize(payload, response)) {
+                if (response.success) {
+                    Q_EMIT formFieldTextSet(response.documentId, response.pageIndex, response.fieldName, response.controlIndex);
+                } else {
+                    Q_EMIT formFieldTextFailed(response.documentId, response.pageIndex, response.fieldName, response.controlIndex, response.errorMessage);
+                }
+            } else {
+                Q_EMIT formFieldTextFailed(0, 0, QString(), 0, QStringLiteral("Malformed SetFormFieldTextResponse"));
+            }
+            break;
+        }
+
+        case MessageType::ToggleFormFieldResponse: {
+            ToggleFormFieldResponse response;
+            if (deserialize(payload, response)) {
+                if (response.success) {
+                    Q_EMIT formFieldToggled(response.documentId, response.pageIndex, response.fieldName, response.controlIndex, true);
+                } else {
+                    Q_EMIT formFieldToggleFailed(response.documentId, response.pageIndex, response.fieldName, response.controlIndex, response.errorMessage);
+                }
+            } else {
+                Q_EMIT formFieldToggleFailed(0, 0, QString(), 0, QStringLiteral("Malformed ToggleFormFieldResponse"));
+            }
+            break;
+        }
+
+        case MessageType::SetFormFieldChoiceResponse: {
+            SetFormFieldChoiceResponse response;
+            if (deserialize(payload, response)) {
+                if (response.success) {
+                    Q_EMIT formFieldChoiceSet(response.documentId, response.pageIndex, response.fieldName, response.controlIndex, {});
+                } else {
+                    Q_EMIT formFieldChoiceFailed(response.documentId, response.pageIndex, response.fieldName, response.controlIndex, response.errorMessage);
+                }
+            } else {
+                Q_EMIT formFieldChoiceFailed(0, 0, QString(), 0, QStringLiteral("Malformed SetFormFieldChoiceResponse"));
             }
             break;
         }

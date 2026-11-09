@@ -15,6 +15,7 @@
 #include "engine/PageText.h"
 #include "engine/PdfiumDocument.h"
 #include "engine/PdfiumPage.h"
+#include "engine/FormFieldTypes.h"
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -4552,8 +4553,390 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: /FS file bytes persist exactly, filenames are fail-closed, and listing stays metadata-only." << std::endl;
     }
 
+    // --- TEST 44: Milestone M5 Slice 1 Read-only Form Field Enumeration ---
+    std::cout << "[TEST 44] Testing interactive form field enumeration (Milestone M5 Slice 1)..." << std::endl;
+    {
+        // 44a: Form fields on a plain document without widgets
+        auto plainDoc = pdf::createDocument();
+        if (plainDoc->loadFromFile(samplePath) == pdf::DocumentError::None) {
+            auto plainPage = plainDoc->getPage(0);
+            if (plainPage) {
+                bool truncated = false;
+                auto fields = plainPage->listFormFields(&truncated);
+                if (!fields.empty() || truncated) {
+                    std::cerr << "[FAIL] Test 44a: Plain page must return empty form fields list without truncation" << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // 44b: Form field enumeration on annots_forms.pdf
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        std::string formsPath = root + "/tests/fixtures/redaction/annots_forms.pdf";
+        if (!QFile::exists(QString::fromStdString(formsPath))) {
+            formsPath = "tests/fixtures/redaction/annots_forms.pdf";
+        }
+        if (QFile::exists(QString::fromStdString(formsPath))) {
+            auto formsDoc = pdf::createDocument();
+            if (formsDoc->loadFromFile(formsPath) != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Test 44b: Failed to load annots_forms.pdf" << std::endl;
+                return 1;
+            }
+            auto formsPage = formsDoc->getPage(0);
+            if (!formsPage) {
+                std::cerr << "[FAIL] Test 44b: Page 0 is null in annots_forms.pdf" << std::endl;
+                return 1;
+            }
+            bool truncated = false;
+            auto fields = formsPage->listFormFields(&truncated);
+            if (fields.empty()) {
+                std::cerr << "[FAIL] Test 44b: Expected form fields in annots_forms.pdf, got 0" << std::endl;
+                return 1;
+            }
+            if (truncated) {
+                std::cerr << "[FAIL] Test 44b: annots_forms.pdf should not be truncated" << std::endl;
+                return 1;
+            }
+            const auto& firstField = fields[0];
+            if (!firstField.isValid() || firstField.pageIndex != 0 || firstField.controlIndex < 0) {
+                std::cerr << "[FAIL] Test 44b: Invalid FormFieldItem extracted" << std::endl;
+                return 1;
+            }
+            if (firstField.right <= firstField.left || firstField.top <= firstField.bottom) {
+                std::cerr << "[FAIL] Test 44b: Invalid bounding box geometry for form field" << std::endl;
+                return 1;
+            }
+            // Verify contains() hit testing
+            const double midX = (firstField.left + firstField.right) / 2.0;
+            const double midY = (firstField.bottom + firstField.top) / 2.0;
+            if (!firstField.contains(midX, midY)) {
+                std::cerr << "[FAIL] Test 44b: FormFieldItem::contains failed for center point" << std::endl;
+                return 1;
+            }
+            if (firstField.contains(firstField.left - 10.0, midY)) {
+                std::cerr << "[FAIL] Test 44b: FormFieldItem::contains false positive outside rect" << std::endl;
+                return 1;
+            }
+        }
+
+        // 44c: Budget calculation check
+        pdf::FormFieldItem testBudgetField;
+        testBudgetField.fieldName = QStringLiteral("testField");
+        testBudgetField.value = QStringLiteral("someValue");
+        testBudgetField.options = {QStringLiteral("opt1"), QStringLiteral("opt2")};
+        testBudgetField.selectedIndices = {0};
+        const uint64_t cost = pdf::formFieldBudgetCost(testBudgetField);
+        if (cost <= 128) {
+            std::cerr << "[FAIL] Test 44c: formFieldBudgetCost failed to account for field content" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Form fields enumerated cleanly with valid geometry, control indices, and budget tracking." << std::endl;
+    }
+
+    // --- TEST 45: Milestone M5 Slice 2 Form Field Mutations & Incremental Save ---
+    std::cout << "[TEST 45] Testing form field mutations, validation, incremental save, and EditLog (Milestone M5 Slice 2)..." << std::endl;
+    {
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        std::string fixturePath = root + "/tests/fixtures/form_fields_test.pdf";
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "tests/fixtures/form_fields_test.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "../tests/fixtures/form_fields_test.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            std::cerr << "[FAIL] Test 45: form_fields_test.pdf fixture not found at " << fixturePath << std::endl;
+            return 1;
+        }
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(fixturePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 45: Failed to load form_fields_test.pdf" << std::endl;
+            return 1;
+        }
+
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 45: Failed to get page 0" << std::endl;
+            return 1;
+        }
+
+        // 45a: Text field mutation and validation
+        // 1. Read-only field must be rejected
+        if (page->setFormFieldText(QStringLiteral("locked"), 0, QStringLiteral("HackedReadOnly"), {})) {
+            std::cerr << "[FAIL] Test 45a: setFormFieldText accepted mutation on ReadOnly field 'locked'" << std::endl;
+            return 1;
+        }
+        // 2. Non-text field must be rejected
+        if (page->setFormFieldText(QStringLiteral("agree"), 0, QStringLiteral("HackedCheckbox"), {})) {
+            std::cerr << "[FAIL] Test 45a: setFormFieldText accepted mutation on checkbox field 'agree'" << std::endl;
+            return 1;
+        }
+        // 3. Valid text field mutation
+        if (!page->setFormFieldText(QStringLiteral("name"), 0, QStringLiteral("Bob"), {})) {
+            std::cerr << "[FAIL] Test 45a: setFormFieldText failed on valid text field 'name'" << std::endl;
+            return 1;
+        }
+        if (!page->setFormFieldText(QStringLiteral("editable_combo"), 0, QStringLiteral("Mango"), {})) {
+            std::cerr << "[FAIL] Test 45a: setFormFieldText failed on editable combo 'editable_combo'" << std::endl;
+            return 1;
+        }
+
+        // 45b: Toggle form field (Checkbox & RadioButton)
+        // 1. Valid checkbox toggle
+        if (!page->toggleFormField(QStringLiteral("agree"), 0, true)) {
+            std::cerr << "[FAIL] Test 45b: toggleFormField failed to check 'agree'" << std::endl;
+            return 1;
+        }
+        // 2. Radio button with NoToggleToOff cannot be turned off directly
+        // In fixture, rg control 0 is initially checked.
+        if (page->toggleFormField(QStringLiteral("rg"), 0, false)) {
+            std::cerr << "[FAIL] Test 45b: toggleFormField allowed turning off a NoToggleToOff radio button directly" << std::endl;
+            return 1;
+        }
+        // 3. Checking sibling radio button (control 1) must succeed and uncheck control 0
+        if (!page->toggleFormField(QStringLiteral("rg"), 1, true)) {
+            std::cerr << "[FAIL] Test 45b: toggleFormField failed to check sibling radio button (control 1)" << std::endl;
+            return 1;
+        }
+
+        // 45c: Choice form field (Combo & Listbox)
+        // 1. Out-of-bounds choice index must be rejected
+        if (page->setFormFieldChoice(QStringLiteral("country"), 0, {99})) {
+            std::cerr << "[FAIL] Test 45c: setFormFieldChoice accepted out-of-bounds index 99 on 'country'" << std::endl;
+            return 1;
+        }
+        if (page->setFormFieldChoice(QStringLiteral("country"), 0, {-1})) {
+            std::cerr << "[FAIL] Test 45c: setFormFieldChoice accepted negative index -1 on 'country'" << std::endl;
+            return 1;
+        }
+        // 2. MultiSelect on single-select field must be rejected
+        if (page->setFormFieldChoice(QStringLiteral("country"), 0, {0, 1})) {
+            std::cerr << "[FAIL] Test 45c: setFormFieldChoice accepted multiple indices on single-select 'country'" << std::endl;
+            return 1;
+        }
+        // 3. Duplicate indices must be rejected
+        if (page->setFormFieldChoice(QStringLiteral("langs"), 0, {1, 1})) {
+            std::cerr << "[FAIL] Test 45c: setFormFieldChoice accepted duplicate indices on 'langs'" << std::endl;
+            return 1;
+        }
+        // 4. Valid single choice on 'country' (index 1 = 'Iran')
+        if (!page->setFormFieldChoice(QStringLiteral("country"), 0, {1})) {
+            std::cerr << "[FAIL] Test 45c: setFormFieldChoice failed on valid index {1} for 'country'" << std::endl;
+            return 1;
+        }
+        // 5. Valid multi-choice on 'langs' (indices 0 and 2 = English and German)
+        if (!page->setFormFieldChoice(QStringLiteral("langs"), 0, {0, 2})) {
+            std::cerr << "[FAIL] Test 45c: setFormFieldChoice failed on valid indices {0, 2} for 'langs'" << std::endl;
+            return 1;
+        }
+
+        // 45d: Verify current in-memory values via listFormFields
+        bool truncated = false;
+        auto fields = page->listFormFields(&truncated);
+        if (truncated || fields.size() < 6) {
+            std::cerr << "[FAIL] Test 45d: listFormFields returned unexpected count " << fields.size() << std::endl;
+            return 1;
+        }
+        for (const auto& f : fields) {
+            if (f.fieldName == "name") {
+                if (f.value != "Bob") {
+                    std::cerr << "[FAIL] Test 45d: 'name' field expected 'Bob', got '" << f.value.toStdString() << "'" << std::endl;
+                    return 1;
+                }
+            } else if (f.fieldName == "agree") {
+                if (!f.isChecked && f.value != "Yes") {
+                    std::cerr << "[FAIL] Test 45d: 'agree' field expected checked, got isChecked=" << f.isChecked
+                              << " val=" << f.value.toStdString() << std::endl;
+                    return 1;
+                }
+            } else if (f.fieldName == "rg") {
+                if (f.controlIndex == 0 && f.isChecked) {
+                    std::cerr << "[FAIL] Test 45d: 'rg' control 0 should be unchecked after sibling checked" << std::endl;
+                    return 1;
+                }
+                if (f.controlIndex == 1 && !f.isChecked) {
+                    std::cerr << "[FAIL] Test 45d: 'rg' control 1 should be checked" << std::endl;
+                    return 1;
+                }
+            } else if (f.fieldName == "country") {
+                if (f.selectedIndices != std::vector<int>{1}) {
+                    std::cerr << "[FAIL] Test 45d: 'country' selectedIndices mismatch" << std::endl;
+                    return 1;
+                }
+            } else if (f.fieldName == "langs") {
+                if (f.selectedIndices != std::vector<int>{0, 2}) {
+                    std::cerr << "[FAIL] Test 45d: 'langs' selectedIndices mismatch" << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // 45e: Incremental save and verify byte-prefix preservation & reload persistence
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] Test 45e: Failed to create temp directory" << std::endl;
+            return 1;
+        }
+        const std::string savedPath = tempDir.filePath("form_mutations_saved.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (saveFd < 0) {
+            std::cerr << "[FAIL] Test 45e: Failed to open saveFd" << std::endl;
+            return 1;
+        }
+        uint64_t bytesWritten = 0;
+        if (!doc->saveAsCopy(saveFd, true, bytesWritten, nullptr) || bytesWritten == 0) {
+            std::cerr << "[FAIL] Test 45e: saveAsCopy failed" << std::endl;
+#ifdef _WIN32
+            ::_close(saveFd);
+#else
+            ::close(saveFd);
+#endif
+            return 1;
+        }
+#ifdef _WIN32
+        ::_close(saveFd);
+#else
+        ::close(saveFd);
+#endif
+
+        // Verify exact byte-prefix preservation
+        QFile origFile(QString::fromStdString(fixturePath));
+        if (!origFile.open(QIODevice::ReadOnly)) {
+            std::cerr << "[FAIL] Test 45e: Failed to read original fixture" << std::endl;
+            return 1;
+        }
+        const QByteArray origBytes = origFile.readAll();
+        origFile.close();
+
+        QFile savedFile(QString::fromStdString(savedPath));
+        if (!savedFile.open(QIODevice::ReadOnly)) {
+            std::cerr << "[FAIL] Test 45e: Failed to read saved file" << std::endl;
+            return 1;
+        }
+        const QByteArray savedBytes = savedFile.readAll();
+        savedFile.close();
+
+        if (savedBytes.size() <= origBytes.size()) {
+            std::cerr << "[FAIL] Test 45e: Saved file size (" << savedBytes.size()
+                      << ") <= original size (" << origBytes.size() << ")" << std::endl;
+            return 1;
+        }
+        if (!savedBytes.startsWith(origBytes)) {
+            std::cerr << "[FAIL] Test 45e: Incremental save violated byte-prefix preservation!" << std::endl;
+            return 1;
+        }
+
+        // Reopen saved file in fresh document and verify values survived
+        auto reloadDoc = pdf::createDocument();
+        if (reloadDoc->loadFromFile(savedPath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 45e: Failed to reload saved incremental document" << std::endl;
+            return 1;
+        }
+        auto reloadPage = reloadDoc->getPage(0);
+        if (!reloadPage) {
+            std::cerr << "[FAIL] Test 45e: Reloaded page 0 is null" << std::endl;
+            return 1;
+        }
+        bool reloadTruncated = false;
+        auto reloadedFields = reloadPage->listFormFields(&reloadTruncated);
+        if (reloadTruncated || reloadedFields.empty()) {
+            std::cerr << "[FAIL] Test 45e: Failed to list fields from reloaded document" << std::endl;
+            return 1;
+        }
+        for (const auto& f : reloadedFields) {
+            if (f.fieldName == "name") {
+                if (f.value != "Bob") {
+                    std::cerr << "[FAIL] Test 45e: Reloaded 'name' value mismatch: expected 'Bob', got '" << f.value.toStdString() << "'" << std::endl;
+                    return 1;
+                }
+            } else if (f.fieldName == "rg") {
+                if (f.controlIndex == 0 && f.isChecked) {
+                    std::cerr << "[FAIL] Test 45e: Reloaded 'rg' control 0 unexpectedly checked" << std::endl;
+                    return 1;
+                }
+                if (f.controlIndex == 1 && !f.isChecked) {
+                    std::cerr << "[FAIL] Test 45e: Reloaded 'rg' control 1 unexpectedly unchecked" << std::endl;
+                    return 1;
+                }
+            } else if (f.fieldName == "country") {
+                if (f.selectedIndices != std::vector<int>{1}) {
+                    std::cerr << "[FAIL] Test 45e: Reloaded 'country' selectedIndices mismatch" << std::endl;
+                    return 1;
+                }
+            } else if (f.fieldName == "langs") {
+                if (f.selectedIndices != std::vector<int>{0, 2}) {
+                    std::cerr << "[FAIL] Test 45e: Reloaded 'langs' selectedIndices mismatch" << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // 45f: EditLog undo/redo and dirty tracking with form fields
+        pdf::EditLog log;
+        if (log.isDirty() || log.canUndo() || log.canRedo()) {
+            std::cerr << "[FAIL] Test 45f: Initial EditLog state incorrect" << std::endl;
+            return 1;
+        }
+
+        log.recordSetFormFieldText(0, QStringLiteral("name"), 0, QStringLiteral("Alice"), QStringLiteral("Bob"), {});
+        if (!log.isDirty() || !log.canUndo() || log.canRedo()) {
+            std::cerr << "[FAIL] Test 45f: EditLog state after recordSetFormFieldText incorrect" << std::endl;
+            return 1;
+        }
+
+        log.recordToggleFormField(0, QStringLiteral("agree"), 0, false, true);
+        log.recordSetFormFieldChoice(0, QStringLiteral("country"), 0, {0}, {1});
+
+        if (log.activeCommands().size() != 3) {
+            std::cerr << "[FAIL] Test 45f: Expected 3 active commands, got " << log.activeCommands().size() << std::endl;
+            return 1;
+        }
+
+        pdf::EditCommand undoCmd;
+        if (!log.undo(undoCmd) || undoCmd.type != pdf::EditCommandType::SetFormFieldChoice) {
+            std::cerr << "[FAIL] Test 45f: Undo SetFormFieldChoice failed" << std::endl;
+            return 1;
+        }
+        if (!log.undo(undoCmd) || undoCmd.type != pdf::EditCommandType::ToggleFormField) {
+            std::cerr << "[FAIL] Test 45f: Undo ToggleFormField failed" << std::endl;
+            return 1;
+        }
+        if (!log.undo(undoCmd) || undoCmd.type != pdf::EditCommandType::SetFormFieldText) {
+            std::cerr << "[FAIL] Test 45f: Undo SetFormFieldText failed" << std::endl;
+            return 1;
+        }
+
+        if (log.isDirty() || log.canUndo() || !log.canRedo()) {
+            std::cerr << "[FAIL] Test 45f: EditLog state after undoing all commands should be clean and canRedo" << std::endl;
+            return 1;
+        }
+
+        pdf::EditCommand redoCmd;
+        if (!log.redo(redoCmd) || redoCmd.type != pdf::EditCommandType::SetFormFieldText) {
+            std::cerr << "[FAIL] Test 45f: Redo SetFormFieldText failed" << std::endl;
+            return 1;
+        }
+        if (!log.isDirty() || !log.canUndo()) {
+            std::cerr << "[FAIL] Test 45f: EditLog should be dirty after redo" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Form mutations, worker-side validations, byte-prefix incremental save, and EditLog verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 43 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 45 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
+
