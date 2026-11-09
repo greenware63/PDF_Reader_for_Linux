@@ -68,21 +68,28 @@ Empirical testing on Linux against pinned PDFium (chromium/8100, PDFium 157.0.81
 |---|---|---|
 | Incremental save after form edits (`FPDF_SaveAsCopy`) | 100% Pass; exact original bytes preserved as prefix; `qpdf --check` clean | Preserves incremental save invariants and signed byte regions |
 | Form-fill callbacks dependency | Independent of installed callbacks; identical output except for random `/ID` | Minimal callback footprint needed in `FPDF_FORMFILLINFO` |
-| Dirty-region reporting (`FFI_Invalidate`) | Fires ~3 times per keystroke in page-space coordinates | Worker must coalesce/merge invalidate rectangles before IPC dispatch |
+| Dirty-region reporting (`FFI_Invalidate`) | Fires ~3 times per keystroke in page-space coordinates with top and bottom swapped | Worker must normalize coordinates and coalesce/merge invalidate rectangles before IPC dispatch |
 | JavaScript actions (`event.rc = false;`) | Completely inert (no JS engine compiled in) | Confirms Threat Model T1/T2 invariant |
 | Submit actions (`SubmitForm`) | Inert (no network transmission) | Confirms no exfiltration vector |
 | URI actions (`DoURIAction`) | Fires only if `FFI_DoURIAction` installed | Keep uninstalled; UI handles URI activation after user confirmation |
 | Text field value commit | Stored `/V` reads empty while focused; commits only after `FORM_ForceToKillFocus` | **Critical**: Every field edit and save must explicitly enforce commit |
 | Native PDFium Persian / RTL rendering | Value `/V` is intact, but `/AP` drops "ی", renders unjoined glyphs, and references non-embedded font names | **Critical**: Appearance replacement mechanism validated with placeholder appearance (`sc == "setap"`); Persian vector outlines in fields to be verified in M5 |
-| Raw click / button forwarding | Reset button clears fields behind edit log; radio buttons refire without mouse-move | **Critical**: UI must send high-level semantic commands, never raw clicks |
-| Combobox / Listbox popups | Popups are not painted by PDFium | Combobox and listbox pickers must be native Qt UI overlays |
+| Raw click / button forwarding | Reset button clears fields behind edit log; without a preceding mouse-move, a click on radio/buttons goes to the previously hovered widget | **Critical**: UI must send high-level semantic commands, never raw clicks |
+| Combobox popups | Popups are not painted by PDFium (listboxes are fixed display widgets) | Combobox dropdown pickers must be native Qt UI overlays |
 | Form Undo/Redo | PDFium undo buffer expires on commit (`FORM_CanUndo == 0`) | Undo/redo must remain UI-owned in `EditLog` with before/after values |
 
 Implementation rules established by the spike:
 1. **Semantic IPC Commands over Raw Events**: Rather than forwarding raw mouse/key events, Protocol 13 uses typed high-level messages (`ListFormFields`, `SetFormFieldText`, `ToggleFormField`, `SetFormFieldChoice`). Fields are discovered from a cached UI list, avoiding per-mouse-move IPC roundtrips.
 2. **Explicit Focus Kill on Commit & Save**: `FORM_ForceToKillFocus` must be invoked when editing concludes and prior to invoking `FPDF_SaveAsCopy` to prevent uncommitted text loss.
-3. **High-Fidelity Persian/RTL Appearance Streams (`/AP`)**: For Persian, Arabic, and non-Latin field values, the worker synthesizes vector glyph appearance streams via `FPDFAnnot_SetAP` (matching the `FreeText` vector engine). The mechanism was validated in `sc == "setap"` using a placeholder appearance stream (verifying that replacing `/AP` survives incremental save and renders identically across Poppler, MuPDF, and PDFium without system font dependencies); Persian glyph outlines in form fields will be implemented and verified in M5.
-4. **Pushbutton & Action Invariance**: Pushbuttons and reset buttons are treated as inert to prevent unlogged PDF mutations. Dropdowns are displayed via native Qt popups using `FORM_SetIndexSelected`.
+3. **High-Fidelity Persian/RTL Appearance Streams (`/AP`)**: For Persian, Arabic, and non-Latin field values, following the architecture proven in `FreeText`: the UI lays out the text with Qt and sends vector outline elements over IPC, and the worker constructs and writes the appearance stream via `FPDFAnnot_SetAP`. The mechanism was validated in `sc == "setap"` using a placeholder appearance stream (verifying that replacing `/AP` survives incremental save and renders identically across Poppler, MuPDF, and PDFium without system font dependencies); Persian glyph outlines in form fields will be implemented and verified in M5.
+4. **Pushbutton & Action Invariance**: Pushbuttons and reset buttons are treated as inert to prevent unlogged PDF mutations. Combobox dropdowns are displayed via native Qt popups using `FORM_SetIndexSelected`.
+
+**Not verified in this spike:**
+- External viewers: Acrobat Reader, Foxit, and Okular.
+- Page geometry: rotated pages (90° / 180° / 270°).
+- Specialized forms: digitally signed forms, XFA forms.
+- Field topology: fields sharing a name across pages, nested field hierarchies, and very large / pathological forms.
+- Field types: multi-line text fields, comb text fields, and password fields.
 
 ## 3. Architecture
 
@@ -95,7 +102,7 @@ The **UI process owns the authoritative edit log**: an ordered list of semantic 
 * The worker's PDFium document is a derived, disposable view.
 * Annotation author is **blank by default** for user privacy (no automatic leakage of local `$USER` or hostname); a user-configurable author name will be provided in application settings.
 
-Annotations created by us carry a standard `/NM` (annotation name) entry holding the id, so ids survive save/reload and map to PDFium objects without relying on array indices (which shift on delete). For form fields, edits are tracked by field identifier and index in the form hierarchy.
+Annotations created by us carry a standard `/NM` (annotation name) entry holding the id, so ids survive save/reload and map to PDFium objects without relying on array indices (which shift on delete). For form fields, edits in the `EditLog` are identified by `(page, fieldName, controlIndex)` rather than transient array indices, ensuring identity survives deletions, additions, and worker restarts. Milestone M5 includes tests for field identity resolution and crash replay across multi-control and nested fields (investigating whether `FPDFAnnot_GetFormFieldName` returns fully qualified names for nested hierarchies).
 
 Mouse gestures (drag a highlight, draw ink) are drawn as a UI-side overlay and sent as **one** command when the gesture ends; no IPC per mouse move.
 
@@ -106,7 +113,7 @@ The worker applies commands to its PDFium document and renders with annotations 
 ### 3.3 Hit testing and reading existing annotations and form fields
 
 `ListAnnotations(page)` and `HitTest(page, x, y)` return plain data (subtype, rect, contents, author, flags, our `/NM` id if any).
-`ListFormFields(page)` returns plain form-field metadata (index, field name, type, flags, rect, value, options, checked state). The UI caches field geometry locally, allowing client-side cursor changes and field activation without per-mouse-move IPC roundtrips.
+`ListFormFields(page)` returns plain form-field metadata (page, fieldName, controlIndex, type, flags, rect, value, options, checked state). The UI caches field geometry locally, allowing client-side cursor changes and field activation without per-mouse-move IPC roundtrips.
 The UI never receives annotation or widget *objects*, only bounded POD. Links and URI actions are shown and activated by the UI after user confirmation; pushbuttons and reset buttons remain inert; the worker never opens anything.
 
 ## 4. The save pipeline (the central decision)
@@ -146,10 +153,10 @@ Descriptor policy change (must be updated in `threat_model.md` and tests togethe
 | `ModifyAnnotation` / `DeleteAnnotation` | UI→worker | id (+ changed fields) | same field limits |
 | `ListAnnotations` / `HitTest` | UI→worker | page (+ point) | reply ≤ 10 000 items, text clipped (≤ 32,768 UTF-16 chars / 64 KiB), total per-page reply ≤ 16 MiB (truncated flag) |
 | `ListFormFields` (Protocol 13) | UI→worker | page | request carries bounded page index |
-| `ListFormFieldsResponse` (Protocol 13) | worker→UI | page, truncated flag, fields (index, name, type, flags, rect, value, options, checked) | fields ≤ 1 000; options ≤ 1 000; text ≤ 64 KiB UTF-16; total per-page reply ≤ 16 MiB (sets `truncated = true` when budget or caps are reached) |
-| `SetFormFieldText` (Protocol 13) | UI→worker | field index, text, optional custom `/AP` stream | text ≤ 64 KiB UTF-16; apStream ≤ 1 MiB |
-| `ToggleFormField` (Protocol 13) | UI→worker | field index, checked state | boolean state |
-| `SetFormFieldChoice` (Protocol 13) | UI→worker | field index, selected indices | selected indices ≤ 1 000 |
+| `ListFormFieldsResponse` (Protocol 13) | worker→UI | page, truncated flag, fields (fieldName, controlIndex, type, flags, rect, value, options, checked) | fields ≤ 1 000; options ≤ 1 000; text ≤ 64 KiB UTF-16; total per-page reply ≤ 16 MiB (sets `truncated = true` when budget or caps are reached) |
+| `SetFormFieldText` (Protocol 13) | UI→worker | page, fieldName, controlIndex, text, vector outline elements (optional) | text ≤ 64 KiB UTF-16; vector elements ≤ 10 000 |
+| `ToggleFormField` (Protocol 13) | UI→worker | page, fieldName, controlIndex, checked state | boolean state |
+| `SetFormFieldChoice` (Protocol 13) | UI→worker | page, fieldName, controlIndex, selected indices | selected indices ≤ 1 000 |
 | `SaveRequest` (+1 fd) / `SaveProgress` / `SaveResult` | both | mode, revision / progress / result | one fd; `bytesWritten` verified by the UI |
 
 Rules carried over from existing messages: every collection length is validated before allocation; reject NaN/inf/out-of-page geometry; reject unknown subtypes; the worker answers with failure messages, never crashes the connection. The existing `IpcFuzzTestSuite` gains one mutated-deserialisation corpus per new message; M1 and M5 also add hostile-PDF corpus items (huge or cyclic `/Annots`, absurd quad counts, deep popup parent chains, malformed `/AcroForm` dictionaries, unbounded choice lists). Hostile AcroForm fixtures (documents with thousands of widgets or unbounded choice lists) will be added to verify that `ListFormFieldsResponse` enforces the 16 MiB budget and caps, returns `truncated = true`, and preserves sandboxed worker session integrity without hang or memory exhaustion.
@@ -176,9 +183,10 @@ Automated (CI already installs `qpdf` and `poppler-utils`):
 * `qpdf --check` on every saved output; incremental outputs also checked for the byte-prefix property.
 * Render the saved file with `pdftoppm` and compare the annotation region to our own render (tolerance-based pixel check) — this is the check that catches missing `/AP`.
 * `pdftotext`/`qpdf --json` confirm annotation count, subtype, `/Contents`, `/NM` after a round trip; re-open in our reader and compare the list.
-* MuPDF (`mutool draw`) rendering verification for custom `/AP` form streams (especially Persian/Arabic RTL text without embedded system fonts).
 
-Manual, per release that changes annotations (checklist in the PR): open our output in Acrobat Reader, Okular, Foxit and a browser PDF viewer; edit/delete an annotation there; re-open in ours. Acrobat and Foxit are **stated as untested / unverified** until external platform verification can be arranged.
+Manual, per release that changes annotations (checklist in the PR):
+* Open our output in Acrobat Reader, Okular, Foxit and a browser PDF viewer; edit/delete an annotation there; re-open in ours. Acrobat and Foxit are **stated as untested / unverified** until external platform verification can be arranged.
+* Render comparison against MuPDF (`mutool draw`) for custom `/AP` form streams (especially Persian/Arabic RTL text without embedded system fonts; CI does not install `mupdf-tools`).
 
 ## 10. Milestones (each a small PR with its own tests)
 
@@ -189,7 +197,7 @@ Manual, per release that changes annotations (checklist in the PR): open our out
 | M2 | Save pipeline + **one** type (highlight) end to end: edit log, undo/redo, save descriptor, validation, atomic commit, crash replay (in-memory log replay; disk persistence journal deferred post-M2); warning dialog on unsaved edits; tests for each failure branch | Tests for each failure branch (bad prefix, truncated output, worker killed mid-save); threat model updated; redaction-interplay test |
 | M3 | Underline, strikeout, squiggly, text note (+popup), ink, square, circle, freetext | Per-type round-trip tests in the matrix |
 | M4 | Stamps (images) and file attachments | Separate threat review; image size/dimension limits |
-| M5 | Interactive AcroForm filling on the same log and pipeline | High-level semantic IPC protocol (Protocol 13); Qt text entry and vector `/AP` outline stream for Persian/non-Latin values; native Qt choice popups; explicit commit on save; incremental byte-prefix preservation; round-trip verification in `qpdf`, `pdftoppm`, and MuPDF |
+| M5 | Interactive AcroForm filling on the same log and pipeline | High-level semantic IPC protocol (Protocol 13); Qt text layout with worker vector `/AP` generation for Persian/non-Latin values; native Qt choice popups; explicit commit on save; incremental byte-prefix preservation; round-trip verification in `qpdf` and `pdftoppm` (with manual MuPDF verification) |
 
 ## 11. Decisions recorded by project owner
 
