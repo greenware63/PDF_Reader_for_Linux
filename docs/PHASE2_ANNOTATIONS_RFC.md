@@ -68,7 +68,7 @@ Empirical testing on Linux against pinned PDFium (chromium/8100, PDFium 157.0.81
 |---|---|---|
 | Incremental save after form edits (`FPDF_SaveAsCopy`) | 100% Pass; exact original bytes preserved as prefix; `qpdf --check` clean | Preserves incremental save invariants and signed byte regions |
 | Form-fill callbacks dependency | Independent of installed callbacks; identical output except for random `/ID` | Minimal callback footprint needed in `FPDF_FORMFILLINFO` |
-| Dirty-region reporting (`FFI_Invalidate`) | Fires ~3 times per keystroke in page-space coordinates with top and bottom swapped | Worker must normalize coordinates and coalesce/merge invalidate rectangles before IPC dispatch |
+| Dirty-region reporting (`FFI_Invalidate`) | Fires ~3 times per keystroke in page-space coordinates with top and bottom swapped (and a 2–3 pt expansion beyond the widget rectangle) | Worker must normalize coordinates and coalesce/merge invalidate rectangles before IPC dispatch |
 | JavaScript actions (`event.rc = false;`) | Completely inert (no JS engine compiled in) | Confirms Threat Model T1/T2 invariant |
 | Submit actions (`SubmitForm`) | Inert (no network transmission) | Confirms no exfiltration vector |
 | URI actions (`DoURIAction`) | Fires only if `FFI_DoURIAction` installed | Keep uninstalled; UI handles URI activation after user confirmation |
