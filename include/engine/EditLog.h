@@ -14,23 +14,55 @@ namespace pdf {
 enum class EditCommandType {
     AddAnnotation,
     DeleteAnnotation,
-    ModifyAnnotation
+    ModifyAnnotation,
+    SetFormFieldText,
+    ToggleFormField,
+    SetFormFieldChoice
 };
 
 struct EditCommand {
     uint64_t id{0};
     int pageIndex{0};
     EditCommandType type{EditCommandType::AddAnnotation};
+
+    // For Annotation commands
     AnnotationItem before;
     AnnotationItem after;
+
+    // For FormField commands
+    QString fieldName;
+    int controlIndex{0};
+    QString textBefore;
+    QString textAfter;
+    std::vector<AnnotationPathElement> vectorOutlines;
+    bool checkedBefore{false};
+    bool checkedAfter{false};
+    std::vector<int> choiceBefore;
+    std::vector<int> choiceAfter;
 };
 
 /// One operation to apply to a worker document so that it matches the log's current state.
 struct EditOp {
-    bool add{true};          // true: add `item`; false: remove `name`
+    enum class Kind {
+        AddAnnotation,
+        RemoveAnnotation,
+        SetFormFieldText,
+        ToggleFormField,
+        SetFormFieldChoice
+    };
+    Kind kind{Kind::AddAnnotation};
+    bool add{true};          // backward-compat: true for add annotation, false for remove
     int pageIndex{0};
     AnnotationItem item;
     QString name;
+
+    // Form fields
+    QString fieldName;
+    int controlIndex{0};
+    QString text;
+    std::vector<AnnotationPathElement> vectorOutlines;
+    bool checked{false};
+    std::vector<int> selectedIndices;
 };
 
 class EditLog : public QObject {
@@ -43,6 +75,14 @@ public:
     uint64_t recordAddAnnotation(int pageIndex, const AnnotationItem& item);
     uint64_t recordDeleteAnnotation(int pageIndex, const AnnotationItem& item);
     uint64_t recordModifyAnnotation(int pageIndex, const AnnotationItem& before, const AnnotationItem& after);
+
+    uint64_t recordSetFormFieldText(int pageIndex, const QString& fieldName, int controlIndex,
+                                    const QString& before, const QString& after,
+                                    const std::vector<AnnotationPathElement>& vectorOutlines = {});
+    uint64_t recordToggleFormField(int pageIndex, const QString& fieldName, int controlIndex,
+                                   bool before, bool after);
+    uint64_t recordSetFormFieldChoice(int pageIndex, const QString& fieldName, int controlIndex,
+                                      const std::vector<int>& before, const std::vector<int>& after);
 
     bool canUndo() const;
     bool canRedo() const;

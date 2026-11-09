@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QObject>
 #include <QMetaType>
@@ -19,6 +19,7 @@
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
 #include "engine/AnnotationTypes.h"
+#include "engine/FormFieldTypes.h"
 #include "engine/PixelBuffer.h"
 #include "engine/PageText.h"
 #include "engine/SearchTypes.h"
@@ -153,6 +154,29 @@ public:
      * Delivered via annotationsReady() or annotationsFailed().
      */
     void requestListAnnotations(int64_t documentId, int pageIndex);
+
+    /**
+     * @brief Requests listing of interactive form fields for a page asynchronously.
+     * Delivered via formFieldsReady() or formFieldsFailed().
+     */
+    void requestListFormFields(int64_t documentId, int pageIndex);
+
+    /**
+     * @brief Requests setting the text of a form field asynchronously.
+     */
+    void requestSetFormFieldText(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex,
+                                 const QString& text, const std::vector<pdf::AnnotationPathElement>& vectorOutlines = {});
+
+    /**
+     * @brief Requests toggling/setting a checkbox or radio button asynchronously.
+     */
+    void requestToggleFormField(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, bool checked);
+
+    /**
+     * @brief Requests setting choice selections (combobox / listbox) asynchronously.
+     */
+    void requestSetFormFieldChoice(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex,
+                                   const std::vector<int>& selectedIndices);
 
     /**
      * @brief Requests hit-testing an annotation at the given coordinates on a page asynchronously.
@@ -307,6 +331,18 @@ Q_SIGNALS:
     /// Emitted when annotation listing completes on the worker thread.
     void annotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations, bool truncated);
     void annotationsFailed(int64_t documentId, int pageIndex);
+    /// Emitted when form field listing completes on the worker thread.
+    void formFieldsReady(int64_t documentId, int pageIndex, const std::vector<pdf::FormFieldItem>& fields, bool truncated);
+    void formFieldsFailed(int64_t documentId, int pageIndex);
+    /// Emitted when form field text is set on the worker thread.
+    void formFieldTextSet(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex);
+    void formFieldTextFailed(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, const QString& errorMessage);
+    /// Emitted when form field toggle completes on the worker thread.
+    void formFieldToggled(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, bool checked);
+    void formFieldToggleFailed(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, const QString& errorMessage);
+    /// Emitted when form field choice is set on the worker thread.
+    void formFieldChoiceSet(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, const std::vector<int>& selectedIndices);
+    void formFieldChoiceFailed(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, const QString& errorMessage);
     /// Emitted when annotation hit-testing completes on the worker thread.
     void annotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
     void annotationHitTestFailed(int64_t documentId, int pageIndex);

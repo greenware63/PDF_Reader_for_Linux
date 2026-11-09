@@ -177,6 +177,38 @@ void testPayloadWithAllTypes(const uint8_t* data, size_t size) {
         HitTestAnnotationResponse msg;
         deserialize(payload, msg);
     }
+    {
+        ListFormFieldsRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        ListFormFieldsResponse msg;
+        deserialize(payload, msg);
+    }
+    {
+        SetFormFieldTextRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        SetFormFieldTextResponse msg;
+        deserialize(payload, msg);
+    }
+    {
+        ToggleFormFieldRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        ToggleFormFieldResponse msg;
+        deserialize(payload, msg);
+    }
+    {
+        SetFormFieldChoiceRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        SetFormFieldChoiceResponse msg;
+        deserialize(payload, msg);
+    }
 }
 
 } // namespace
@@ -308,6 +340,81 @@ int main(int argc, char* argv[]) {
         res.annotation.left = 50.0; res.annotation.top = 100.0;
         res.annotation.right = 70.0; res.annotation.bottom = 80.0;
         res.annotation.contents = QStringLiteral("Note contents");
+        QByteArray b = serialize(res);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        ListFormFieldsRequest req{42, 1};
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        ListFormFieldsResponse res;
+        res.documentId = 42;
+        res.pageIndex = 0;
+        res.success = true;
+        res.truncated = false;
+        pdf::FormFieldItem f1;
+        f1.pageIndex = 0;
+        f1.fieldName = QStringLiteral("username");
+        f1.controlIndex = 0;
+        f1.type = pdf::FormFieldType::TextField;
+        f1.flags = pdf::FormFieldFlag::Required;
+        f1.left = 50.0; f1.top = 200.0; f1.right = 150.0; f1.bottom = 180.0;
+        f1.value = QStringLiteral("testuser");
+        res.fields.push_back(f1);
+
+        pdf::FormFieldItem f2;
+        f2.pageIndex = 0;
+        f2.fieldName = QStringLiteral("country");
+        f2.controlIndex = 0;
+        f2.type = pdf::FormFieldType::ComboBox;
+        f2.flags = pdf::FormFieldFlag::Combo;
+        f2.left = 50.0; f2.top = 160.0; f2.right = 150.0; f2.bottom = 140.0;
+        f2.value = QStringLiteral("Iran");
+        f2.options = {QStringLiteral("Germany"), QStringLiteral("Iran"), QStringLiteral("France")};
+        f2.selectedIndices = {1};
+        res.fields.push_back(f2);
+
+        pdf::FormFieldItem f3;
+        f3.pageIndex = 0;
+        f3.fieldName = QStringLiteral("agree");
+        f3.controlIndex = 0;
+        f3.type = pdf::FormFieldType::CheckBox;
+        f3.left = 50.0; f3.top = 120.0; f3.right = 70.0; f3.bottom = 100.0;
+        f3.isChecked = true;
+        res.fields.push_back(f3);
+
+        QByteArray b = serialize(res);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        SetFormFieldTextRequest req{42, 0, QStringLiteral("fname"), 0, QStringLiteral("hello"), {}};
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        SetFormFieldTextResponse res{42, 0, QStringLiteral("fname"), 0, true, {}};
+        QByteArray b = serialize(res);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        ToggleFormFieldRequest req{42, 0, QStringLiteral("check1"), 0, true};
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        ToggleFormFieldResponse res{42, 0, QStringLiteral("check1"), 0, true, {}};
+        QByteArray b = serialize(res);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        SetFormFieldChoiceRequest req{42, 0, QStringLiteral("combo1"), 0, {0, 2}};
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        SetFormFieldChoiceResponse res{42, 0, QStringLiteral("combo1"), 0, true, {}};
         QByteArray b = serialize(res);
         corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
     }
