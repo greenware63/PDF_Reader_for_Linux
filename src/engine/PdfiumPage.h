@@ -53,6 +53,7 @@ public:
     bool addStampAnnotation(const AnnotationItem& item) override;
     bool addFileAttachmentAnnotation(const AnnotationItem& item) override;
     int removeAnnotationByName(const QString& name) override;
+    FlattenResult flatten(FlattenMode mode = FlattenMode::NormalDisplay) override;
 
     static void setSimulateGetTextFailureForTesting(bool simulate) noexcept;
 

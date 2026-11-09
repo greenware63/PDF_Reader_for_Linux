@@ -103,4 +103,15 @@ inline uint64_t formFieldBudgetCost(const FormFieldItem& f) noexcept {
 QDataStream& operator<<(QDataStream& out, const FormFieldItem& item);
 QDataStream& operator>>(QDataStream& in, FormFieldItem& item);
 
+enum class FlattenMode : uint32_t {
+    NormalDisplay = 0,
+    Print = 1
+};
+
+enum class FlattenResult {
+    Success,
+    NothingToDo,
+    Failed
+};
+
 } // namespace pdf

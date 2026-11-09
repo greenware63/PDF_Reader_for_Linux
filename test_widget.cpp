@@ -7711,7 +7711,180 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Form field vector AP synthesis, clipping, undo/redo symmetry, and persistence verified." << std::endl;
     }
 
-    std::cout << " ALL 61 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- TEST 62: Milestone M5 Slice 5 Form Flattening & Export in Viewer and Window ---
+    std::cout << "[TEST 62] Testing form flattening & export in PdfViewerWidget & MainWindow (Milestone M5 Slice 5)..." << std::endl;
+    {
+        std::string fixturePath = "tests/fixtures/form_fields_test.pdf";
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "../tests/fixtures/form_fields_test.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "../../tests/fixtures/form_fields_test.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            std::cerr << "[FAIL] 62: fixture form_fields_test.pdf not found" << std::endl;
+            return 1;
+        }
+
+        // 62a: exportFlattenedPagesPdf on PdfViewerWidget
+        {
+            ui::PdfViewerWidget viewer;
+            viewer.resize(800, 600);
+            viewer.show();
+            viewer.openDocument(QString::fromStdString(fixturePath));
+            QElapsedTimer timer;
+            timer.start();
+            while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            if (!viewer.isDocumentOpen()) {
+                std::cerr << "[FAIL] 62a: failed to open document" << std::endl;
+                return 1;
+            }
+
+            viewer.requestFormFieldsForPage(0);
+            timer.restart();
+            while (timer.elapsed() < 8000 && !viewer.cachedFormFields(0)) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            const auto* fields = viewer.cachedFormFields(0);
+            if (!fields || fields->empty()) {
+                std::cerr << "[FAIL] 62a: cached form fields empty" << std::endl;
+                return 1;
+            }
+
+            // Start editing a form field to ensure active editor commit is covered
+            const pdf::FormFieldItem* nameField = nullptr;
+            for (const auto& f : *fields) {
+                if (f.fieldName == "name") {
+                    nameField = &f;
+                    break;
+                }
+            }
+            if (!nameField) {
+                std::cerr << "[FAIL] 62a: 'name' field not found" << std::endl;
+                return 1;
+            }
+            viewer.activateFormFieldEditor(0, *nameField);
+            if (!viewer.hasActiveFormFieldEditor()) {
+                std::cerr << "[FAIL] 62a: form editor did not activate" << std::endl;
+                return 1;
+            }
+            auto* lineEdit = viewer.findChild<QLineEdit*>();
+            if (!lineEdit) {
+                std::cerr << "[FAIL] 62a: active QLineEdit editor not found" << std::endl;
+                return 1;
+            }
+            lineEdit->setText(QStringLiteral("UncommittedEdit"));
+
+            // exportFlattenedPagesPdf should commit active editor and return flattened bytes
+            const QByteArray flattenedBytes = viewer.exportFlattenedPagesPdf();
+            if (flattenedBytes.isEmpty()) {
+                std::cerr << "[FAIL] 62a: exportFlattenedPagesPdf returned empty" << std::endl;
+                return 1;
+            }
+
+            // Verify active editor was committed
+            if (viewer.hasActiveFormFieldEditor()) {
+                std::cerr << "[FAIL] 62a: exportFlattenedPagesPdf did not dismiss/commit active form editor" << std::endl;
+                return 1;
+            }
+
+            // Verify active viewer remains interactive and open
+            if (!viewer.isDocumentOpen()) {
+                std::cerr << "[FAIL] 62a: viewer closed after exportFlattenedPagesPdf" << std::endl;
+                return 1;
+            }
+            const auto* afterFields = viewer.cachedFormFields(0);
+            if (!afterFields || afterFields->empty()) {
+                std::cerr << "[FAIL] 62a: active viewer lost form fields after export" << std::endl;
+                return 1;
+            }
+        }
+
+        // 62b: MainWindow::exportFlattenedPdf
+        {
+            ui::MainWindow window;
+            window.resize(1024, 768);
+            window.show();
+            if (!window.openFile(QString::fromStdString(fixturePath))) {
+                std::cerr << "[FAIL] 62b: MainWindow failed to open file" << std::endl;
+                return 1;
+            }
+
+            auto* v = window.currentViewer();
+            if (!v) {
+                std::cerr << "[FAIL] 62b: MainWindow currentViewer is null" << std::endl;
+                return 1;
+            }
+            QElapsedTimer timer;
+            timer.start();
+            while (timer.elapsed() < 8000 && !v->isDocumentOpen()) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            if (!v->isDocumentOpen()) {
+                std::cerr << "[FAIL] 62b: document not open in MainWindow" << std::endl;
+                return 1;
+            }
+
+            QTemporaryDir tempDir;
+            const QString exportPath = tempDir.filePath(QStringLiteral("main_flattened.pdf"));
+
+            if (!window.exportFlattenedPdf(exportPath)) {
+                std::cerr << "[FAIL] 62b: MainWindow::exportFlattenedPdf returned false" << std::endl;
+                return 1;
+            }
+            if (!QFile::exists(exportPath) || QFileInfo(exportPath).size() == 0) {
+                std::cerr << "[FAIL] 62b: Exported file does not exist or is empty" << std::endl;
+                return 1;
+            }
+
+            // Verify active window still interactive
+            if (!v->isDocumentOpen()) {
+                std::cerr << "[FAIL] 62b: MainWindow viewer closed after export" << std::endl;
+                return 1;
+            }
+
+            // Reopen exported file in a new viewer and verify 0 form fields
+            ui::PdfViewerWidget verifyViewer;
+            verifyViewer.resize(800, 600);
+            verifyViewer.show();
+            verifyViewer.openDocument(exportPath);
+            timer.restart();
+            while (timer.elapsed() < 8000 && !verifyViewer.isDocumentOpen()) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            if (!verifyViewer.isDocumentOpen()) {
+                std::cerr << "[FAIL] 62b: Failed to open exported flattened PDF in verifyViewer" << std::endl;
+                return 1;
+            }
+
+            verifyViewer.requestFormFieldsForPage(0);
+            timer.restart();
+            while (timer.elapsed() < 8000 && !verifyViewer.cachedFormFields(0)) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            const auto* exportedFields = verifyViewer.cachedFormFields(0);
+            if (!exportedFields) {
+                std::cerr << "[FAIL] 62b: cached form fields null in verifyViewer" << std::endl;
+                return 1;
+            }
+            if (!exportedFields->empty()) {
+                std::cerr << "[FAIL] 62b: Exported flattened PDF still has " << exportedFields->size()
+                          << " form fields!" << std::endl;
+                return 1;
+            }
+        }
+
+        std::cout << "  -> Passed: Viewer exportFlattenedPagesPdf and MainWindow::exportFlattenedPdf verified." << std::endl;
+    }
+
+    std::cout << " ALL 62 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

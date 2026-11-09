@@ -1,10 +1,11 @@
-﻿#include "PdfiumDocument.h"
+#include "PdfiumDocument.h"
 #include <fpdf_doc.h>
 #include <fpdf_edit.h>
 #include <fpdf_transformpage.h>
 #include <fpdf_ppo.h>
 #include <fpdf_save.h>
 #include <fpdf_signature.h>
+#include <fpdf_flatten.h>
 #include <string>
 #include "PdfiumMutex.h"
 #include <mutex>
@@ -622,11 +623,15 @@ struct MemoryWriter : FPDF_FILEWRITE {
 };
 } // namespace
 
-bool PdfiumDocument::extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const {
+bool PdfiumDocument::extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out,
+                                  bool flatten, FlattenMode mode) const {
     out.clear();
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
     if (!m_doc) {
         return false;
+    }
+    if (m_form && m_form->handle) {
+        FORM_ForceToKillFocus(m_form->handle);
     }
     const int total = FPDF_GetPageCount(m_doc.get());
     if (firstPage < 0 || lastPage < firstPage || lastPage >= total) {
@@ -638,6 +643,17 @@ bool PdfiumDocument::extractPages(int firstPage, int lastPage, std::vector<uint8
     }
     const std::string range = std::to_string(firstPage + 1) + "-" + std::to_string(lastPage + 1);
     bool ok = FPDF_ImportPages(dest, m_doc.get(), range.c_str(), 0) != 0;
+    if (ok && flatten) {
+        const int importedCount = FPDF_GetPageCount(dest);
+        const int flag = (mode == FlattenMode::Print) ? FLAT_PRINT : FLAT_NORMALDISPLAY;
+        for (int i = 0; i < importedCount; ++i) {
+            FPDF_PAGE p = FPDF_LoadPage(dest, i);
+            if (p) {
+                FPDFPage_Flatten(p, flag);
+                FPDF_ClosePage(p);
+            }
+        }
+    }
     MemoryWriter writer;
     if (ok) {
         ok = FPDF_SaveAsCopy(dest, &writer, 0) != 0 && !writer.failed && !writer.data.empty();
@@ -647,6 +663,33 @@ bool PdfiumDocument::extractPages(int firstPage, int lastPage, std::vector<uint8
         out = std::move(writer.data);
     }
     return ok;
+}
+
+FlattenResult PdfiumDocument::flatten(FlattenMode mode) {
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+    if (!m_doc) {
+        return FlattenResult::Failed;
+    }
+    if (m_form && m_form->handle) {
+        FORM_ForceToKillFocus(m_form->handle);
+    }
+    const int count = FPDF_GetPageCount(m_doc.get());
+    if (count <= 0) {
+        return FlattenResult::NothingToDo;
+    }
+    bool anyFlattened = false;
+    const int flag = (mode == FlattenMode::Print) ? FLAT_PRINT : FLAT_NORMALDISPLAY;
+    for (int i = 0; i < count; ++i) {
+        FPDF_PAGE p = FPDF_LoadPage(m_doc.get(), i);
+        if (p) {
+            const int res = FPDFPage_Flatten(p, flag);
+            if (res == FLATTEN_SUCCESS) {
+                anyFlattened = true;
+            }
+            FPDF_ClosePage(p);
+        }
+    }
+    return anyFlattened ? FlattenResult::Success : FlattenResult::NothingToDo;
 }
 
 namespace {

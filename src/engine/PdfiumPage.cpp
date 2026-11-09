@@ -6,6 +6,7 @@
 #include <fpdf_edit.h>
 #include <fpdf_doc.h>
 #include <fpdf_attachment.h>
+#include <fpdf_flatten.h>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -2311,6 +2312,24 @@ int PdfiumPage::removeAnnotationByName(const QString& name) {
         }
     }
     return removed;
+}
+
+FlattenResult PdfiumPage::flatten(FlattenMode mode) {
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+    if (!m_page) {
+        return FlattenResult::Failed;
+    }
+    if (m_form && m_form->handle) {
+        FORM_ForceToKillFocus(m_form->handle);
+    }
+    const int flag = (mode == FlattenMode::Print) ? FLAT_PRINT : FLAT_NORMALDISPLAY;
+    const int res = FPDFPage_Flatten(m_page, flag);
+    if (res == FLATTEN_SUCCESS) {
+        return FlattenResult::Success;
+    } else if (res == FLATTEN_NOTHINGTODO) {
+        return FlattenResult::NothingToDo;
+    }
+    return FlattenResult::Failed;
 }
 
 } // namespace pdf

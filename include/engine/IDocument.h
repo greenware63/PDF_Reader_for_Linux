@@ -127,11 +127,24 @@ public:
     /**
      * @brief Serializes pages [firstPage, lastPage] (0-based, inclusive) into a standalone PDF in memory.
      * The output keeps text, fonts, vectors and links of the copied pages (no rasterization).
+     * @param flatten If true, flattens annotations and form fields into static page graphics.
+     * @param mode NormalDisplay or Print.
      * @return true on success; the default implementation does not support extraction.
      */
-    virtual bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const {
-        (void)firstPage; (void)lastPage; (void)out;
+    virtual bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out,
+                              bool flatten = false, FlattenMode mode = FlattenMode::NormalDisplay) const {
+        (void)firstPage; (void)lastPage; (void)out; (void)flatten; (void)mode;
         return false;
+    }
+
+    /**
+     * @brief Flattens annotations and form fields on all pages into static page contents.
+     * @param mode NormalDisplay or Print.
+     * @return FlattenResult.
+     */
+    virtual FlattenResult flatten(FlattenMode mode = FlattenMode::NormalDisplay) {
+        (void)mode;
+        return FlattenResult::NothingToDo;
     }
 
     /**

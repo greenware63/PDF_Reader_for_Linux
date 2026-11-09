@@ -124,7 +124,11 @@ public:
     QImage renderPageForPrint(int pageIndex, double scale = 1.0, double dpr = 2.0);
 
     /// Returns a standalone vector PDF containing pages [firstPage, lastPage] (0-based), or empty on failure.
-    QByteArray extractPagesPdf(int firstPage, int lastPage);
+    /// If flatten is true, burns annotations and form fields into static page graphics.
+    QByteArray extractPagesPdf(int firstPage, int lastPage, bool flatten = false);
+
+    /// Exports pages [firstPage, lastPage] (-1 for entire document) as a flattened PDF.
+    QByteArray exportFlattenedPagesPdf(int firstPage = -1, int lastPage = -1);
 
     /**
      * @brief Manually triggers retry of all currently failed tiles in the viewport.

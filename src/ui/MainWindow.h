@@ -69,6 +69,9 @@ public:
     /// Exports the currently active document to a PDF file. @return true on success.
     bool exportDocumentToPdf(const QString& outputPath, int fromPage = -1, int toPage = -1);
 
+    /// Exports the currently active document to a flattened PDF file (all interactive forms burned in). @return true on success.
+    bool exportFlattenedPdf(const QString& outputPath, int fromPage = -1, int toPage = -1);
+
     /// Color mode / dark mode / reading theme status.
     ColorMode colorMode() const noexcept { return m_colorMode; }
     void setColorMode(ColorMode mode);
@@ -104,6 +107,7 @@ public Q_SLOTS:
     void showFindBar();
     void printDocument();
     void exportAsPdf();
+    void exportFlattenedPdfAction();
     void toggleRedactionMode();
     void markSelectionForRedaction();
     void clearRedactionMarks();

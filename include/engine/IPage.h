@@ -222,6 +222,17 @@ public:
         (void)name;
         return 0;
     }
+
+    /**
+     * @brief Flattens annotations and form fields into the page contents.
+     * After flattening, interactive annotations/widgets become static page graphics.
+     * @param mode NormalDisplay or Print.
+     * @return FlattenResult::Success, NothingToDo, or Failed.
+     */
+    virtual FlattenResult flatten(FlattenMode mode = FlattenMode::NormalDisplay) {
+        (void)mode;
+        return FlattenResult::NothingToDo;
+    }
 };
 
 } // namespace pdf

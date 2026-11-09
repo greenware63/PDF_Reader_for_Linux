@@ -678,11 +678,23 @@ QImage PdfViewerWidget::renderPageForPrint(int pageIndex, double scale, double d
     return toQImage(buf, dpr).copy();
 }
 
-QByteArray PdfViewerWidget::extractPagesPdf(int firstPage, int lastPage) {
+QByteArray PdfViewerWidget::extractPagesPdf(int firstPage, int lastPage, bool flatten) {
     if (!isDocumentOpen() || firstPage < 0 || lastPage < firstPage || lastPage >= m_pageCount) {
         return {};
     }
-    return m_renderWorker.extractPagesSync(m_currentDocumentId, firstPage, lastPage);
+    if (m_activeFormEditor) {
+        commitActiveFormFieldEditor();
+    }
+    return m_renderWorker.extractPagesSync(m_currentDocumentId, firstPage, lastPage, flatten);
+}
+
+QByteArray PdfViewerWidget::exportFlattenedPagesPdf(int firstPage, int lastPage) {
+    if (!isDocumentOpen() || m_pageCount <= 0) {
+        return {};
+    }
+    const int start = (firstPage >= 0) ? std::clamp(firstPage, 0, m_pageCount - 1) : 0;
+    const int end = (lastPage >= 0) ? std::clamp(lastPage, start, m_pageCount - 1) : (m_pageCount - 1);
+    return extractPagesPdf(start, end, true);
 }
 
 void PdfViewerWidget::goToPage(int pageIndex) {

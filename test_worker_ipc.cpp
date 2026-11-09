@@ -4126,6 +4126,110 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Vector outlines over IPC and crash recovery replay verified." << std::endl;
     }
 
+    // --- TEST 42: Form Flattening & Export over IPC (Milestone M5 Slice 5) ---
+    std::cout << "[TEST 42] Testing extractPages with flatten over IPC..." << std::endl;
+    {
+        QString fixturePdf = QFileInfo(samplePdf).dir().filePath(QStringLiteral("tests/fixtures/form_fields_test.pdf"));
+        if (!QFile::exists(fixturePdf)) {
+            fixturePdf = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../tests/fixtures/form_fields_test.pdf"));
+        }
+        if (!QFile::exists(fixturePdf)) {
+            fixturePdf = QStringLiteral("tests/fixtures/form_fields_test.pdf");
+        }
+        if (!QFile::exists(fixturePdf)) {
+            std::cerr << "[FAIL] 42: form_fields_test.pdf not found at " << fixturePdf.toStdString() << std::endl;
+            return 1;
+        }
+
+        pdf::ipc::WorkerClient client;
+        auto openResp = client.openDocumentSync(42, fixturePdf.toStdString());
+        if (openResp.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 42: Failed to open fixture" << std::endl;
+            return 1;
+        }
+
+        // Verify initial interactive fields
+        auto listResp = client.listFormFieldsSync(42, 0, 5000);
+        if (!listResp.success || listResp.fields.empty()) {
+            std::cerr << "[FAIL] 42: Initial form fields listing failed or was empty" << std::endl;
+            return 1;
+        }
+
+        // Mutate a form field
+        const QString testName = QStringLiteral("WorkerFlattenTest");
+        auto setResp = client.setFormFieldTextSync(42, 0, QStringLiteral("name"), 0, testName, {});
+        if (!setResp.success) {
+            std::cerr << "[FAIL] 42: setFormFieldTextSync failed" << std::endl;
+            return 1;
+        }
+
+        // Extract pages with flatten = true
+        QByteArray flattenedBytes = client.extractPagesSync(42, 0, 0, true);
+        if (flattenedBytes.isEmpty()) {
+            std::cerr << "[FAIL] 42: extractPagesSync with flatten=true returned empty" << std::endl;
+            return 1;
+        }
+
+        // Verify original document on worker is STILL interactive (non-destructive)
+        auto afterListResp = client.listFormFieldsSync(42, 0, 5000);
+        if (!afterListResp.success || afterListResp.fields.empty()) {
+            std::cerr << "[FAIL] 42: Original worker document lost form fields after extractPages" << std::endl;
+            return 1;
+        }
+        bool foundName = false;
+        for (const auto& f : afterListResp.fields) {
+            if (f.fieldName == "name" && f.value == testName) {
+                foundName = true;
+                break;
+            }
+        }
+        if (!foundName) {
+            std::cerr << "[FAIL] 42: Original worker document mutated field value was lost" << std::endl;
+            return 1;
+        }
+
+        // Save flattenedBytes to temp file and open in fresh worker
+        QTemporaryDir tempDir;
+        const QString flatPath = tempDir.filePath("worker_flattened.pdf");
+        QFile flatFile(flatPath);
+        if (!flatFile.open(QIODevice::WriteOnly) || flatFile.write(flattenedBytes) != flattenedBytes.size()) {
+            std::cerr << "[FAIL] 42: Failed to write worker flattened PDF" << std::endl;
+            return 1;
+        }
+        flatFile.close();
+
+        pdf::ipc::WorkerClient verifyClient;
+        auto flatOpenResp = verifyClient.openDocumentSync(420, flatPath.toStdString());
+        if (flatOpenResp.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 42: Failed to open flattened PDF in fresh worker" << std::endl;
+            return 1;
+        }
+
+        auto flatFieldsResp = verifyClient.listFormFieldsSync(420, 0, 5000);
+        if (!flatFieldsResp.success) {
+            std::cerr << "[FAIL] 42: listFormFieldsSync failed on flattened document" << std::endl;
+            return 1;
+        }
+        if (!flatFieldsResp.fields.empty()) {
+            std::cerr << "[FAIL] 42: Flattened PDF unexpectedly still has " << flatFieldsResp.fields.size() << " form fields" << std::endl;
+            return 1;
+        }
+
+        // Verify it renders cleanly
+        pdf::PixelBuffer pb = verifyClient.renderPageForPrintSync(420, 0, 1.0, 1.0, 0);
+        if (!pb.isValid() || pb.width() <= 0 || pb.height() <= 0 || pb.data() == nullptr) {
+            std::cerr << "[FAIL] 42: Flattened PDF failed to render" << std::endl;
+            return 1;
+        }
+
+        verifyClient.closeDocumentSync();
+        verifyClient.stop();
+        client.closeDocumentSync();
+        client.stop();
+
+        std::cout << "  -> Passed: extractPages with flatten over IPC verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;
