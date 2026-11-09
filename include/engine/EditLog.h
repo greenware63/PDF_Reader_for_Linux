@@ -37,6 +37,7 @@ struct EditCommand {
     std::vector<AnnotationPathElement> vectorOutlines;
     bool checkedBefore{false};
     bool checkedAfter{false};
+    int priorCheckedControlIndex{-1};
     std::vector<int> choiceBefore;
     std::vector<int> choiceAfter;
 };
@@ -63,6 +64,7 @@ struct EditOp {
     std::vector<AnnotationPathElement> vectorOutlines;
     bool checked{false};
     std::vector<int> selectedIndices;
+    int priorCheckedControlIndex{-1};
 };
 
 class EditLog : public QObject {
@@ -80,7 +82,7 @@ public:
                                     const QString& before, const QString& after,
                                     const std::vector<AnnotationPathElement>& vectorOutlines = {});
     uint64_t recordToggleFormField(int pageIndex, const QString& fieldName, int controlIndex,
-                                   bool before, bool after);
+                                   bool before, bool after, int priorCheckedControlIndex = -1);
     uint64_t recordSetFormFieldChoice(int pageIndex, const QString& fieldName, int controlIndex,
                                       const std::vector<int>& before, const std::vector<int>& after);
 

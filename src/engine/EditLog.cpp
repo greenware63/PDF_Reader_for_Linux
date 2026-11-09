@@ -130,7 +130,7 @@ uint64_t EditLog::recordSetFormFieldText(int pageIndex, const QString& fieldName
 }
 
 uint64_t EditLog::recordToggleFormField(int pageIndex, const QString& fieldName, int controlIndex,
-                                        bool before, bool after) {
+                                        bool before, bool after, int priorCheckedControlIndex) {
     if (m_cursor < m_commands.size()) {
         const size_t savedBase = m_savedValid ? m_savedCursor : m_savedPrefix;
         if (savedBase > m_cursor) {
@@ -151,6 +151,7 @@ uint64_t EditLog::recordToggleFormField(int pageIndex, const QString& fieldName,
     cmd.controlIndex = controlIndex;
     cmd.checkedBefore = before;
     cmd.checkedAfter = after;
+    cmd.priorCheckedControlIndex = priorCheckedControlIndex;
 
     m_commands.push_back(std::move(cmd));
     m_cursor = m_commands.size();
@@ -264,12 +265,12 @@ std::vector<EditOp> EditLog::opsSinceSave() const {
     // Saved items that are no longer part of the log.
     for (auto it = m_savedExtra.rbegin(); it != m_savedExtra.rend(); ++it) {
         if (it->type == EditCommandType::AddAnnotation) {
-            ops.push_back({EditOp::Kind::RemoveAnnotation, false, it->pageIndex, {}, it->after.name, {}, 0, {}, {}, false, {}});
+            ops.push_back({EditOp::Kind::RemoveAnnotation, false, it->pageIndex, {}, it->after.name, {}, 0, {}, {}, false, {}, -1});
         } else if (it->type == EditCommandType::DeleteAnnotation) {
-            ops.push_back({EditOp::Kind::AddAnnotation, true, it->pageIndex, it->before, it->before.name, {}, 0, {}, {}, false, {}});
+            ops.push_back({EditOp::Kind::AddAnnotation, true, it->pageIndex, it->before, it->before.name, {}, 0, {}, {}, false, {}, -1});
         } else if (it->type == EditCommandType::ModifyAnnotation) {
-            ops.push_back({EditOp::Kind::RemoveAnnotation, false, it->pageIndex, {}, it->after.name, {}, 0, {}, {}, false, {}});
-            ops.push_back({EditOp::Kind::AddAnnotation, true, it->pageIndex, it->before, it->before.name, {}, 0, {}, {}, false, {}});
+            ops.push_back({EditOp::Kind::RemoveAnnotation, false, it->pageIndex, {}, it->after.name, {}, 0, {}, {}, false, {}, -1});
+            ops.push_back({EditOp::Kind::AddAnnotation, true, it->pageIndex, it->before, it->before.name, {}, 0, {}, {}, false, {}, -1});
         } else if (it->type == EditCommandType::SetFormFieldText) {
             EditOp op; op.kind = EditOp::Kind::SetFormFieldText; op.pageIndex = it->pageIndex; op.fieldName = it->fieldName;
             op.controlIndex = it->controlIndex; op.text = it->textBefore; op.vectorOutlines = it->vectorOutlines;
@@ -289,12 +290,12 @@ std::vector<EditOp> EditLog::opsSinceSave() const {
         for (size_t i = base; i < m_cursor && i < m_commands.size(); ++i) {
             const auto& cmd = m_commands[i];
             if (cmd.type == EditCommandType::AddAnnotation) {
-                ops.push_back({EditOp::Kind::AddAnnotation, true, cmd.pageIndex, cmd.after, cmd.after.name, {}, 0, {}, {}, false, {}});
+                ops.push_back({EditOp::Kind::AddAnnotation, true, cmd.pageIndex, cmd.after, cmd.after.name, {}, 0, {}, {}, false, {}, -1});
             } else if (cmd.type == EditCommandType::DeleteAnnotation) {
-                ops.push_back({EditOp::Kind::RemoveAnnotation, false, cmd.pageIndex, {}, cmd.before.name, {}, 0, {}, {}, false, {}});
+                ops.push_back({EditOp::Kind::RemoveAnnotation, false, cmd.pageIndex, {}, cmd.before.name, {}, 0, {}, {}, false, {}, -1});
             } else if (cmd.type == EditCommandType::ModifyAnnotation) {
-                ops.push_back({EditOp::Kind::RemoveAnnotation, false, cmd.pageIndex, {}, cmd.before.name, {}, 0, {}, {}, false, {}});
-                ops.push_back({EditOp::Kind::AddAnnotation, true, cmd.pageIndex, cmd.after, cmd.after.name, {}, 0, {}, {}, false, {}});
+                ops.push_back({EditOp::Kind::RemoveAnnotation, false, cmd.pageIndex, {}, cmd.before.name, {}, 0, {}, {}, false, {}, -1});
+                ops.push_back({EditOp::Kind::AddAnnotation, true, cmd.pageIndex, cmd.after, cmd.after.name, {}, 0, {}, {}, false, {}, -1});
             } else if (cmd.type == EditCommandType::SetFormFieldText) {
                 EditOp op; op.kind = EditOp::Kind::SetFormFieldText; op.pageIndex = cmd.pageIndex; op.fieldName = cmd.fieldName;
                 op.controlIndex = cmd.controlIndex; op.text = cmd.textAfter; op.vectorOutlines = cmd.vectorOutlines;
@@ -313,19 +314,25 @@ std::vector<EditOp> EditLog::opsSinceSave() const {
         for (size_t i = std::min(base, m_commands.size()); i > m_cursor; --i) {
             const auto& cmd = m_commands[i - 1];
             if (cmd.type == EditCommandType::AddAnnotation) {
-                ops.push_back({EditOp::Kind::RemoveAnnotation, false, cmd.pageIndex, {}, cmd.after.name, {}, 0, {}, {}, false, {}});
+                ops.push_back({EditOp::Kind::RemoveAnnotation, false, cmd.pageIndex, {}, cmd.after.name, {}, 0, {}, {}, false, {}, -1});
             } else if (cmd.type == EditCommandType::DeleteAnnotation) {
-                ops.push_back({EditOp::Kind::AddAnnotation, true, cmd.pageIndex, cmd.before, cmd.before.name, {}, 0, {}, {}, false, {}});
+                ops.push_back({EditOp::Kind::AddAnnotation, true, cmd.pageIndex, cmd.before, cmd.before.name, {}, 0, {}, {}, false, {}, -1});
             } else if (cmd.type == EditCommandType::ModifyAnnotation) {
-                ops.push_back({EditOp::Kind::RemoveAnnotation, false, cmd.pageIndex, {}, cmd.after.name, {}, 0, {}, {}, false, {}});
-                ops.push_back({EditOp::Kind::AddAnnotation, true, cmd.pageIndex, cmd.before, cmd.before.name, {}, 0, {}, {}, false, {}});
+                ops.push_back({EditOp::Kind::RemoveAnnotation, false, cmd.pageIndex, {}, cmd.after.name, {}, 0, {}, {}, false, {}, -1});
+                ops.push_back({EditOp::Kind::AddAnnotation, true, cmd.pageIndex, cmd.before, cmd.before.name, {}, 0, {}, {}, false, {}, -1});
             } else if (cmd.type == EditCommandType::SetFormFieldText) {
                 EditOp op; op.kind = EditOp::Kind::SetFormFieldText; op.pageIndex = cmd.pageIndex; op.fieldName = cmd.fieldName;
                 op.controlIndex = cmd.controlIndex; op.text = cmd.textBefore; op.vectorOutlines = cmd.vectorOutlines;
                 ops.push_back(std::move(op));
             } else if (cmd.type == EditCommandType::ToggleFormField) {
                 EditOp op; op.kind = EditOp::Kind::ToggleFormField; op.pageIndex = cmd.pageIndex; op.fieldName = cmd.fieldName;
-                op.controlIndex = cmd.controlIndex; op.checked = cmd.checkedBefore;
+                if (cmd.priorCheckedControlIndex >= 0 && !cmd.checkedBefore && cmd.checkedAfter) {
+                    op.controlIndex = cmd.priorCheckedControlIndex;
+                    op.checked = true;
+                } else {
+                    op.controlIndex = cmd.controlIndex;
+                    op.checked = cmd.checkedBefore;
+                }
                 ops.push_back(std::move(op));
             } else if (cmd.type == EditCommandType::SetFormFieldChoice) {
                 EditOp op; op.kind = EditOp::Kind::SetFormFieldChoice; op.pageIndex = cmd.pageIndex; op.fieldName = cmd.fieldName;

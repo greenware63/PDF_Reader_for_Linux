@@ -3493,7 +3493,13 @@ bool PdfViewerWidget::undoEdit() {
             }
         }
     } else if (cmd.type == pdf::EditCommandType::ToggleFormField) {
-        const auto response = m_renderWorker.toggleFormFieldSync(m_currentDocumentId, cmd.pageIndex, cmd.fieldName, cmd.controlIndex, cmd.checkedBefore);
+        int targetControlIndex = cmd.controlIndex;
+        bool targetChecked = cmd.checkedBefore;
+        if (cmd.priorCheckedControlIndex >= 0 && !cmd.checkedBefore && cmd.checkedAfter) {
+            targetControlIndex = cmd.priorCheckedControlIndex;
+            targetChecked = true;
+        }
+        const auto response = m_renderWorker.toggleFormFieldSync(m_currentDocumentId, cmd.pageIndex, cmd.fieldName, targetControlIndex, targetChecked);
         if (!response.success) {
             pdf::EditCommand restored;
             m_editLog.redo(restored);
@@ -3504,9 +3510,9 @@ bool PdfViewerWidget::undoEdit() {
         if (it != m_formFieldsCache.end() && it->second.loaded) {
             for (auto& f : it->second.fields) {
                 if (f.fieldName == cmd.fieldName) {
-                    if (f.controlIndex == cmd.controlIndex) {
-                        f.isChecked = cmd.checkedBefore;
-                    } else if (f.type == pdf::FormFieldType::RadioButton && cmd.checkedBefore) {
+                    if (f.controlIndex == targetControlIndex) {
+                        f.isChecked = targetChecked;
+                    } else if (f.type == pdf::FormFieldType::RadioButton && targetChecked) {
                         f.isChecked = false;
                     }
                 }
@@ -3997,14 +4003,18 @@ bool PdfViewerWidget::toggleFormField(int pageIndex, const QString& fieldName, i
 
     bool oldChecked = false;
     bool isRadio = false;
+    int priorCheckedControlIndex = -1;
     auto cacheIt = m_formFieldsCache.find(pageIndex);
     if (cacheIt != m_formFieldsCache.end() && cacheIt->second.loaded) {
         for (const auto& f : cacheIt->second.fields) {
-            if (f.fieldName == fieldName && f.controlIndex == controlIndex) {
-                if (f.isReadOnly()) return false;
-                oldChecked = f.isChecked;
-                isRadio = (f.type == pdf::FormFieldType::RadioButton);
-                break;
+            if (f.fieldName == fieldName) {
+                if (f.controlIndex == controlIndex) {
+                    if (f.isReadOnly()) return false;
+                    oldChecked = f.isChecked;
+                    isRadio = (f.type == pdf::FormFieldType::RadioButton);
+                } else if (f.type == pdf::FormFieldType::RadioButton && f.isChecked) {
+                    priorCheckedControlIndex = f.controlIndex;
+                }
             }
         }
     }
@@ -4015,7 +4025,7 @@ bool PdfViewerWidget::toggleFormField(int pageIndex, const QString& fieldName, i
         return false;
     }
 
-    m_editLog.recordToggleFormField(pageIndex, fieldName, controlIndex, oldChecked, checked);
+    m_editLog.recordToggleFormField(pageIndex, fieldName, controlIndex, oldChecked, checked, priorCheckedControlIndex);
 
     if (cacheIt != m_formFieldsCache.end() && cacheIt->second.loaded) {
         for (auto& f : cacheIt->second.fields) {
