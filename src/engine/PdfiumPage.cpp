@@ -1011,13 +1011,34 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
         wideText[i] = text.at(i).unicode();
     }
 
-    FORM_SetFocusedAnnot(m_form->handle, annot);
+    if (!FORM_SetFocusedAnnot(m_form->handle, annot)) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
     FORM_SelectAllText(m_form->handle, m_page);
     FORM_ReplaceSelection(m_form->handle, m_page, wideText.data());
-    FORM_ForceToKillFocus(m_form->handle);
+    const bool killed = (FORM_ForceToKillFocus(m_form->handle) != 0);
+    if (!killed) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
 
+    // Verify the commit succeeded by reading back the field value
+    unsigned long reqLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
+    QString committedVal;
+    if (reqLen > 2) {
+        std::vector<unsigned char> valBuf(reqLen + 2, 0);
+        unsigned long actual = FPDFAnnot_GetFormFieldValue(m_form->handle, annot,
+            reinterpret_cast<FPDF_WCHAR*>(valBuf.data()), reqLen);
+        if (actual > 2) {
+            const char16_t* u16 = reinterpret_cast<const char16_t*>(valBuf.data());
+            committedVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
+        }
+    }
+    const bool matches = (committedVal == text);
     FPDFPage_CloseAnnot(annot);
-    return true;
+    return matches;
 }
 
 bool PdfiumPage::toggleFormField(const QString& fieldName, int controlIndex, bool checked) {
@@ -1158,12 +1179,30 @@ bool PdfiumPage::setFormFieldChoice(const QString& fieldName, int controlIndex,
         }
     }
 
-    FORM_SetFocusedAnnot(m_form->handle, annot);
+    if (!FORM_SetFocusedAnnot(m_form->handle, annot)) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
     for (int i = 0; i < optCount; ++i) {
         bool sel = (seen.find(i) != seen.end());
         FORM_SetIndexSelected(m_form->handle, m_page, i, sel);
     }
-    FORM_ForceToKillFocus(m_form->handle);
+    const bool killed = (FORM_ForceToKillFocus(m_form->handle) != 0);
+    if (!killed) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
+    // Verify selection commit succeeded
+    for (int i = 0; i < optCount; ++i) {
+        bool expected = (seen.find(i) != seen.end());
+        bool actual = (FPDFAnnot_IsOptionSelected(m_form->handle, annot, i) != 0);
+        if (expected != actual) {
+            FPDFPage_CloseAnnot(annot);
+            return false;
+        }
+    }
 
     FPDFPage_CloseAnnot(annot);
     return true;
