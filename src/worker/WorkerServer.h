@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QObject>
 #include <QLocalServer>
@@ -58,6 +58,8 @@ private Q_SLOTS:
     void onRedactDocumentFailed(int64_t documentId, const QString& errorMessage);
     void onAnnotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations, bool truncated);
     void onAnnotationsFailed(int64_t documentId, int pageIndex);
+    void onFormFieldsReady(int64_t documentId, int pageIndex, const std::vector<pdf::FormFieldItem>& fields, bool truncated);
+    void onFormFieldsFailed(int64_t documentId, int pageIndex);
     void onAnnotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
     void onAnnotationHitTestFailed(int64_t documentId, int pageIndex);
     void onAnnotationAdded(int64_t documentId, int pageIndex, const QString& annotationName);

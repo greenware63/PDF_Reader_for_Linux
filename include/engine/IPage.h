@@ -3,6 +3,7 @@
 #include "PixelBuffer.h"
 #include "PageText.h"
 #include "AnnotationTypes.h"
+#include "FormFieldTypes.h"
 #include <vector>
 
 namespace pdf {
@@ -73,6 +74,17 @@ public:
      * Must be called only from the worker thread.
      */
     virtual std::vector<AnnotationItem> listAnnotations(bool* truncated = nullptr) = 0;
+
+    /**
+     * @brief Lists all interactive form fields (Widget annotations) present on this page as bounded POD data.
+     * If `truncated` is non-null it is set to true when anything was dropped or clipped (more fields than
+     * the cap, the response budget reached, or an option list over its limit).
+     * Must be called only from the worker thread.
+     */
+    virtual std::vector<FormFieldItem> listFormFields(bool* truncated = nullptr) {
+        if (truncated) *truncated = false;
+        return {};
+    }
 
     /**
      * @brief Hit-tests annotations on this page at the given point (in standard PDF user space points).

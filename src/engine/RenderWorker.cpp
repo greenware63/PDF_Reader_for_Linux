@@ -1,4 +1,4 @@
-﻿#include "engine/RenderWorker.h"
+#include "engine/RenderWorker.h"
 #include "engine/SearchText.h"
 #include "redact/Redaction.h"
 #include "ipc/IpcMessages.h"
@@ -794,6 +794,36 @@ void RenderWorker::requestListAnnotations(int64_t documentId, int pageIndex) {
         bool truncated = false;
         auto annots = page->listAnnotations(&truncated);
         Q_EMIT annotationsReady(documentId, pageIndex, annots, truncated);
+    }});
+    m_cv.notify_one();
+}
+
+void RenderWorker::requestListFormFields(int64_t documentId, int pageIndex) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        Q_EMIT formFieldsFailed(documentId, pageIndex);
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, pageIndex]() {
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT formFieldsFailed(documentId, pageIndex);
+            return;
+        }
+        noteProgress(ipc::WorkerOp::Annotate);
+        struct FormFieldGuard {
+            RenderWorker* w;
+            ~FormFieldGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (!page) {
+            Q_EMIT formFieldsFailed(documentId, pageIndex);
+            return;
+        }
+        bool truncated = false;
+        auto fields = page->listFormFields(&truncated);
+        Q_EMIT formFieldsReady(documentId, pageIndex, fields, truncated);
     }});
     m_cv.notify_one();
 }

@@ -50,6 +50,7 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::RedactDocumentResponse:
         case MessageType::RedactDocumentFailedResponse:
         case MessageType::ListAnnotationsResponse:
+        case MessageType::ListFormFieldsResponse:
         case MessageType::HitTestAnnotationResponse:
         case MessageType::AddAnnotationResponse:
         case MessageType::RemoveAnnotationResponse:
@@ -522,6 +523,60 @@ ListAnnotationsResponse WorkerClient::listAnnotationsSync(int64_t documentId, in
     connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
 
     requestListAnnotations(documentId, pageIndex);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    return result;
+}
+
+void WorkerClient::requestListFormFields(int64_t documentId, int pageIndex) {
+    if (m_stopping || m_failureReported) {
+        Q_EMIT formFieldsFailed(documentId, pageIndex);
+        return;
+    }
+    sendMessage(MessageType::ListFormFieldsRequest,
+                serialize(ListFormFieldsRequest{documentId, pageIndex}));
+}
+
+ListFormFieldsResponse WorkerClient::listFormFieldsSync(int64_t documentId, int pageIndex, int timeoutMs) {
+    if (!ensureConnected()) {
+        ListFormFieldsResponse failed;
+        failed.documentId = documentId;
+        failed.pageIndex = pageIndex;
+        failed.success = false;
+        return failed;
+    }
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    ListFormFieldsResponse result;
+    result.documentId = documentId;
+    result.pageIndex = pageIndex;
+    result.success = false;
+
+    const auto readyConn = connect(this, &WorkerClient::formFieldsReady, &loop,
+        [&](int64_t docId, int pIdx, const std::vector<pdf::FormFieldItem>& fields, bool trunc) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.success = true;
+                result.truncated = trunc;
+                result.fields = fields;
+                loop.quit();
+            }
+        });
+    const auto failConn = connect(this, &WorkerClient::formFieldsFailed, &loop,
+        [&](int64_t docId, int pIdx) {
+            if (docId == documentId && pIdx == pageIndex) {
+                result.success = false;
+                loop.quit();
+            }
+        });
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestListFormFields(documentId, pageIndex);
     timeout.start(timeoutMs);
     loop.exec();
 
@@ -1375,6 +1430,20 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
                 }
             } else {
                 Q_EMIT annotationsFailed(0, 0);
+            }
+            break;
+        }
+
+        case MessageType::ListFormFieldsResponse: {
+            ListFormFieldsResponse response;
+            if (deserialize(payload, response)) {
+                if (response.success) {
+                    Q_EMIT formFieldsReady(response.documentId, response.pageIndex, response.fields, response.truncated);
+                } else {
+                    Q_EMIT formFieldsFailed(response.documentId, response.pageIndex);
+                }
+            } else {
+                Q_EMIT formFieldsFailed(0, 0);
             }
             break;
         }

@@ -109,6 +109,25 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
                     Q_EMIT thumbnailFailed(pageIndex);
                 }
             });
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::formFieldsReady, this,
+            [this](int64_t documentId, int pageIndex, const std::vector<pdf::FormFieldItem>& fields, bool truncated) {
+                if (documentId == m_currentDocumentId && pageIndex >= 0 && pageIndex < m_pageCount) {
+                    auto& entry = m_formFieldsCache[pageIndex];
+                    entry.loaded = true;
+                    entry.truncated = truncated;
+                    entry.fields = fields;
+                    Q_EMIT formFieldsLoaded(pageIndex);
+                }
+            });
+    connect(&m_renderWorker, &pdf::ipc::WorkerClient::formFieldsFailed, this,
+            [this](int64_t documentId, int pageIndex) {
+                if (documentId == m_currentDocumentId && pageIndex >= 0 && pageIndex < m_pageCount) {
+                    auto& entry = m_formFieldsCache[pageIndex];
+                    entry.loaded = true;
+                    entry.truncated = false;
+                    entry.fields.clear();
+                }
+            });
     connect(&m_renderWorker, &pdf::ipc::WorkerClient::workerFailed, this, [this](const QString& message) {
         // Unsaved edits live in the UI-owned edit log; remember where to reopen the document so they can be
         // re-applied to a fresh worker (RFC section 3.1). Only one recovery attempt per failure.
@@ -195,6 +214,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_inFlightKeys.clear();
     m_pageTextCache.clear();
     m_transformedPixmapCache.clear();
+    clearFormFieldsCache();
     clearSelection();
     clearSearch();
     if (!m_preserveEditLogOnOpen) {
@@ -372,6 +392,7 @@ void PdfViewerWidget::closeDocument() {
     m_inFlightKeys.clear();
     m_pageTextCache.clear();
     m_transformedPixmapCache.clear();
+    clearFormFieldsCache();
     clearSelection();
     clearSearch();
     ++m_currentDocumentId;
@@ -3662,6 +3683,37 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
     m_preserveEditLogOnOpen = false;
     restoreReadingPosition(savedPage, savedZoom, savedScrollX, savedScrollY);
     return true;
+}
+
+const std::vector<pdf::FormFieldItem>* PdfViewerWidget::cachedFormFields(int pageIndex) const {
+    auto it = m_formFieldsCache.find(pageIndex);
+    if (it != m_formFieldsCache.end() && it->second.loaded) {
+        return &it->second.fields;
+    }
+    return nullptr;
+}
+
+bool PdfViewerWidget::isFormFieldsTruncated(int pageIndex) const {
+    auto it = m_formFieldsCache.find(pageIndex);
+    if (it != m_formFieldsCache.end() && it->second.loaded) {
+        return it->second.truncated;
+    }
+    return false;
+}
+
+void PdfViewerWidget::requestFormFieldsForPage(int pageIndex) {
+    if (!m_hasDocument || pageIndex < 0 || pageIndex >= m_pageCount) {
+        return;
+    }
+    auto it = m_formFieldsCache.find(pageIndex);
+    if (it != m_formFieldsCache.end() && it->second.loaded) {
+        return; // already cached
+    }
+    m_renderWorker.requestListFormFields(m_currentDocumentId, pageIndex);
+}
+
+void PdfViewerWidget::clearFormFieldsCache() {
+    m_formFieldsCache.clear();
 }
 
 } // namespace ui

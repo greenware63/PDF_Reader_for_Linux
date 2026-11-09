@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QObject>
 #include <QMetaType>
@@ -19,6 +19,7 @@
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
 #include "engine/AnnotationTypes.h"
+#include "engine/FormFieldTypes.h"
 #include "engine/PixelBuffer.h"
 #include "engine/PageText.h"
 #include "engine/SearchTypes.h"
@@ -153,6 +154,12 @@ public:
      * Delivered via annotationsReady() or annotationsFailed().
      */
     void requestListAnnotations(int64_t documentId, int pageIndex);
+
+    /**
+     * @brief Requests listing of interactive form fields for a page asynchronously.
+     * Delivered via formFieldsReady() or formFieldsFailed().
+     */
+    void requestListFormFields(int64_t documentId, int pageIndex);
 
     /**
      * @brief Requests hit-testing an annotation at the given coordinates on a page asynchronously.
@@ -307,6 +314,9 @@ Q_SIGNALS:
     /// Emitted when annotation listing completes on the worker thread.
     void annotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations, bool truncated);
     void annotationsFailed(int64_t documentId, int pageIndex);
+    /// Emitted when form field listing completes on the worker thread.
+    void formFieldsReady(int64_t documentId, int pageIndex, const std::vector<pdf::FormFieldItem>& fields, bool truncated);
+    void formFieldsFailed(int64_t documentId, int pageIndex);
     /// Emitted when annotation hit-testing completes on the worker thread.
     void annotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
     void annotationHitTestFailed(int64_t documentId, int pageIndex);
