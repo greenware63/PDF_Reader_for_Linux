@@ -7536,6 +7536,77 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        // 61f: Outline-generation failure handling (unsupported glyphs, too large, fail-closed rejection)
+        QString lastError;
+        auto errorConn = QObject::connect(&viewer, &ui::PdfViewerWidget::loadError, [&](const QString& err) {
+            lastError = err;
+        });
+
+        // (1) Text with unsupported private-use glyphs
+        const QString unsupportedText = QStringLiteral("سلام \uE000");
+        if (viewer.setFormFieldText(0, QStringLiteral("name"), 0, unsupportedText)) {
+            std::cerr << "[FAIL] 61f: setFormFieldText accepted non-Latin text with unsupported glyphs" << std::endl;
+            return 1;
+        }
+        if (lastError.isEmpty() || !lastError.contains("Could not generate vector appearance")) {
+            std::cerr << "[FAIL] 61f: expected loadError about vector appearance generation failure, got: "
+                      << lastError.toStdString() << std::endl;
+            return 1;
+        }
+        // Verify 'name' value was NOT mutated
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "name" && f.value == unsupportedText) {
+                std::cerr << "[FAIL] 61f: field value was mutated despite outline generation failure" << std::endl;
+                return 1;
+            }
+        }
+
+        // (2) In-place editor rejection when outline generation fails
+        const pdf::FormFieldItem* testField = nullptr;
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "name") {
+                testField = &f;
+                break;
+            }
+        }
+        if (!testField) {
+            std::cerr << "[FAIL] 61f: 'name' field not found" << std::endl;
+            return 1;
+        }
+        viewer.activateFormFieldEditor(0, *testField);
+        if (!viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 61f: failed to activate in-place editor" << std::endl;
+            return 1;
+        }
+        auto* failLineEdit = viewer.findChild<QLineEdit*>();
+        if (!failLineEdit) {
+            std::cerr << "[FAIL] 61f: in-place editor is not a QLineEdit" << std::endl;
+            return 1;
+        }
+        failLineEdit->setText(unsupportedText);
+        viewer.commitActiveFormFieldEditor();
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "name" && f.value == unsupportedText) {
+                std::cerr << "[FAIL] 61f: in-place editor committed unsupported text" << std::endl;
+                return 1;
+            }
+        }
+
+        // (3) Non-Latin text exceeding vector outline limit
+        lastError.clear();
+        const QString tooLargeText(20000, QChar(0x0633));
+        if (viewer.setFormFieldText(0, QStringLiteral("name"), 0, tooLargeText)) {
+            std::cerr << "[FAIL] 61f: setFormFieldText accepted text exceeding outline budget" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "name" && f.value == tooLargeText) {
+                std::cerr << "[FAIL] 61f: field value was mutated with overly large text" << std::endl;
+                return 1;
+            }
+        }
+        QObject::disconnect(errorConn);
+
         std::cout << "  -> Passed: Form field vector AP synthesis, clipping, undo/redo symmetry, and persistence verified." << std::endl;
     }
 

@@ -3979,9 +3979,17 @@ static bool isDrawableByBuiltInFont(const QString& text) {
     return true;
 }
 
-static std::vector<pdf::AnnotationPathElement> generateFormFieldOutlines(const pdf::FormFieldItem& f, const QString& text) {
+enum class FormFieldOutlineResult {
+    NotNeeded,  // Plain Latin text, standard PDF font can be used
+    Success,    // Synthesized valid vector outlines
+    Failed      // Generation failed (unsupported glyphs, too large, invalid outlines, or widget too small)
+};
+
+static FormFieldOutlineResult generateFormFieldOutlines(const pdf::FormFieldItem& f, const QString& text,
+                                                        std::vector<pdf::AnnotationPathElement>& out) {
+    out.clear();
     if (text.isEmpty() || isDrawableByBuiltInFont(text)) {
-        return {};
+        return FormFieldOutlineResult::NotNeeded;
     }
     const double fLeft = std::min(f.left, f.right);
     const double fRight = std::max(f.left, f.right);
@@ -3990,7 +3998,7 @@ static std::vector<pdf::AnnotationPathElement> generateFormFieldOutlines(const p
     const double fieldW = fRight - fLeft;
     const double fieldH = fTop - fBottom;
     if (fieldW <= 4.0 || fieldH <= 4.0) {
-        return {};
+        return FormFieldOutlineResult::Failed;
     }
 
     constexpr double kPadding = 2.0;
@@ -4002,8 +4010,8 @@ static std::vector<pdf::AnnotationPathElement> generateFormFieldOutlines(const p
     const double fontSizePt = isMulti ? 12.0 : std::clamp(availH * 0.72, 8.0, 14.0);
 
     ui::FreeTextLayoutResult laid = ui::layoutFreeText(text, fontSizePt, wrapWidthPt, true);
-    if (laid.tooLarge || laid.outline.empty() || !pdf::isValidTextOutline(laid.outline)) {
-        return {};
+    if (laid.tooLarge || laid.outline.empty() || !laid.undrawable.isEmpty() || !pdf::isValidTextOutline(laid.outline)) {
+        return FormFieldOutlineResult::Failed;
     }
 
     double originX = fLeft + kPadding;
@@ -4022,7 +4030,8 @@ static std::vector<pdf::AnnotationPathElement> generateFormFieldOutlines(const p
     }
 
     ui::translateOutline(laid.outline, originX, originY);
-    return laid.outline;
+    out = std::move(laid.outline);
+    return FormFieldOutlineResult::Success;
 }
 
 } // namespace
@@ -4056,8 +4065,15 @@ bool PdfViewerWidget::setFormFieldText(int pageIndex, const QString& fieldName, 
     std::vector<pdf::AnnotationPathElement> newOutlines;
     std::vector<pdf::AnnotationPathElement> oldOutlines;
     if (targetField) {
-        newOutlines = generateFormFieldOutlines(*targetField, text);
-        oldOutlines = generateFormFieldOutlines(*targetField, oldValue);
+        const auto res = generateFormFieldOutlines(*targetField, text, newOutlines);
+        if (res == FormFieldOutlineResult::Failed) {
+            Q_EMIT loadError(tr("Could not generate vector appearance for text in form field '%1'.").arg(fieldName));
+            return false;
+        }
+        generateFormFieldOutlines(*targetField, oldValue, oldOutlines);
+    } else if (!isDrawableByBuiltInFont(text)) {
+        Q_EMIT loadError(tr("Field '%1' geometry unavailable for vector text appearance.").arg(fieldName));
+        return false;
     }
 
     const auto response = m_renderWorker.setFormFieldTextSync(m_currentDocumentId, pageIndex, fieldName, controlIndex, text, newOutlines);
