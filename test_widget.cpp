@@ -7778,30 +7778,34 @@ int main(int argc, char* argv[]) {
                 std::cerr << "[FAIL] 62a: active QLineEdit editor not found" << std::endl;
                 return 1;
             }
-            lineEdit->setText(QStringLiteral("Unrenderable \uE000"));
+            const QString badInput = QStringLiteral("Unrenderable \uE000");
+            lineEdit->setText(badInput);
             const QByteArray abortedBytes = viewer.exportFlattenedPagesPdf();
             if (!abortedBytes.isEmpty()) {
                 std::cerr << "[FAIL] 62a: exportFlattenedPagesPdf should have aborted when active editor commit failed" << std::endl;
                 return 1;
             }
-
-            // 2. Successful active editor commit allows export to proceed
-            viewer.activateFormFieldEditor(0, *nameField);
+            // Verify editor and user input remain active and preserved so user can correct it
             if (!viewer.hasActiveFormFieldEditor()) {
-                std::cerr << "[FAIL] 62a: form editor did not activate for second edit" << std::endl;
+                std::cerr << "[FAIL] 62a: active form editor was prematurely cleared on failed commit" << std::endl;
                 return 1;
             }
-            lineEdit = viewer.findChild<QLineEdit*>();
-            if (!lineEdit) {
-                std::cerr << "[FAIL] 62a: active QLineEdit editor not found for valid edit" << std::endl;
+            if (lineEdit->text() != badInput) {
+                std::cerr << "[FAIL] 62a: user text was discarded on failed commit" << std::endl;
                 return 1;
             }
-            lineEdit->setText(QStringLiteral("UncommittedEdit"));
+
+            // 2. User corrects text in the still-open editor: commit succeeds and dismisses editor
+            lineEdit->setText(QStringLiteral("CorrectedText"));
 
             // exportFlattenedPagesPdf should commit active editor and return flattened bytes
             const QByteArray flattenedBytes = viewer.exportFlattenedPagesPdf();
             if (flattenedBytes.isEmpty()) {
-                std::cerr << "[FAIL] 62a: exportFlattenedPagesPdf returned empty" << std::endl;
+                std::cerr << "[FAIL] 62a: exportFlattenedPagesPdf returned empty on valid commit" << std::endl;
+                return 1;
+            }
+            if (viewer.hasActiveFormFieldEditor()) {
+                std::cerr << "[FAIL] 62a: active form editor was not dismissed after successful commit" << std::endl;
                 return 1;
             }
 

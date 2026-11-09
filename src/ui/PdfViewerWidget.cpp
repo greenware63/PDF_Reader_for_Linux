@@ -4400,14 +4400,6 @@ bool PdfViewerWidget::commitActiveFormFieldEditor() {
     const QString initialText = m_activeEditorInitialText;
     const auto initialChoices = m_activeEditorInitialChoices;
 
-    m_activeFormEditor.clear();
-    m_activeEditorPage = -1;
-    m_activeEditorFieldName.clear();
-    m_activeEditorControlIndex = -1;
-    m_activeEditorType = pdf::FormFieldType::Unknown;
-    m_activeEditorInitialText.clear();
-    m_activeEditorInitialChoices.clear();
-
     bool commitOk = true;
 
     if (type == pdf::FormFieldType::TextField) {
@@ -4451,9 +4443,27 @@ bool PdfViewerWidget::commitActiveFormFieldEditor() {
         }
     }
 
-    editor->deleteLater();
+    if (!commitOk) {
+        // Keep the editor open with the user's uncommitted text/selection available to correct
+        if (editor) {
+            editor->setFocus();
+        }
+        return false;
+    }
+
+    m_activeFormEditor.clear();
+    m_activeEditorPage = -1;
+    m_activeEditorFieldName.clear();
+    m_activeEditorControlIndex = -1;
+    m_activeEditorType = pdf::FormFieldType::Unknown;
+    m_activeEditorInitialText.clear();
+    m_activeEditorInitialChoices.clear();
+
+    if (editor) {
+        editor->deleteLater();
+    }
     viewport()->setFocus();
-    return commitOk;
+    return true;
 }
 
 void PdfViewerWidget::cancelActiveFormFieldEditor() {
