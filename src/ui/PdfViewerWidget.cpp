@@ -4316,11 +4316,9 @@ bool PdfViewerWidget::eventFilter(QObject* watched, QEvent* event) {
                 cancelActiveFormFieldEditor();
                 return true;
             } else if (keyEvent->key() == Qt::Key_Tab && !(keyEvent->modifiers() & Qt::ControlModifier)) {
-                commitActiveFormFieldEditor();
                 navigateFormField(true);
                 return true;
             } else if (keyEvent->key() == Qt::Key_Backtab || (keyEvent->key() == Qt::Key_Tab && (keyEvent->modifiers() & Qt::ShiftModifier))) {
-                commitActiveFormFieldEditor();
                 navigateFormField(false);
                 return true;
             }
@@ -4348,8 +4346,10 @@ bool PdfViewerWidget::navigateFormField(bool forward) {
         const auto* fields = cachedFormFields(p);
         if (fields) {
             for (const auto& f : *fields) {
-                if (!f.isReadOnly() && f.type != pdf::FormFieldType::Unknown &&
-                    f.type != pdf::FormFieldType::Signature) {
+                if (!f.isReadOnly() &&
+                    (f.type == pdf::FormFieldType::TextField ||
+                     f.type == pdf::FormFieldType::ComboBox ||
+                     f.type == pdf::FormFieldType::ListBox)) {
                     navigable.push_back({p, &f});
                 }
             }
