@@ -112,7 +112,7 @@ public:
      * @brief Extracts pages [firstPage, lastPage] into a standalone vector PDF on the worker thread.
      * Delivered via extractPagesReady() or extractPagesFailed().
      */
-    void requestExtractPages(int64_t documentId, int firstPage, int lastPage);
+    void requestExtractPages(int64_t documentId, int firstPage, int lastPage, bool flatten = false);
 
     /**
      * @brief Applies burn-in redactions to the active document and generates a sanitized raster PDF.

@@ -674,15 +674,34 @@ QImage PdfViewerWidget::renderPageForPrint(int pageIndex, double scale, double d
     if (!isDocumentOpen() || pageIndex < 0 || pageIndex >= m_pageCount) {
         return {};
     }
+    if (m_activeFormEditor) {
+        if (!commitActiveFormFieldEditor()) {
+            return {};
+        }
+    }
     pdf::PixelBuffer buf = m_renderWorker.renderPageForPrintSync(m_currentDocumentId, pageIndex, scale, dpr, m_rotation);
     return toQImage(buf, dpr).copy();
 }
 
-QByteArray PdfViewerWidget::extractPagesPdf(int firstPage, int lastPage) {
+QByteArray PdfViewerWidget::extractPagesPdf(int firstPage, int lastPage, bool flatten) {
     if (!isDocumentOpen() || firstPage < 0 || lastPage < firstPage || lastPage >= m_pageCount) {
         return {};
     }
-    return m_renderWorker.extractPagesSync(m_currentDocumentId, firstPage, lastPage);
+    if (m_activeFormEditor) {
+        if (!commitActiveFormFieldEditor()) {
+            return {};
+        }
+    }
+    return m_renderWorker.extractPagesSync(m_currentDocumentId, firstPage, lastPage, flatten);
+}
+
+QByteArray PdfViewerWidget::exportFlattenedPagesPdf(int firstPage, int lastPage) {
+    if (!isDocumentOpen() || m_pageCount <= 0) {
+        return {};
+    }
+    const int start = (firstPage >= 0) ? std::clamp(firstPage, 0, m_pageCount - 1) : 0;
+    const int end = (lastPage >= 0) ? std::clamp(lastPage, start, m_pageCount - 1) : (m_pageCount - 1);
+    return extractPagesPdf(start, end, true);
 }
 
 void PdfViewerWidget::goToPage(int pageIndex) {
@@ -1665,7 +1684,10 @@ void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
         if (m_activeFormEditor) {
             const QPoint vpPt = event->position().toPoint();
             if (!m_activeFormEditor->geometry().contains(vpPt)) {
-                commitActiveFormFieldEditor();
+                if (!commitActiveFormFieldEditor()) {
+                    event->accept();
+                    return;
+                }
             }
         }
 
@@ -3724,6 +3746,11 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
     if (!m_hasDocument || m_currentDocumentId == 0 || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
     }
+    if (m_activeFormEditor) {
+        if (!commitActiveFormFieldEditor()) {
+            return false;
+        }
+    }
     QScopedValueRollback<bool> saveGuard(m_saveInProgress, true);
     QString destPath = targetPath.isEmpty() ? m_currentFilePath : targetPath;
     if (destPath.isEmpty()) {
@@ -4279,7 +4306,9 @@ void PdfViewerWidget::activateFormFieldEditor(int pageIndex, const pdf::FormFiel
         return;
     }
     if (m_activeFormEditor) {
-        commitActiveFormFieldEditor();
+        if (!commitActiveFormFieldEditor()) {
+            return;
+        }
     }
 
     const QRectF wRect = formFieldWidgetRect(pageIndex, field);
@@ -4374,9 +4403,9 @@ void PdfViewerWidget::activateFormFieldEditor(int pageIndex, const pdf::FormFiel
     }
 }
 
-void PdfViewerWidget::commitActiveFormFieldEditor() {
+bool PdfViewerWidget::commitActiveFormFieldEditor() {
     if (!m_activeFormEditor) {
-        return;
+        return true;
     }
     QWidget* editor = m_activeFormEditor.data();
     const int page = m_activeEditorPage;
@@ -4386,13 +4415,7 @@ void PdfViewerWidget::commitActiveFormFieldEditor() {
     const QString initialText = m_activeEditorInitialText;
     const auto initialChoices = m_activeEditorInitialChoices;
 
-    m_activeFormEditor.clear();
-    m_activeEditorPage = -1;
-    m_activeEditorFieldName.clear();
-    m_activeEditorControlIndex = -1;
-    m_activeEditorType = pdf::FormFieldType::Unknown;
-    m_activeEditorInitialText.clear();
-    m_activeEditorInitialChoices.clear();
+    bool commitOk = true;
 
     if (type == pdf::FormFieldType::TextField) {
         QString newText;
@@ -4402,21 +4425,21 @@ void PdfViewerWidget::commitActiveFormFieldEditor() {
             newText = plainText->toPlainText();
         }
         if (newText != initialText) {
-            setFormFieldText(page, fieldName, controlIdx, newText);
+            commitOk = setFormFieldText(page, fieldName, controlIdx, newText);
         }
     } else if (type == pdf::FormFieldType::ComboBox) {
         if (auto* combo = qobject_cast<QComboBox*>(editor)) {
             if (combo->isEditable()) {
                 const QString newText = (combo->lineEdit() ? combo->lineEdit()->text() : combo->currentText());
                 if (newText != initialText) {
-                    setFormFieldText(page, fieldName, controlIdx, newText);
+                    commitOk = setFormFieldText(page, fieldName, controlIdx, newText);
                 }
             } else {
                 const int idx = combo->currentIndex();
                 if (idx >= 0) {
                     std::vector<int> newIndices = {idx};
                     if (newIndices != initialChoices) {
-                        setFormFieldChoice(page, fieldName, controlIdx, newIndices);
+                        commitOk = setFormFieldChoice(page, fieldName, controlIdx, newIndices);
                     }
                 }
             }
@@ -4430,13 +4453,32 @@ void PdfViewerWidget::commitActiveFormFieldEditor() {
                 }
             }
             if (newIndices != initialChoices) {
-                setFormFieldChoice(page, fieldName, controlIdx, newIndices);
+                commitOk = setFormFieldChoice(page, fieldName, controlIdx, newIndices);
             }
         }
     }
 
-    editor->deleteLater();
+    if (!commitOk) {
+        // Keep the editor open with the user's uncommitted text/selection available to correct
+        if (editor) {
+            editor->setFocus();
+        }
+        return false;
+    }
+
+    m_activeFormEditor.clear();
+    m_activeEditorPage = -1;
+    m_activeEditorFieldName.clear();
+    m_activeEditorControlIndex = -1;
+    m_activeEditorType = pdf::FormFieldType::Unknown;
+    m_activeEditorInitialText.clear();
+    m_activeEditorInitialChoices.clear();
+
+    if (editor) {
+        editor->deleteLater();
+    }
     viewport()->setFocus();
+    return true;
 }
 
 void PdfViewerWidget::cancelActiveFormFieldEditor() {
@@ -4527,6 +4569,11 @@ bool PdfViewerWidget::eventFilter(QObject* watched, QEvent* event) {
 bool PdfViewerWidget::navigateFormField(bool forward) {
     if (!m_hasDocument || m_pageCount == 0) {
         return false;
+    }
+    if (m_activeFormEditor) {
+        if (!commitActiveFormFieldEditor()) {
+            return false;
+        }
     }
     struct FieldRef {
         int page;

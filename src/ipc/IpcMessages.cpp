@@ -1161,13 +1161,15 @@ QDataStream& operator>>(QDataStream& in, RenderPageFailedResponse& res) {
 
 // ExtractPagesRequest / Response / Failed
 QDataStream& operator<<(QDataStream& out, const ExtractPagesRequest& req) {
-    out << static_cast<qint64>(req.documentId) << static_cast<qint32>(req.firstPage) << static_cast<qint32>(req.lastPage);
+    out << static_cast<qint64>(req.documentId) << static_cast<qint32>(req.firstPage)
+        << static_cast<qint32>(req.lastPage) << req.flatten;
     return out;
 }
 QDataStream& operator>>(QDataStream& in, ExtractPagesRequest& req) {
     qint64 docId = 0; qint32 a = 0, b = 0;
-    in >> docId >> a >> b;
-    req.documentId = docId; req.firstPage = a; req.lastPage = b;
+    bool fl = false;
+    in >> docId >> a >> b >> fl;
+    req.documentId = docId; req.firstPage = a; req.lastPage = b; req.flatten = fl;
     return in;
 }
 QDataStream& operator<<(QDataStream& out, const ExtractPagesResponse& res) {

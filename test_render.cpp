@@ -5120,8 +5120,184 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Vector AP synthesis, clipping, incremental persistence, AP clearing, and rollback verified." << std::endl;
     }
 
+    // --- TEST 47: Milestone M5 Slice 5 Form Flattening & Non-destructive Export ---
+    std::cout << "[TEST 47] Testing form flattening and non-destructive export (Milestone M5 Slice 5)..." << std::endl;
+    {
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        std::string fixturePath = root + "/tests/fixtures/form_fields_test.pdf";
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "tests/fixtures/form_fields_test.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "../tests/fixtures/form_fields_test.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            std::cerr << "[FAIL] Test 47: form_fields_test.pdf fixture not found at " << fixturePath << std::endl;
+            return 1;
+        }
+
+        // 47a: In-place page flattening & idempotency
+        {
+            auto doc = pdf::createDocument();
+            if (doc->loadFromFile(fixturePath) != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Test 47a: Failed to load form_fields_test.pdf" << std::endl;
+                return 1;
+            }
+            auto page = doc->getPage(0);
+            if (!page) {
+                std::cerr << "[FAIL] Test 47a: Page 0 is null" << std::endl;
+                return 1;
+            }
+            auto fields = page->listFormFields();
+            if (fields.empty()) {
+                std::cerr << "[FAIL] Test 47a: Expected form fields before flattening" << std::endl;
+                return 1;
+            }
+
+            // Flatten page
+            pdf::FlattenResult res = page->flatten(pdf::FlattenMode::NormalDisplay);
+            if (res != pdf::FlattenResult::Success) {
+                std::cerr << "[FAIL] Test 47a: page->flatten returned " << static_cast<int>(res)
+                          << ", expected Success" << std::endl;
+                return 1;
+            }
+
+            // Verify form fields are now 0
+            auto flattenedFields = page->listFormFields();
+            if (!flattenedFields.empty()) {
+                std::cerr << "[FAIL] Test 47a: Form fields still present after page->flatten: "
+                          << flattenedFields.size() << std::endl;
+                return 1;
+            }
+
+            // Calling flatten again should return NothingToDo
+            pdf::FlattenResult secondRes = page->flatten(pdf::FlattenMode::NormalDisplay);
+            if (secondRes != pdf::FlattenResult::NothingToDo) {
+                std::cerr << "[FAIL] Test 47a: Repeated page->flatten returned " << static_cast<int>(secondRes)
+                          << ", expected NothingToDo" << std::endl;
+                return 1;
+            }
+        }
+
+        // 47b: In-place document flattening
+        {
+            auto doc = pdf::createDocument();
+            if (doc->loadFromFile(fixturePath) != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Test 47b: Failed to load form_fields_test.pdf" << std::endl;
+                return 1;
+            }
+            pdf::FlattenResult res = doc->flatten(pdf::FlattenMode::NormalDisplay);
+            if (res != pdf::FlattenResult::Success) {
+                std::cerr << "[FAIL] Test 47b: doc->flatten returned " << static_cast<int>(res)
+                          << ", expected Success" << std::endl;
+                return 1;
+            }
+
+            auto page = doc->getPage(0);
+            if (!page || !page->listFormFields().empty()) {
+                std::cerr << "[FAIL] Test 47b: Document still has form fields after doc->flatten" << std::endl;
+                return 1;
+            }
+
+            pdf::FlattenResult secondRes = doc->flatten(pdf::FlattenMode::NormalDisplay);
+            if (secondRes != pdf::FlattenResult::NothingToDo) {
+                std::cerr << "[FAIL] Test 47b: Repeated doc->flatten returned " << static_cast<int>(secondRes)
+                          << ", expected NothingToDo" << std::endl;
+                return 1;
+            }
+        }
+
+        // 47c: Non-destructive export with page flattening
+        {
+            auto doc = pdf::createDocument();
+            if (doc->loadFromFile(fixturePath) != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Test 47c: Failed to load form_fields_test.pdf" << std::endl;
+                return 1;
+            }
+            auto page = doc->getPage(0);
+            if (!page || !page->setFormFieldText(QStringLiteral("name"), 0, QStringLiteral("ExportedName"), {})) {
+                std::cerr << "[FAIL] Test 47c: Failed to setFormFieldText before export" << std::endl;
+                return 1;
+            }
+
+            std::vector<uint8_t> outBytes;
+            if (!doc->extractPages(0, 0, outBytes, true, pdf::FlattenMode::NormalDisplay)) {
+                std::cerr << "[FAIL] Test 47c: extractPages with flatten=true failed" << std::endl;
+                return 1;
+            }
+            if (outBytes.empty()) {
+                std::cerr << "[FAIL] Test 47c: extractPages produced 0 bytes" << std::endl;
+                return 1;
+            }
+
+            // CRITICAL INVARIANT: The original document MUST still have interactive form fields!
+            auto origFields = page->listFormFields();
+            if (origFields.empty()) {
+                std::cerr << "[FAIL] Test 47c: Non-destructive guarantee violated: original doc was flattened!" << std::endl;
+                return 1;
+            }
+            bool foundOrigName = false;
+            for (const auto& f : origFields) {
+                if (f.fieldName == "name" && f.value == "ExportedName") {
+                    foundOrigName = true;
+                    break;
+                }
+            }
+            if (!foundOrigName) {
+                std::cerr << "[FAIL] Test 47c: Original document lost modified form value" << std::endl;
+                return 1;
+            }
+
+            // Load exported bytes into a new document to verify it is flattened
+            QTemporaryDir tempDir;
+            const QString exportedPath = tempDir.filePath("flattened_export.pdf");
+            QFile exportedFile(exportedPath);
+            if (!exportedFile.open(QIODevice::WriteOnly) ||
+                exportedFile.write(reinterpret_cast<const char*>(outBytes.data()), static_cast<qint64>(outBytes.size())) != static_cast<qint64>(outBytes.size())) {
+                std::cerr << "[FAIL] Test 47c: Failed to write exported bytes to temp file" << std::endl;
+                return 1;
+            }
+            exportedFile.close();
+
+            auto exportedDoc = pdf::createDocument();
+            if (exportedDoc->loadFromFile(exportedPath.toStdString()) != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Test 47c: Failed to reload exported flattened PDF" << std::endl;
+                return 1;
+            }
+            if (exportedDoc->pageCount() != 1) {
+                std::cerr << "[FAIL] Test 47c: Reloaded document page count mismatch: expected 1, got "
+                          << exportedDoc->pageCount() << std::endl;
+                return 1;
+            }
+
+            auto exportedPage = exportedDoc->getPage(0);
+            if (!exportedPage) {
+                std::cerr << "[FAIL] Test 47c: Failed to get page 0 from reloaded document" << std::endl;
+                return 1;
+            }
+
+            auto exportedFields = exportedPage->listFormFields();
+            if (!exportedFields.empty()) {
+                std::cerr << "[FAIL] Test 47c: Exported flattened document still has " << exportedFields.size()
+                          << " form fields!" << std::endl;
+                return 1;
+            }
+
+            // Verify the exported page renders properly
+            pdf::PixelBuffer pb = exportedPage->renderWholePage(1.0, 1.0);
+            if (!pb.isValid() || pb.width() <= 0 || pb.height() <= 0 || pb.data() == nullptr) {
+                std::cerr << "[FAIL] Test 47c: Exported flattened page failed to render to PixelBuffer" << std::endl;
+                return 1;
+            }
+        }
+
+        std::cout << "  -> Passed: In-place page & doc flattening, idempotency, and non-destructive export verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 46 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 47 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

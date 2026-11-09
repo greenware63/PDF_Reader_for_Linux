@@ -553,7 +553,7 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
         case ipc::MessageType::ExtractPagesRequest: {
             ipc::ExtractPagesRequest req;
             if (ipc::deserialize(payload, req)) {
-                m_engineWorker.requestExtractPages(req.documentId, req.firstPage, req.lastPage);
+                m_engineWorker.requestExtractPages(req.documentId, req.firstPage, req.lastPage, req.flatten);
             }
             break;
         }

@@ -977,16 +977,16 @@ pdf::PixelBuffer WorkerClient::renderPageForPrintSync(int64_t documentId, int pa
     return result;
 }
 
-void WorkerClient::requestExtractPages(int64_t documentId, int firstPage, int lastPage) {
+void WorkerClient::requestExtractPages(int64_t documentId, int firstPage, int lastPage, bool flatten) {
     if (m_stopping || m_failureReported) {
         Q_EMIT extractPagesFailed(documentId, firstPage, lastPage);
         return;
     }
     sendMessage(MessageType::ExtractPagesRequest,
-                serialize(ExtractPagesRequest{documentId, firstPage, lastPage}));
+                serialize(ExtractPagesRequest{documentId, firstPage, lastPage, flatten}));
 }
 
-QByteArray WorkerClient::extractPagesSync(int64_t documentId, int firstPage, int lastPage, int timeoutMs) {
+QByteArray WorkerClient::extractPagesSync(int64_t documentId, int firstPage, int lastPage, bool flatten, int timeoutMs) {
     if (!ensureConnected()) {
         return {};
     }
@@ -1011,7 +1011,7 @@ QByteArray WorkerClient::extractPagesSync(int64_t documentId, int firstPage, int
     const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop, &QEventLoop::quit);
     connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
 
-    requestExtractPages(documentId, firstPage, lastPage);
+    requestExtractPages(documentId, firstPage, lastPage, flatten);
     timeout.start(timeoutMs);
     loop.exec();
 

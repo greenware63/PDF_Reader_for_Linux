@@ -239,6 +239,7 @@ struct ExtractPagesRequest {
     int64_t documentId{0};
     int firstPage{0};
     int lastPage{0};
+    bool flatten{false};
 };
 
 struct ExtractPagesResponse {

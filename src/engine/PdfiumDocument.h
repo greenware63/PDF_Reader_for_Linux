@@ -34,7 +34,9 @@ public:
     std::string getPageLabel(int pageIndex) const override;
     std::vector<std::string> getPageLabels() const override;
     PixelBuffer renderThumbnail(int pageIndex, int targetWidth) override;
-    bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out) const override;
+    bool extractPages(int firstPage, int lastPage, std::vector<uint8_t>& out,
+                      bool flatten = false, FlattenMode mode = FlattenMode::NormalDisplay) const override;
+    FlattenResult flatten(FlattenMode mode = FlattenMode::NormalDisplay) override;
     bool saveAsCopy(int writeFd, bool incremental, uint64_t& outBytesWritten,
                     std::function<void(uint64_t)> progressCallback = nullptr) override;
     int signatureCount() const override;

@@ -71,8 +71,8 @@ public:
 #endif
     void requestThumbnail(int64_t documentId, int pageIndex, int targetWidth = 140, int rotation = 0);
     void requestPrintPage(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0, int rotation = 0);
-    void requestExtractPages(int64_t documentId, int firstPage, int lastPage);
-    QByteArray extractPagesSync(int64_t documentId, int firstPage, int lastPage, int timeoutMs = 60000);
+    void requestExtractPages(int64_t documentId, int firstPage, int lastPage, bool flatten = false);
+    QByteArray extractPagesSync(int64_t documentId, int firstPage, int lastPage, bool flatten = false, int timeoutMs = 60000);
     pdf::PixelBuffer renderPageForPrintSync(int64_t documentId, int pageIndex, double scale = 1.0, double dpr = 2.0, int rotation = 0, int timeoutMs = 10000);
     void requestRedactDocument(int64_t documentId,
                                const std::vector<PageRedactionItem>& redactions,

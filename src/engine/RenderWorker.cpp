@@ -451,13 +451,13 @@ void RenderWorker::requestPrintPage(int64_t documentId, int pageIndex, double sc
     m_cv.notify_one();
 }
 
-void RenderWorker::requestExtractPages(int64_t documentId, int firstPage, int lastPage) {
+void RenderWorker::requestExtractPages(int64_t documentId, int firstPage, int lastPage, bool flatten) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_running.load()) {
         Q_EMIT extractPagesFailed(documentId, firstPage, lastPage);
         return;
     }
-    m_controlQueue.push_back({[this, documentId, firstPage, lastPage]() {
+    m_controlQueue.push_back({[this, documentId, firstPage, lastPage, flatten]() {
         noteProgress(ipc::WorkerOp::Extract);
         struct ExtractGuard {
             RenderWorker* w;
@@ -468,7 +468,7 @@ void RenderWorker::requestExtractPages(int64_t documentId, int firstPage, int la
             return;
         }
         std::vector<uint8_t> bytes;
-        if (!m_workerDocument->extractPages(firstPage, lastPage, bytes)) {
+        if (!m_workerDocument->extractPages(firstPage, lastPage, bytes, flatten)) {
             Q_EMIT extractPagesFailed(documentId, firstPage, lastPage);
             return;
         }

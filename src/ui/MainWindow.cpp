@@ -1,4 +1,4 @@
-﻿#include "MainWindow.h"
+#include "MainWindow.h"
 #include "AppSettings.h"
 #include "ThumbnailListWidget.h"
 #include <QCoreApplication>
@@ -521,6 +521,8 @@ void MainWindow::setupActions() {
 
     QAction* exportPdfAction = fileMenu->addAction(tr("&Export as PDF..."), this, &MainWindow::exportAsPdf);
     exportPdfAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P));
+
+    fileMenu->addAction(tr("Export &Flattened PDF..."), this, &MainWindow::exportFlattenedPdfAction);
 
     fileMenu->addSeparator();
     QAction* closeAction = fileMenu->addAction(tr("&Close Tab"), this, &MainWindow::closeCurrentTab);
@@ -1286,6 +1288,31 @@ bool MainWindow::exportDocumentToPdf(const QString& outputPath, int fromPage, in
     return out.commit();
 }
 
+bool MainWindow::exportFlattenedPdf(const QString& outputPath, int fromPage, int toPage) {
+    auto* viewer = currentViewer();
+    if (!viewer || !viewer->isDocumentOpen() || viewer->pageCount() <= 0) {
+        return false;
+    }
+    if (outputPath.isEmpty()) {
+        return false;
+    }
+
+    const int totalPages = viewer->pageCount();
+    const int start = (fromPage >= 0) ? std::clamp(fromPage, 0, totalPages - 1) : 0;
+    const int end = (toPage >= 0) ? std::clamp(toPage, start, totalPages - 1) : (totalPages - 1);
+
+    QSaveFile out(outputPath);
+    if (!out.open(QIODevice::WriteOnly)) {
+        return false;
+    }
+
+    const QByteArray pdfBytes = viewer->exportFlattenedPagesPdf(start, end);
+    if (pdfBytes.isEmpty() || out.write(pdfBytes) != pdfBytes.size()) {
+        return false;
+    }
+    return out.commit();
+}
+
 void MainWindow::printDocument() {
     auto* viewer = currentViewer();
     if (!viewer || !viewer->isDocumentOpen() || viewer->pageCount() <= 0) {
@@ -1382,6 +1409,37 @@ void MainWindow::exportAsPdf() {
     bool ok = exportDocumentToPdf(savePath);
     if (ok) {
         statusBar()->showMessage(tr("Successfully exported PDF to '%1'").arg(savePath), 5000);
+    } else {
+        statusBar()->showMessage(tr("Export failed."), 5000);
+    }
+}
+
+void MainWindow::exportFlattenedPdfAction() {
+    auto* viewer = currentViewer();
+    if (!viewer || !viewer->isDocumentOpen() || viewer->pageCount() <= 0) {
+        return;
+    }
+
+    QString defaultName = QFileInfo(viewer->currentFilePath()).completeBaseName() + QStringLiteral("_flattened.pdf");
+    QString savePath = QFileDialog::getSaveFileName(
+        this,
+        tr("Export Flattened PDF"),
+        defaultName,
+        tr("PDF Files (*.pdf)")
+    );
+
+    if (savePath.isEmpty()) {
+        return;
+    }
+
+    if (!savePath.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
+        savePath += QStringLiteral(".pdf");
+    }
+
+    statusBar()->showMessage(tr("Exporting flattened PDF to '%1'…").arg(QFileInfo(savePath).fileName()));
+    bool ok = exportFlattenedPdf(savePath);
+    if (ok) {
+        statusBar()->showMessage(tr("Successfully exported flattened PDF to '%1'").arg(savePath), 5000);
     } else {
         statusBar()->showMessage(tr("Export failed."), 5000);
     }
