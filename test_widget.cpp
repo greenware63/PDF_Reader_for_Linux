@@ -6895,16 +6895,16 @@ int main(int argc, char* argv[]) {
         // 60c: Read-only field protection
         const pdf::FormFieldItem* roField = nullptr;
         for (const auto& f : *fields) {
-            if (f.fieldName == "readonly_text") {
+            if (f.fieldName == "locked") {
                 roField = &f;
                 break;
             }
         }
         if (!roField || !roField->isReadOnly()) {
-            std::cerr << "[FAIL] 60c: readonly_text field not found or not marked read-only" << std::endl;
+            std::cerr << "[FAIL] 60c: locked field not found or not marked read-only" << std::endl;
             return 1;
         }
-        if (viewer.setFormFieldText(0, QStringLiteral("readonly_text"), 0, QStringLiteral("Hacked"))) {
+        if (viewer.setFormFieldText(0, QStringLiteral("locked"), 0, QStringLiteral("Hacked"))) {
             std::cerr << "[FAIL] 60c: setFormFieldText succeeded on read-only field!" << std::endl;
             return 1;
         }
@@ -6992,8 +6992,8 @@ int main(int argc, char* argv[]) {
         }
         for (const auto& f : *viewer.cachedFormFields(0)) {
             if (f.fieldName == "country") {
-                if (f.selectedIndices != std::vector<int>{1} || f.value != "Canada") {
-                    std::cerr << "[FAIL] 60f: 'country' choice not updated to Canada" << std::endl;
+                if (f.selectedIndices != std::vector<int>{1} || f.value != "Iran") {
+                    std::cerr << "[FAIL] 60f: 'country' choice not updated to Iran" << std::endl;
                     return 1;
                 }
             }
@@ -7032,8 +7032,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         for (const auto& f : *viewer.cachedFormFields(0)) {
-            if (f.fieldName == "country" && (f.selectedIndices != std::vector<int>{0} || f.value != "US")) {
-                std::cerr << "[FAIL] 60h: undo choice did not restore country to US" << std::endl;
+            if (f.fieldName == "country" && (f.selectedIndices != std::vector<int>{0} || f.value != "Germany")) {
+                std::cerr << "[FAIL] 60h: undo choice did not restore country to Germany" << std::endl;
                 return 1;
             }
         }
