@@ -55,8 +55,14 @@
 #ifdef far
 #undef far
 #endif
-#ifdef Q_OS_LINUX
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#else
+#include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #endif
 
 static void generateOutlinePdfFixture(const std::string& path, bool cyclicSibling = false,
@@ -7606,6 +7612,101 @@ int main(int argc, char* argv[]) {
             }
         }
         QObject::disconnect(errorConn);
+
+        // 61g: Old-value outline generation failure rejection (preserves existing text & AP)
+        {
+            QTemporaryDir oldValDir;
+            if (!oldValDir.isValid()) {
+                std::cerr << "[FAIL] 61g: failed to create temp dir" << std::endl;
+                return 1;
+            }
+            const QString oldValPdf = oldValDir.filePath(QStringLiteral("old_unsupported.pdf"));
+            auto rawDoc = pdf::createDocument();
+            if (rawDoc->loadFromFile(fixturePath) != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] 61g: failed to load fixture" << std::endl;
+                return 1;
+            }
+            auto rawPage = rawDoc->getPage(0);
+            if (!rawPage) {
+                std::cerr << "[FAIL] 61g: rawPage is null" << std::endl;
+                return 1;
+            }
+            const QString badOldValue = QStringLiteral("قدیمی \uE000");
+            rawPage->setFormFieldText(QStringLiteral("name"), 0, badOldValue, {});
+#ifdef _WIN32
+            int fd = ::_open(oldValPdf.toStdString().c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+            int fd = ::open(oldValPdf.toStdString().c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+            if (fd >= 0) {
+                uint64_t written = 0;
+                rawDoc->saveAsCopy(fd, true, written, nullptr);
+#ifdef _WIN32
+                ::_close(fd);
+#else
+                ::close(fd);
+#endif
+            }
+
+            ui::PdfViewerWidget oldViewer;
+            oldViewer.resize(800, 600);
+            oldViewer.show();
+            oldViewer.openDocument(oldValPdf);
+            timer.restart();
+            while (timer.elapsed() < 8000 && !oldViewer.isDocumentOpen()) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            if (!oldViewer.isDocumentOpen()) {
+                std::cerr << "[FAIL] 61g: failed to open oldValPdf" << std::endl;
+                return 1;
+            }
+            oldViewer.requestFormFieldsForPage(0);
+            timer.restart();
+            while (timer.elapsed() < 8000 && !oldViewer.cachedFormFields(0)) {
+                QApplication::processEvents();
+                QThread::msleep(10);
+            }
+            const auto* oldFields = oldViewer.cachedFormFields(0);
+            if (!oldFields) {
+                std::cerr << "[FAIL] 61g: cached form fields null in oldViewer" << std::endl;
+                return 1;
+            }
+
+            QString oldFailError;
+            auto oldConn = QObject::connect(&oldViewer, &ui::PdfViewerWidget::loadError, [&](const QString& err) {
+                oldFailError = err;
+            });
+
+            // Attempt to edit field containing unsupported old value with valid new text
+            if (oldViewer.setFormFieldText(0, QStringLiteral("name"), 0, QStringLiteral("New Valid Name"))) {
+                std::cerr << "[FAIL] 61g: setFormFieldText accepted edit when old-value outline generation failed" << std::endl;
+                return 1;
+            }
+            if (oldFailError.isEmpty() || !oldFailError.contains("existing text")) {
+                std::cerr << "[FAIL] 61g: expected loadError about existing text outline failure, got: "
+                          << oldFailError.toStdString() << std::endl;
+                return 1;
+            }
+
+            // Verify field was NOT mutated and editLog is not dirty
+            bool preserved = false;
+            for (const auto& f : *oldViewer.cachedFormFields(0)) {
+                if (f.fieldName == "name" && f.value == badOldValue) {
+                    preserved = true;
+                    break;
+                }
+            }
+            if (!preserved) {
+                std::cerr << "[FAIL] 61g: existing field value was corrupted when edit was rejected" << std::endl;
+                return 1;
+            }
+            if (oldViewer.editLog().isDirty()) {
+                std::cerr << "[FAIL] 61g: editLog marked dirty after rejected edit" << std::endl;
+                return 1;
+            }
+            QObject::disconnect(oldConn);
+        }
 
         std::cout << "  -> Passed: Form field vector AP synthesis, clipping, undo/redo symmetry, and persistence verified." << std::endl;
     }

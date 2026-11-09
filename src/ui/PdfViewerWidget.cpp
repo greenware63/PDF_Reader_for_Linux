@@ -4070,8 +4070,12 @@ bool PdfViewerWidget::setFormFieldText(int pageIndex, const QString& fieldName, 
             Q_EMIT loadError(tr("Could not generate vector appearance for text in form field '%1'.").arg(fieldName));
             return false;
         }
-        generateFormFieldOutlines(*targetField, oldValue, oldOutlines);
-    } else if (!isDrawableByBuiltInFont(text)) {
+        const auto oldRes = generateFormFieldOutlines(*targetField, oldValue, oldOutlines);
+        if (oldRes == FormFieldOutlineResult::Failed) {
+            Q_EMIT loadError(tr("Could not generate vector appearance for existing text in form field '%1'.").arg(fieldName));
+            return false;
+        }
+    } else if (!isDrawableByBuiltInFont(text) || !isDrawableByBuiltInFont(oldValue)) {
         Q_EMIT loadError(tr("Field '%1' geometry unavailable for vector text appearance.").arg(fieldName));
         return false;
     }
