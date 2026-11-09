@@ -828,6 +828,104 @@ void RenderWorker::requestListFormFields(int64_t documentId, int pageIndex) {
     m_cv.notify_one();
 }
 
+void RenderWorker::requestSetFormFieldText(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex,
+                                           const QString& text, const std::vector<pdf::AnnotationPathElement>& vectorOutlines) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        Q_EMIT formFieldTextFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Worker not running or document mismatch"));
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, pageIndex, fieldName, controlIndex, text, vectorOutlines]() {
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT formFieldTextFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Worker not running or document mismatch"));
+            return;
+        }
+        noteProgress(ipc::WorkerOp::Annotate);
+        struct ProgressGuard {
+            RenderWorker* w;
+            ~ProgressGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (!page) {
+            Q_EMIT formFieldTextFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Page not found"));
+            return;
+        }
+        if (page->setFormFieldText(fieldName, controlIndex, text, vectorOutlines)) {
+            Q_EMIT formFieldTextSet(documentId, pageIndex, fieldName, controlIndex);
+        } else {
+            Q_EMIT formFieldTextFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Failed to set form field text"));
+        }
+    }});
+    m_cv.notify_one();
+}
+
+void RenderWorker::requestToggleFormField(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, bool checked) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        Q_EMIT formFieldToggleFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Worker not running or document mismatch"));
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, pageIndex, fieldName, controlIndex, checked]() {
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT formFieldToggleFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Worker not running or document mismatch"));
+            return;
+        }
+        noteProgress(ipc::WorkerOp::Annotate);
+        struct ProgressGuard {
+            RenderWorker* w;
+            ~ProgressGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (!page) {
+            Q_EMIT formFieldToggleFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Page not found"));
+            return;
+        }
+        if (page->toggleFormField(fieldName, controlIndex, checked)) {
+            Q_EMIT formFieldToggled(documentId, pageIndex, fieldName, controlIndex, checked);
+        } else {
+            Q_EMIT formFieldToggleFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Failed to toggle form field"));
+        }
+    }});
+    m_cv.notify_one();
+}
+
+void RenderWorker::requestSetFormFieldChoice(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex,
+                                             const std::vector<int>& selectedIndices) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        Q_EMIT formFieldChoiceFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Worker not running or document mismatch"));
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, pageIndex, fieldName, controlIndex, selectedIndices]() {
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            Q_EMIT formFieldChoiceFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Worker not running or document mismatch"));
+            return;
+        }
+        noteProgress(ipc::WorkerOp::Annotate);
+        struct ProgressGuard {
+            RenderWorker* w;
+            ~ProgressGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        IPage* page = getOrLoadWorkerPage(pageIndex);
+        if (!page) {
+            Q_EMIT formFieldChoiceFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Page not found"));
+            return;
+        }
+        if (page->setFormFieldChoice(fieldName, controlIndex, selectedIndices)) {
+            Q_EMIT formFieldChoiceSet(documentId, pageIndex, fieldName, controlIndex, selectedIndices);
+        } else {
+            Q_EMIT formFieldChoiceFailed(documentId, pageIndex, fieldName, controlIndex, QStringLiteral("Failed to set form field choice"));
+        }
+    }});
+    m_cv.notify_one();
+}
+
 void RenderWorker::requestHitTestAnnotation(int64_t documentId, int pageIndex, double xPoints, double yPoints) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_running.load() || documentId != m_activeDocumentId.load()) {

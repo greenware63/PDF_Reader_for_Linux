@@ -3739,9 +3739,297 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: FormFieldItem wire format, 16 MiB budget enforcement, and WorkerClient IPC round-trip verified." << std::endl;
     }
 
+    // --- TEST 40: Milestone M5 Slice 2 Form Field Mutations, Validation, and EditLog Replay ---
+    std::cout << "[TEST 40] Testing form field mutations, bounds, validation, and EditLog crash replay (Milestone M5 Slice 2)..." << std::endl;
+    {
+        using namespace pdf::ipc;
+
+        // 40a: Wire format serialization/deserialization bounds enforcement
+        // 1. SetFormFieldTextRequest round-trip
+        SetFormFieldTextRequest textReq;
+        textReq.documentId = 401;
+        textReq.pageIndex = 0;
+        textReq.fieldName = QStringLiteral("name");
+        textReq.controlIndex = 0;
+        textReq.text = QStringLiteral("TestText");
+        QByteArray textReqBytes = serialize(textReq);
+        SetFormFieldTextRequest textReqBack;
+        if (!deserialize(textReqBytes, textReqBack) || textReqBack.documentId != 401 ||
+            textReqBack.fieldName != "name" || textReqBack.text != "TestText") {
+            std::cerr << "[FAIL] 40a: SetFormFieldTextRequest round-trip failed" << std::endl;
+            return 1;
+        }
+
+        // 2. Text code units cap (> 32,768 code units rejected)
+        SetFormFieldTextRequest hugeTextReq = textReq;
+        hugeTextReq.text = QString(32769, QLatin1Char('A'));
+        QByteArray hugeTextBytes = serialize(hugeTextReq);
+        SetFormFieldTextRequest hugeTextBack;
+        if (deserialize(hugeTextBytes, hugeTextBack)) {
+            std::cerr << "[FAIL] 40a: Deserializer accepted text exceeding 32,768 code units" << std::endl;
+            return 1;
+        }
+
+        // 3. Outlines NaN / Inf rejection
+        SetFormFieldTextRequest nanOutlineReq = textReq;
+        pdf::AnnotationPathElement nanElem{};
+        nanElem.kind = pdf::AnnotationPathElement::Kind::MoveTo;
+        nanElem.x = std::numeric_limits<double>::quiet_NaN();
+        nanElem.y = 10.0;
+        nanOutlineReq.vectorOutlines.push_back(nanElem);
+        QByteArray nanOutlineBytes = serialize(nanOutlineReq);
+        SetFormFieldTextRequest nanOutlineBack;
+        if (deserialize(nanOutlineBytes, nanOutlineBack)) {
+            std::cerr << "[FAIL] 40a: Deserializer accepted vector outlines with NaN" << std::endl;
+            return 1;
+        }
+
+        // 4. Outlines cap (> 250,000 elements rejected)
+        QByteArray craftedHugeOutlines;
+        QDataStream outOutlines(&craftedHugeOutlines, QIODevice::WriteOnly);
+        outOutlines.setVersion(QDataStream::Qt_6_4);
+        outOutlines << static_cast<qint64>(401) << static_cast<qint32>(0)
+                    << QStringLiteral("name") << static_cast<qint32>(0)
+                    << QStringLiteral("txt") << static_cast<quint32>(250001);
+        SetFormFieldTextRequest hugeOutlinesBack;
+        if (deserialize(craftedHugeOutlines, hugeOutlinesBack)) {
+            std::cerr << "[FAIL] 40a: Deserializer accepted vector outlines > 250,000 elements" << std::endl;
+            return 1;
+        }
+
+        // 5. ToggleFormFieldRequest round-trip
+        ToggleFormFieldRequest toggleReq{402, 0, QStringLiteral("agree"), 0, true};
+        QByteArray toggleReqBytes = serialize(toggleReq);
+        ToggleFormFieldRequest toggleReqBack;
+        if (!deserialize(toggleReqBytes, toggleReqBack) || toggleReqBack.documentId != 402 ||
+            toggleReqBack.fieldName != "agree" || !toggleReqBack.checked) {
+            std::cerr << "[FAIL] 40a: ToggleFormFieldRequest round-trip failed" << std::endl;
+            return 1;
+        }
+
+        // 6. SetFormFieldChoiceRequest round-trip
+        SetFormFieldChoiceRequest choiceReq{403, 0, QStringLiteral("langs"), 0, {0, 2}};
+        QByteArray choiceReqBytes = serialize(choiceReq);
+        SetFormFieldChoiceRequest choiceReqBack;
+        if (!deserialize(choiceReqBytes, choiceReqBack) || choiceReqBack.documentId != 403 ||
+            choiceReqBack.fieldName != "langs" || choiceReqBack.selectedIndices != std::vector<int>{0, 2}) {
+            std::cerr << "[FAIL] 40a: SetFormFieldChoiceRequest round-trip failed" << std::endl;
+            return 1;
+        }
+
+        // 7. Duplicate choices rejection
+        SetFormFieldChoiceRequest dupChoiceReq{403, 0, QStringLiteral("langs"), 0, {1, 1}};
+        QByteArray dupChoiceBytes = serialize(dupChoiceReq);
+        SetFormFieldChoiceRequest dupChoiceBack;
+        if (deserialize(dupChoiceBytes, dupChoiceBack)) {
+            std::cerr << "[FAIL] 40a: Deserializer accepted duplicate indices in SetFormFieldChoiceRequest" << std::endl;
+            return 1;
+        }
+
+        // 8. Choices count cap (> 1,000 choices rejected)
+        QByteArray craftedHugeChoices;
+        QDataStream outChoices(&craftedHugeChoices, QIODevice::WriteOnly);
+        outChoices.setVersion(QDataStream::Qt_6_4);
+        outChoices << static_cast<qint64>(403) << static_cast<qint32>(0)
+                   << QStringLiteral("langs") << static_cast<qint32>(0)
+                   << static_cast<quint32>(1001);
+        SetFormFieldChoiceRequest hugeChoicesBack;
+        if (deserialize(craftedHugeChoices, hugeChoicesBack)) {
+            std::cerr << "[FAIL] 40a: Deserializer accepted choice count > 1000" << std::endl;
+            return 1;
+        }
+
+        // 40b: End-to-end WorkerClient mutation & worker-side validation test
+        QString fixturePdf = QFileInfo(samplePdf).dir().filePath(QStringLiteral("tests/fixtures/form_fields_test.pdf"));
+        if (!QFileInfo::exists(fixturePdf)) {
+            fixturePdf = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../tests/fixtures/form_fields_test.pdf"));
+        }
+        if (!QFileInfo::exists(fixturePdf)) {
+            fixturePdf = QStringLiteral("tests/fixtures/form_fields_test.pdf");
+        }
+        if (!QFileInfo::exists(fixturePdf)) {
+            std::cerr << "[FAIL] 40b: form_fields_test.pdf not found at " << fixturePdf.toStdString() << std::endl;
+            return 1;
+        }
+
+        WorkerClient client;
+        auto openResp = client.openDocumentSync(400, fixturePdf.toStdString());
+        if (openResp.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 40b: Failed to open form_fields_test.pdf on worker" << std::endl;
+            return 1;
+        }
+
+        // 1. Text mutation on read-only field 'locked' -> must fail
+        auto rLocked = client.setFormFieldTextSync(400, 0, QStringLiteral("locked"), 0, QStringLiteral("HackedReadOnly"), {});
+        if (rLocked.success) {
+            std::cerr << "[FAIL] 40b: Worker accepted text mutation on ReadOnly field 'locked'" << std::endl;
+            return 1;
+        }
+
+        // 2. Text mutation on non-text field 'agree' -> must fail
+        auto rBadType = client.setFormFieldTextSync(400, 0, QStringLiteral("agree"), 0, QStringLiteral("HackedCheckbox"), {});
+        if (rBadType.success) {
+            std::cerr << "[FAIL] 40b: Worker accepted text mutation on checkbox field 'agree'" << std::endl;
+            return 1;
+        }
+
+        // 3. Valid text mutation on 'name' -> must succeed
+        auto rName = client.setFormFieldTextSync(400, 0, QStringLiteral("name"), 0, QStringLiteral("Alice-IPC"), {});
+        if (!rName.success) {
+            std::cerr << "[FAIL] 40b: Worker failed text mutation on 'name': " << rName.errorMessage.toStdString() << std::endl;
+            return 1;
+        }
+
+        // 4. Toggle on checkbox 'agree' -> must succeed
+        auto rAgree = client.toggleFormFieldSync(400, 0, QStringLiteral("agree"), 0, true);
+        if (!rAgree.success) {
+            std::cerr << "[FAIL] 40b: Worker failed toggle on checkbox 'agree'" << std::endl;
+            return 1;
+        }
+
+        // 5. Toggle off on radio button with NoToggleToOff -> must fail
+        auto rRadioOff = client.toggleFormFieldSync(400, 0, QStringLiteral("rg"), 0, false);
+        if (rRadioOff.success) {
+            std::cerr << "[FAIL] 40b: Worker allowed turning off radio button with NoToggleToOff" << std::endl;
+            return 1;
+        }
+
+        // 6. Checking sibling radio button control 1 -> must succeed and uncheck control 0
+        auto rRadioOn = client.toggleFormFieldSync(400, 0, QStringLiteral("rg"), 1, true);
+        if (!rRadioOn.success) {
+            std::cerr << "[FAIL] 40b: Worker failed checking sibling radio button control 1" << std::endl;
+            return 1;
+        }
+
+        // 7. Choice on single-select combo with out-of-bounds index -> must fail
+        auto rChoiceOob = client.setFormFieldChoiceSync(400, 0, QStringLiteral("country"), 0, {99});
+        if (rChoiceOob.success) {
+            std::cerr << "[FAIL] 40b: Worker accepted out-of-bounds choice index 99 on 'country'" << std::endl;
+            return 1;
+        }
+
+        // 8. Choice on single-select combo with multiple indices -> must fail
+        auto rChoiceMulti = client.setFormFieldChoiceSync(400, 0, QStringLiteral("country"), 0, {0, 1});
+        if (rChoiceMulti.success) {
+            std::cerr << "[FAIL] 40b: Worker accepted multiple indices on single-select 'country'" << std::endl;
+            return 1;
+        }
+
+        // 9. Valid single choice on 'country' -> must succeed
+        auto rChoiceCountry = client.setFormFieldChoiceSync(400, 0, QStringLiteral("country"), 0, {1});
+        if (!rChoiceCountry.success) {
+            std::cerr << "[FAIL] 40b: Worker failed single choice on 'country'" << std::endl;
+            return 1;
+        }
+
+        // 10. Valid multi choice on 'langs' -> must succeed
+        auto rChoiceLangs = client.setFormFieldChoiceSync(400, 0, QStringLiteral("langs"), 0, {0, 2});
+        if (!rChoiceLangs.success) {
+            std::cerr << "[FAIL] 40b: Worker failed multi choice on 'langs'" << std::endl;
+            return 1;
+        }
+
+        // 11. Verify all updated fields via listFormFieldsSync
+        auto listCheck = client.listFormFieldsSync(400, 0, 5000);
+        if (!listCheck.success || listCheck.fields.empty()) {
+            std::cerr << "[FAIL] 40b: listFormFieldsSync failed to retrieve mutated fields" << std::endl;
+            return 1;
+        }
+        for (const auto& f : listCheck.fields) {
+            if (f.fieldName == "name" && f.value != "Alice-IPC") {
+                std::cerr << "[FAIL] 40b: Field 'name' expected 'Alice-IPC', got '" << f.value.toStdString() << "'" << std::endl;
+                return 1;
+            }
+            if (f.fieldName == "agree" && !f.isChecked && f.value != "Yes") {
+                std::cerr << "[FAIL] 40b: Field 'agree' expected checked" << std::endl;
+                return 1;
+            }
+            if (f.fieldName == "rg" && f.controlIndex == 0 && f.isChecked) {
+                std::cerr << "[FAIL] 40b: Field 'rg' control 0 should be unchecked" << std::endl;
+                return 1;
+            }
+            if (f.fieldName == "rg" && f.controlIndex == 1 && !f.isChecked) {
+                std::cerr << "[FAIL] 40b: Field 'rg' control 1 should be checked" << std::endl;
+                return 1;
+            }
+            if (f.fieldName == "country" && f.selectedIndices != std::vector<int>{1}) {
+                std::cerr << "[FAIL] 40b: Field 'country' selectedIndices mismatch" << std::endl;
+                return 1;
+            }
+            if (f.fieldName == "langs" && f.selectedIndices != std::vector<int>{0, 2}) {
+                std::cerr << "[FAIL] 40b: Field 'langs' selectedIndices mismatch" << std::endl;
+                return 1;
+            }
+        }
+
+        // 40c: Worker crash recovery and EditLog replay for form fields
+        pdf::EditLog log;
+        log.recordSetFormFieldText(0, QStringLiteral("name"), 0, QStringLiteral("Alice"), QStringLiteral("Alice-Replayed"), {});
+        log.recordToggleFormField(0, QStringLiteral("agree"), 0, false, true);
+        log.recordToggleFormField(0, QStringLiteral("rg"), 1, false, true);
+        log.recordSetFormFieldChoice(0, QStringLiteral("country"), 0, {0}, {1});
+        log.recordSetFormFieldChoice(0, QStringLiteral("langs"), 0, {0}, {0, 2});
+
+        // Kill worker to simulate crash
+        client.killWorkerForTesting();
+
+        // Fresh worker client reopening original fixture
+        pdf::ipc::WorkerClient freshClient;
+        auto freshOpen = freshClient.openDocumentSync(400, fixturePdf.toStdString());
+        if (freshOpen.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 40c: Failed to reopen document on fresh worker after crash" << std::endl;
+            return 1;
+        }
+
+        // Replay edit log onto fresh worker
+        bool replayed = log.replay(&freshClient, 400);
+        if (!replayed) {
+            std::cerr << "[FAIL] 40c: EditLog::replay with form fields failed" << std::endl;
+            return 1;
+        }
+
+        // Verify replayed state on fresh worker
+        auto replayedList = freshClient.listFormFieldsSync(400, 0, 5000);
+        if (!replayedList.success || replayedList.fields.empty()) {
+            std::cerr << "[FAIL] 40c: Failed to list form fields on replayed worker" << std::endl;
+            return 1;
+        }
+        for (const auto& f : replayedList.fields) {
+            if (f.fieldName == "name" && f.value != "Alice-Replayed") {
+                std::cerr << "[FAIL] 40c: Replayed 'name' expected 'Alice-Replayed', got '" << f.value.toStdString() << "'" << std::endl;
+                return 1;
+            }
+            if (f.fieldName == "agree" && !f.isChecked && f.value != "Yes") {
+                std::cerr << "[FAIL] 40c: Replayed 'agree' expected checked" << std::endl;
+                return 1;
+            }
+            if (f.fieldName == "rg" && f.controlIndex == 0 && f.isChecked) {
+                std::cerr << "[FAIL] 40c: Replayed 'rg' control 0 should be unchecked" << std::endl;
+                return 1;
+            }
+            if (f.fieldName == "rg" && f.controlIndex == 1 && !f.isChecked) {
+                std::cerr << "[FAIL] 40c: Replayed 'rg' control 1 should be checked" << std::endl;
+                return 1;
+            }
+            if (f.fieldName == "country" && f.selectedIndices != std::vector<int>{1}) {
+                std::cerr << "[FAIL] 40c: Replayed 'country' selectedIndices mismatch" << std::endl;
+                return 1;
+            }
+            if (f.fieldName == "langs" && f.selectedIndices != std::vector<int>{0, 2}) {
+                std::cerr << "[FAIL] 40c: Replayed 'langs' selectedIndices mismatch" << std::endl;
+                return 1;
+            }
+        }
+
+        freshClient.closeDocumentSync();
+        freshClient.stop();
+        std::cout << "  -> Passed: WorkerClient form mutations, worker-side validations, bounds enforcement, and crash replay verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;
 
     return 0;
 }
+

@@ -185,6 +185,30 @@ void testPayloadWithAllTypes(const uint8_t* data, size_t size) {
         ListFormFieldsResponse msg;
         deserialize(payload, msg);
     }
+    {
+        SetFormFieldTextRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        SetFormFieldTextResponse msg;
+        deserialize(payload, msg);
+    }
+    {
+        ToggleFormFieldRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        ToggleFormFieldResponse msg;
+        deserialize(payload, msg);
+    }
+    {
+        SetFormFieldChoiceRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        SetFormFieldChoiceResponse msg;
+        deserialize(payload, msg);
+    }
 }
 
 } // namespace
@@ -361,6 +385,36 @@ int main(int argc, char* argv[]) {
         f3.isChecked = true;
         res.fields.push_back(f3);
 
+        QByteArray b = serialize(res);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        SetFormFieldTextRequest req{42, 0, QStringLiteral("fname"), 0, QStringLiteral("hello"), {}};
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        SetFormFieldTextResponse res{42, 0, QStringLiteral("fname"), 0, true, {}};
+        QByteArray b = serialize(res);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        ToggleFormFieldRequest req{42, 0, QStringLiteral("check1"), 0, true};
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        ToggleFormFieldResponse res{42, 0, QStringLiteral("check1"), 0, true, {}};
+        QByteArray b = serialize(res);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        SetFormFieldChoiceRequest req{42, 0, QStringLiteral("combo1"), 0, {0, 2}};
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        SetFormFieldChoiceResponse res{42, 0, QStringLiteral("combo1"), 0, true, {}};
         QByteArray b = serialize(res);
         corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
     }

@@ -40,6 +40,9 @@ bool isRequestType(uint32_t type) {
         case ipc::MessageType::RedactDocumentRequest:
         case ipc::MessageType::ListAnnotationsRequest:
         case ipc::MessageType::ListFormFieldsRequest:
+        case ipc::MessageType::SetFormFieldTextRequest:
+        case ipc::MessageType::ToggleFormFieldRequest:
+        case ipc::MessageType::SetFormFieldChoiceRequest:
         case ipc::MessageType::HitTestAnnotationRequest:
         case ipc::MessageType::AddAnnotationRequest:
         case ipc::MessageType::RemoveAnnotationRequest:
@@ -98,6 +101,18 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
             this, &WorkerServer::onFormFieldsReady, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::formFieldsFailed,
             this, &WorkerServer::onFormFieldsFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::formFieldTextSet,
+            this, &WorkerServer::onFormFieldTextSet, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::formFieldTextFailed,
+            this, &WorkerServer::onFormFieldTextFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::formFieldToggled,
+            this, &WorkerServer::onFormFieldToggled, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::formFieldToggleFailed,
+            this, &WorkerServer::onFormFieldToggleFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::formFieldChoiceSet,
+            this, &WorkerServer::onFormFieldChoiceSet, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::formFieldChoiceFailed,
+            this, &WorkerServer::onFormFieldChoiceFailed, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::annotationHitTestReady,
             this, &WorkerServer::onAnnotationHitTestReady, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::annotationHitTestFailed,
@@ -563,6 +578,36 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             break;
         }
 
+        case ipc::MessageType::SetFormFieldTextRequest: {
+            ipc::SetFormFieldTextRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestSetFormFieldText(req.documentId, req.pageIndex, req.fieldName, req.controlIndex, req.text, req.vectorOutlines);
+            } else {
+                onFormFieldTextFailed(req.documentId, req.pageIndex, req.fieldName, req.controlIndex, QStringLiteral("Malformed SetFormFieldTextRequest"));
+            }
+            break;
+        }
+
+        case ipc::MessageType::ToggleFormFieldRequest: {
+            ipc::ToggleFormFieldRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestToggleFormField(req.documentId, req.pageIndex, req.fieldName, req.controlIndex, req.checked);
+            } else {
+                onFormFieldToggleFailed(req.documentId, req.pageIndex, req.fieldName, req.controlIndex, QStringLiteral("Malformed ToggleFormFieldRequest"));
+            }
+            break;
+        }
+
+        case ipc::MessageType::SetFormFieldChoiceRequest: {
+            ipc::SetFormFieldChoiceRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestSetFormFieldChoice(req.documentId, req.pageIndex, req.fieldName, req.controlIndex, req.selectedIndices);
+            } else {
+                onFormFieldChoiceFailed(req.documentId, req.pageIndex, req.fieldName, req.controlIndex, QStringLiteral("Malformed SetFormFieldChoiceRequest"));
+            }
+            break;
+        }
+
         case ipc::MessageType::HitTestAnnotationRequest: {
             ipc::HitTestAnnotationRequest req;
             if (ipc::deserialize(payload, req)) {
@@ -944,6 +989,71 @@ void WorkerServer::onFormFieldsFailed(int64_t documentId, int pageIndex) {
     res.pageIndex = pageIndex;
     res.success = false;
     sendPacket(ipc::MessageType::ListFormFieldsResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onFormFieldTextSet(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex) {
+    ipc::SetFormFieldTextResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.fieldName = fieldName;
+    res.controlIndex = controlIndex;
+    res.success = true;
+    sendPacket(ipc::MessageType::SetFormFieldTextResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onFormFieldTextFailed(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, const QString& errorMessage) {
+    ipc::SetFormFieldTextResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.fieldName = fieldName;
+    res.controlIndex = controlIndex;
+    res.success = false;
+    res.errorMessage = errorMessage;
+    sendPacket(ipc::MessageType::SetFormFieldTextResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onFormFieldToggled(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, bool checked) {
+    (void)checked;
+    ipc::ToggleFormFieldResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.fieldName = fieldName;
+    res.controlIndex = controlIndex;
+    res.success = true;
+    sendPacket(ipc::MessageType::ToggleFormFieldResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onFormFieldToggleFailed(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, const QString& errorMessage) {
+    ipc::ToggleFormFieldResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.fieldName = fieldName;
+    res.controlIndex = controlIndex;
+    res.success = false;
+    res.errorMessage = errorMessage;
+    sendPacket(ipc::MessageType::ToggleFormFieldResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onFormFieldChoiceSet(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, const std::vector<int>& selectedIndices) {
+    (void)selectedIndices;
+    ipc::SetFormFieldChoiceResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.fieldName = fieldName;
+    res.controlIndex = controlIndex;
+    res.success = true;
+    sendPacket(ipc::MessageType::SetFormFieldChoiceResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onFormFieldChoiceFailed(int64_t documentId, int pageIndex, const QString& fieldName, int controlIndex, const QString& errorMessage) {
+    ipc::SetFormFieldChoiceResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.fieldName = fieldName;
+    res.controlIndex = controlIndex;
+    res.success = false;
+    res.errorMessage = errorMessage;
+    sendPacket(ipc::MessageType::SetFormFieldChoiceResponse, ipc::serialize(res));
 }
 
 void WorkerServer::onAnnotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation) {

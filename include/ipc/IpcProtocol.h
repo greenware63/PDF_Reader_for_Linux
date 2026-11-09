@@ -99,6 +99,12 @@ enum class MessageType : uint32_t {
     // AcroForms (Phase 2 M5)
     ListFormFieldsRequest = 110,
     ListFormFieldsResponse = 111,
+    SetFormFieldTextRequest = 112,
+    SetFormFieldTextResponse = 113,
+    ToggleFormFieldRequest = 114,
+    ToggleFormFieldResponse = 115,
+    SetFormFieldChoiceRequest = 116,
+    SetFormFieldChoiceResponse = 117,
 
     // Error / Diagnostic
     WorkerError = 99

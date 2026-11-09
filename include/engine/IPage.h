@@ -86,6 +86,23 @@ public:
         return {};
     }
 
+    virtual bool setFormFieldText(const QString& fieldName, int controlIndex, const QString& text,
+                                  const std::vector<AnnotationPathElement>& vectorOutlines = {}) {
+        (void)fieldName; (void)controlIndex; (void)text; (void)vectorOutlines;
+        return false;
+    }
+
+    virtual bool toggleFormField(const QString& fieldName, int controlIndex, bool checked) {
+        (void)fieldName; (void)controlIndex; (void)checked;
+        return false;
+    }
+
+    virtual bool setFormFieldChoice(const QString& fieldName, int controlIndex,
+                                    const std::vector<int>& selectedIndices) {
+        (void)fieldName; (void)controlIndex; (void)selectedIndices;
+        return false;
+    }
+
     /**
      * @brief Hit-tests annotations on this page at the given point (in standard PDF user space points).
      * Evaluates in reverse z-order (topmost annotation first).

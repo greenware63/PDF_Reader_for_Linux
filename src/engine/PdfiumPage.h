@@ -38,6 +38,11 @@ public:
     PageText extractText() override;
     std::vector<AnnotationItem> listAnnotations(bool* truncated = nullptr) override;
     std::vector<FormFieldItem> listFormFields(bool* truncated = nullptr) override;
+    bool setFormFieldText(const QString& fieldName, int controlIndex, const QString& text,
+                          const std::vector<AnnotationPathElement>& vectorOutlines = {}) override;
+    bool toggleFormField(const QString& fieldName, int controlIndex, bool checked) override;
+    bool setFormFieldChoice(const QString& fieldName, int controlIndex,
+                            const std::vector<int>& selectedIndices) override;
     bool hitTestAnnotation(double xPoints, double yPoints, AnnotationItem& out) override;
     bool addMarkupAnnotation(const AnnotationItem& item) override;
     bool addHighlightAnnotation(const AnnotationItem& item) override;
