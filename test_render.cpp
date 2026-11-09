@@ -4682,6 +4682,10 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Test 45a: setFormFieldText failed on valid text field 'name'" << std::endl;
             return 1;
         }
+        if (!page->setFormFieldText(QStringLiteral("editable_combo"), 0, QStringLiteral("Mango"), {})) {
+            std::cerr << "[FAIL] Test 45a: setFormFieldText failed on editable combo 'editable_combo'" << std::endl;
+            return 1;
+        }
 
         // 45b: Toggle form field (Checkbox & RadioButton)
         // 1. Valid checkbox toggle

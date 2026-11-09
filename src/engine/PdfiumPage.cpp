@@ -1025,19 +1025,26 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
         }
     }
 
-    if (!FORM_SetFocusedAnnot(m_form->handle, annot)) {
-        FPDFPage_CloseAnnot(annot);
-        return false;
-    }
-
-    if (!FORM_SelectAllText(m_form->handle, m_page)) {
+    bool killed = false;
+    if (isEditableCombo) {
         FORM_ForceToKillFocus(m_form->handle);
-        FPDFPage_CloseAnnot(annot);
-        return false;
-    }
+        FPDFAnnot_SetStringValue(annot, "V", reinterpret_cast<FPDF_WIDESTRING>(wideText.data()));
+        killed = true;
+    } else {
+        if (!FORM_SetFocusedAnnot(m_form->handle, annot)) {
+            FPDFPage_CloseAnnot(annot);
+            return false;
+        }
 
-    FORM_ReplaceSelection(m_form->handle, m_page, wideText.data());
-    const bool killed = (FORM_ForceToKillFocus(m_form->handle) != 0);
+        if (!FORM_SelectAllText(m_form->handle, m_page)) {
+            FORM_ForceToKillFocus(m_form->handle);
+            FPDFPage_CloseAnnot(annot);
+            return false;
+        }
+
+        FORM_ReplaceSelection(m_form->handle, m_page, wideText.data());
+        killed = (FORM_ForceToKillFocus(m_form->handle) != 0);
+    }
 
     // Verify the commit succeeded by reading back the field value
     unsigned long reqLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
@@ -1059,27 +1066,48 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
         for (int i = 0; i < originalVal.size(); ++i) {
             origWide[i] = originalVal.at(i).unicode();
         }
-        bool rbFocused = (FORM_SetFocusedAnnot(m_form->handle, annot) != 0);
-        bool rbSelected = rbFocused && (FORM_SelectAllText(m_form->handle, m_page) != 0);
-        if (rbSelected) {
-            FORM_ReplaceSelection(m_form->handle, m_page, origWide.data());
-        }
-        bool rbKilled = (FORM_ForceToKillFocus(m_form->handle) != 0);
 
-        // Verify that the restored value actually matches originalVal
-        unsigned long rbLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
-        QString restoredVal;
-        if (rbLen > 2) {
-            std::vector<unsigned char> rbBuf(rbLen + 2, 0);
-            unsigned long actual = FPDFAnnot_GetFormFieldValue(m_form->handle, annot,
-                reinterpret_cast<FPDF_WCHAR*>(rbBuf.data()), rbLen);
-            if (actual > 2) {
-                const char16_t* u16 = reinterpret_cast<const char16_t*>(rbBuf.data());
-                restoredVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
+        bool rollbackOk = false;
+        if (isEditableCombo) {
+            FORM_ForceToKillFocus(m_form->handle);
+            FPDFAnnot_SetStringValue(annot, "V", reinterpret_cast<FPDF_WIDESTRING>(origWide.data()));
+
+            unsigned long rbLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
+            QString restoredVal;
+            if (rbLen > 2) {
+                std::vector<unsigned char> rbBuf(rbLen + 2, 0);
+                unsigned long actual = FPDFAnnot_GetFormFieldValue(m_form->handle, annot,
+                    reinterpret_cast<FPDF_WCHAR*>(rbBuf.data()), rbLen);
+                if (actual > 2) {
+                    const char16_t* u16 = reinterpret_cast<const char16_t*>(rbBuf.data());
+                    restoredVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
+                }
             }
+            rollbackOk = (restoredVal == originalVal);
+        } else {
+            bool rbFocused = (FORM_SetFocusedAnnot(m_form->handle, annot) != 0);
+            bool rbSelected = rbFocused && (FORM_SelectAllText(m_form->handle, m_page) != 0);
+            if (rbSelected) {
+                FORM_ReplaceSelection(m_form->handle, m_page, origWide.data());
+            }
+            bool rbKilled = (FORM_ForceToKillFocus(m_form->handle) != 0);
+
+            // Verify that the restored value actually matches originalVal
+            unsigned long rbLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
+            QString restoredVal;
+            if (rbLen > 2) {
+                std::vector<unsigned char> rbBuf(rbLen + 2, 0);
+                unsigned long actual = FPDFAnnot_GetFormFieldValue(m_form->handle, annot,
+                    reinterpret_cast<FPDF_WCHAR*>(rbBuf.data()), rbLen);
+                if (actual > 2) {
+                    const char16_t* u16 = reinterpret_cast<const char16_t*>(rbBuf.data());
+                    restoredVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
+                }
+            }
+
+            rollbackOk = (rbFocused && rbSelected && rbKilled && (restoredVal == originalVal));
         }
 
-        const bool rollbackOk = (rbFocused && rbSelected && rbKilled && (restoredVal == originalVal));
         if (!rollbackOk) {
             std::cerr << "[PdfiumPage] FATAL: Form field rollback failed for '"
                       << fieldName.toStdString() << "'. Inconsistent worker state. Aborting to prevent unlogged mutation."
