@@ -1011,18 +1011,32 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
         wideText[i] = text.at(i).unicode();
     }
 
+    // Capture prior value for rollback in case a later commit or verification step fails
+    unsigned long origLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
+    QString originalVal;
+    if (origLen > 2) {
+        std::vector<unsigned char> origBuf(origLen + 2, 0);
+        unsigned long actual = FPDFAnnot_GetFormFieldValue(m_form->handle, annot,
+            reinterpret_cast<FPDF_WCHAR*>(origBuf.data()), origLen);
+        if (actual > 2) {
+            const char16_t* u16 = reinterpret_cast<const char16_t*>(origBuf.data());
+            originalVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
+        }
+    }
+
     if (!FORM_SetFocusedAnnot(m_form->handle, annot)) {
         FPDFPage_CloseAnnot(annot);
         return false;
     }
 
-    FORM_SelectAllText(m_form->handle, m_page);
-    FORM_ReplaceSelection(m_form->handle, m_page, wideText.data());
-    const bool killed = (FORM_ForceToKillFocus(m_form->handle) != 0);
-    if (!killed) {
+    if (!FORM_SelectAllText(m_form->handle, m_page)) {
+        FORM_ForceToKillFocus(m_form->handle);
         FPDFPage_CloseAnnot(annot);
         return false;
     }
+
+    FORM_ReplaceSelection(m_form->handle, m_page, wideText.data());
+    const bool killed = (FORM_ForceToKillFocus(m_form->handle) != 0);
 
     // Verify the commit succeeded by reading back the field value
     unsigned long reqLen = FPDFAnnot_GetFormFieldValue(m_form->handle, annot, nullptr, 0);
@@ -1036,9 +1050,26 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
             committedVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
         }
     }
-    const bool matches = (committedVal == text);
+
+    const bool success = (killed && committedVal == text);
+    if (!success) {
+        // Rollback to prior value to avoid leaving an unlogged mutation
+        std::vector<unsigned short> origWide(originalVal.size() + 1, 0);
+        for (int i = 0; i < originalVal.size(); ++i) {
+            origWide[i] = originalVal.at(i).unicode();
+        }
+        if (FORM_SetFocusedAnnot(m_form->handle, annot)) {
+            if (FORM_SelectAllText(m_form->handle, m_page)) {
+                FORM_ReplaceSelection(m_form->handle, m_page, origWide.data());
+            }
+            FORM_ForceToKillFocus(m_form->handle);
+        }
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
+
     FPDFPage_CloseAnnot(annot);
-    return matches;
+    return true;
 }
 
 bool PdfiumPage::toggleFormField(const QString& fieldName, int controlIndex, bool checked) {
