@@ -674,6 +674,11 @@ QImage PdfViewerWidget::renderPageForPrint(int pageIndex, double scale, double d
     if (!isDocumentOpen() || pageIndex < 0 || pageIndex >= m_pageCount) {
         return {};
     }
+    if (m_activeFormEditor) {
+        if (!commitActiveFormFieldEditor()) {
+            return {};
+        }
+    }
     pdf::PixelBuffer buf = m_renderWorker.renderPageForPrintSync(m_currentDocumentId, pageIndex, scale, dpr, m_rotation);
     return toQImage(buf, dpr).copy();
 }
@@ -1679,7 +1684,10 @@ void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
         if (m_activeFormEditor) {
             const QPoint vpPt = event->position().toPoint();
             if (!m_activeFormEditor->geometry().contains(vpPt)) {
-                commitActiveFormFieldEditor();
+                if (!commitActiveFormFieldEditor()) {
+                    event->accept();
+                    return;
+                }
             }
         }
 
@@ -3738,6 +3746,11 @@ bool PdfViewerWidget::saveDocument(const QString& targetPath) {
     if (!m_hasDocument || m_currentDocumentId == 0 || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
     }
+    if (m_activeFormEditor) {
+        if (!commitActiveFormFieldEditor()) {
+            return false;
+        }
+    }
     QScopedValueRollback<bool> saveGuard(m_saveInProgress, true);
     QString destPath = targetPath.isEmpty() ? m_currentFilePath : targetPath;
     if (destPath.isEmpty()) {
@@ -4293,7 +4306,9 @@ void PdfViewerWidget::activateFormFieldEditor(int pageIndex, const pdf::FormFiel
         return;
     }
     if (m_activeFormEditor) {
-        commitActiveFormFieldEditor();
+        if (!commitActiveFormFieldEditor()) {
+            return;
+        }
     }
 
     const QRectF wRect = formFieldWidgetRect(pageIndex, field);
@@ -4554,6 +4569,11 @@ bool PdfViewerWidget::eventFilter(QObject* watched, QEvent* event) {
 bool PdfViewerWidget::navigateFormField(bool forward) {
     if (!m_hasDocument || m_pageCount == 0) {
         return false;
+    }
+    if (m_activeFormEditor) {
+        if (!commitActiveFormFieldEditor()) {
+            return false;
+        }
     }
     struct FieldRef {
         int page;

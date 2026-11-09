@@ -7767,6 +7767,19 @@ int main(int argc, char* argv[]) {
                 std::cerr << "[FAIL] 62a: 'name' field not found" << std::endl;
                 return 1;
             }
+            const pdf::FormFieldItem* otherField = nullptr;
+            for (const auto& f : *fields) {
+                if (f.fieldName != "name" && !f.isReadOnly() &&
+                    (f.type == pdf::FormFieldType::TextField || f.type == pdf::FormFieldType::ComboBox)) {
+                    otherField = &f;
+                    break;
+                }
+            }
+            if (!otherField) {
+                std::cerr << "[FAIL] 62a: secondary form field not found" << std::endl;
+                return 1;
+            }
+
             // 1. Failing active editor commit (unsupported non-Latin text fails outline generation) MUST abort export
             viewer.activateFormFieldEditor(0, *nameField);
             if (!viewer.hasActiveFormFieldEditor()) {
@@ -7780,38 +7793,83 @@ int main(int argc, char* argv[]) {
             }
             const QString badInput = QStringLiteral("Unrenderable \uE000");
             lineEdit->setText(badInput);
+
+            // Export aborts on failed commit
             const QByteArray abortedBytes = viewer.exportFlattenedPagesPdf();
             if (!abortedBytes.isEmpty()) {
                 std::cerr << "[FAIL] 62a: exportFlattenedPagesPdf should have aborted when active editor commit failed" << std::endl;
                 return 1;
             }
             // Verify editor and user input remain active and preserved so user can correct it
-            if (!viewer.hasActiveFormFieldEditor()) {
-                std::cerr << "[FAIL] 62a: active form editor was prematurely cleared on failed commit" << std::endl;
-                return 1;
-            }
-            if (lineEdit->text() != badInput) {
-                std::cerr << "[FAIL] 62a: user text was discarded on failed commit" << std::endl;
+            if (!viewer.hasActiveFormFieldEditor() || lineEdit->text() != badInput) {
+                std::cerr << "[FAIL] 62a: active form editor or user text was prematurely cleared on failed commit" << std::endl;
                 return 1;
             }
 
-            // 2. User corrects text in the still-open editor: commit succeeds and dismisses editor
+            // Editor-switch attempt to otherField MUST be rejected, preserving the active editor and user input
+            viewer.activateFormFieldEditor(0, *otherField);
+            if (!viewer.hasActiveFormFieldEditor() || viewer.findChild<QLineEdit*>() != lineEdit || lineEdit->text() != badInput) {
+                std::cerr << "[FAIL] 62a: activateFormFieldEditor orphaned failed editor on switch attempt" << std::endl;
+                return 1;
+            }
+
+            // Tab navigation attempt MUST be rejected, preserving the active editor
+            if (viewer.navigateFormField(true)) {
+                std::cerr << "[FAIL] 62a: navigateFormField should have returned false when commit failed" << std::endl;
+                return 1;
+            }
+            if (!viewer.hasActiveFormFieldEditor() || lineEdit->text() != badInput) {
+                std::cerr << "[FAIL] 62a: navigateFormField discarded active editor or text on failed commit" << std::endl;
+                return 1;
+            }
+
+            // Save attempt MUST be rejected, preserving the active editor
+            QTemporaryDir saveTestDir;
+            const QString failSavePath = saveTestDir.filePath("fail_save.pdf");
+            if (viewer.saveDocument(failSavePath)) {
+                std::cerr << "[FAIL] 62a: saveDocument should have failed when active editor commit failed" << std::endl;
+                return 1;
+            }
+            if (!viewer.hasActiveFormFieldEditor() || lineEdit->text() != badInput) {
+                std::cerr << "[FAIL] 62a: saveDocument discarded active editor or text on failed commit" << std::endl;
+                return 1;
+            }
+
+            // 2. User corrects text in the still-open editor
             lineEdit->setText(QStringLiteral("CorrectedText"));
 
-            // exportFlattenedPagesPdf should commit active editor and return flattened bytes
+            // Switch to otherField now succeeds: commits 'name' and activates editor for otherField
+            viewer.activateFormFieldEditor(0, *otherField);
+            if (!viewer.hasActiveFormFieldEditor()) {
+                std::cerr << "[FAIL] 62a: failed to activate otherField after valid edit" << std::endl;
+                return 1;
+            }
+            // Check that 'name' was successfully updated
+            const auto* updatedFields = viewer.cachedFormFields(0);
+            if (!updatedFields) {
+                std::cerr << "[FAIL] 62a: cached form fields null after switch" << std::endl;
+                return 1;
+            }
+            bool nameCommitted = false;
+            for (const auto& f : *updatedFields) {
+                if (f.fieldName == "name" && f.value == "CorrectedText") {
+                    nameCommitted = true;
+                    break;
+                }
+            }
+            if (!nameCommitted) {
+                std::cerr << "[FAIL] 62a: 'name' field was not committed with 'CorrectedText' on valid switch" << std::endl;
+                return 1;
+            }
+
+            // exportFlattenedPagesPdf commits otherField and returns flattened bytes
             const QByteArray flattenedBytes = viewer.exportFlattenedPagesPdf();
             if (flattenedBytes.isEmpty()) {
                 std::cerr << "[FAIL] 62a: exportFlattenedPagesPdf returned empty on valid commit" << std::endl;
                 return 1;
             }
             if (viewer.hasActiveFormFieldEditor()) {
-                std::cerr << "[FAIL] 62a: active form editor was not dismissed after successful commit" << std::endl;
-                return 1;
-            }
-
-            // Verify active editor was committed
-            if (viewer.hasActiveFormFieldEditor()) {
-                std::cerr << "[FAIL] 62a: exportFlattenedPagesPdf did not dismiss/commit active form editor" << std::endl;
+                std::cerr << "[FAIL] 62a: active form editor was not dismissed after successful export" << std::endl;
                 return 1;
             }
 
