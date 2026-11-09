@@ -683,7 +683,9 @@ QByteArray PdfViewerWidget::extractPagesPdf(int firstPage, int lastPage, bool fl
         return {};
     }
     if (m_activeFormEditor) {
-        commitActiveFormFieldEditor();
+        if (!commitActiveFormFieldEditor()) {
+            return {};
+        }
     }
     return m_renderWorker.extractPagesSync(m_currentDocumentId, firstPage, lastPage, flatten);
 }
@@ -4386,9 +4388,9 @@ void PdfViewerWidget::activateFormFieldEditor(int pageIndex, const pdf::FormFiel
     }
 }
 
-void PdfViewerWidget::commitActiveFormFieldEditor() {
+bool PdfViewerWidget::commitActiveFormFieldEditor() {
     if (!m_activeFormEditor) {
-        return;
+        return true;
     }
     QWidget* editor = m_activeFormEditor.data();
     const int page = m_activeEditorPage;
@@ -4406,6 +4408,8 @@ void PdfViewerWidget::commitActiveFormFieldEditor() {
     m_activeEditorInitialText.clear();
     m_activeEditorInitialChoices.clear();
 
+    bool commitOk = true;
+
     if (type == pdf::FormFieldType::TextField) {
         QString newText;
         if (auto* lineEdit = qobject_cast<QLineEdit*>(editor)) {
@@ -4414,21 +4418,21 @@ void PdfViewerWidget::commitActiveFormFieldEditor() {
             newText = plainText->toPlainText();
         }
         if (newText != initialText) {
-            setFormFieldText(page, fieldName, controlIdx, newText);
+            commitOk = setFormFieldText(page, fieldName, controlIdx, newText);
         }
     } else if (type == pdf::FormFieldType::ComboBox) {
         if (auto* combo = qobject_cast<QComboBox*>(editor)) {
             if (combo->isEditable()) {
                 const QString newText = (combo->lineEdit() ? combo->lineEdit()->text() : combo->currentText());
                 if (newText != initialText) {
-                    setFormFieldText(page, fieldName, controlIdx, newText);
+                    commitOk = setFormFieldText(page, fieldName, controlIdx, newText);
                 }
             } else {
                 const int idx = combo->currentIndex();
                 if (idx >= 0) {
                     std::vector<int> newIndices = {idx};
                     if (newIndices != initialChoices) {
-                        setFormFieldChoice(page, fieldName, controlIdx, newIndices);
+                        commitOk = setFormFieldChoice(page, fieldName, controlIdx, newIndices);
                     }
                 }
             }
@@ -4442,13 +4446,14 @@ void PdfViewerWidget::commitActiveFormFieldEditor() {
                 }
             }
             if (newIndices != initialChoices) {
-                setFormFieldChoice(page, fieldName, controlIdx, newIndices);
+                commitOk = setFormFieldChoice(page, fieldName, controlIdx, newIndices);
             }
         }
     }
 
     editor->deleteLater();
     viewport()->setFocus();
+    return commitOk;
 }
 
 void PdfViewerWidget::cancelActiveFormFieldEditor() {

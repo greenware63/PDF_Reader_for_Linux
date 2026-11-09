@@ -4129,6 +4129,11 @@ int main(int argc, char* argv[]) {
     // --- TEST 42: Form Flattening & Export over IPC (Milestone M5 Slice 5) ---
     std::cout << "[TEST 42] Testing extractPages with flatten over IPC..." << std::endl;
     {
+        if (pdf::ipc::IPC_PROTOCOL_VERSION != 14) {
+            std::cerr << "[FAIL] 42: IPC_PROTOCOL_VERSION must be 14 after ExtractPagesRequest layout change" << std::endl;
+            return 1;
+        }
+
         QString fixturePdf = QFileInfo(samplePdf).dir().filePath(QStringLiteral("tests/fixtures/form_fields_test.pdf"));
         if (!QFile::exists(fixturePdf)) {
             fixturePdf = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../tests/fixtures/form_fields_test.pdf"));

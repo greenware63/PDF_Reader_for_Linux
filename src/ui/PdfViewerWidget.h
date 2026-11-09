@@ -219,7 +219,7 @@ public:
     QRectF formFieldWidgetRect(int pageIndex, const pdf::FormFieldItem& field) const;
 
     void activateFormFieldEditor(int pageIndex, const pdf::FormFieldItem& field);
-    void commitActiveFormFieldEditor();
+    bool commitActiveFormFieldEditor();
     void cancelActiveFormFieldEditor();
     bool hasActiveFormFieldEditor() const noexcept { return m_activeFormEditor != nullptr; }
 

@@ -648,9 +648,15 @@ bool PdfiumDocument::extractPages(int firstPage, int lastPage, std::vector<uint8
         const int flag = (mode == FlattenMode::Print) ? FLAT_PRINT : FLAT_NORMALDISPLAY;
         for (int i = 0; i < importedCount; ++i) {
             FPDF_PAGE p = FPDF_LoadPage(dest, i);
-            if (p) {
-                FPDFPage_Flatten(p, flag);
-                FPDF_ClosePage(p);
+            if (!p) {
+                ok = false;
+                break;
+            }
+            const int flattenRes = FPDFPage_Flatten(p, flag);
+            FPDF_ClosePage(p);
+            if (flattenRes == FLATTEN_FAIL) {
+                ok = false;
+                break;
             }
         }
     }
@@ -678,16 +684,24 @@ FlattenResult PdfiumDocument::flatten(FlattenMode mode) {
         return FlattenResult::NothingToDo;
     }
     bool anyFlattened = false;
+    bool anyFailed = false;
     const int flag = (mode == FlattenMode::Print) ? FLAT_PRINT : FLAT_NORMALDISPLAY;
     for (int i = 0; i < count; ++i) {
         FPDF_PAGE p = FPDF_LoadPage(m_doc.get(), i);
-        if (p) {
-            const int res = FPDFPage_Flatten(p, flag);
-            if (res == FLATTEN_SUCCESS) {
-                anyFlattened = true;
-            }
-            FPDF_ClosePage(p);
+        if (!p) {
+            anyFailed = true;
+            continue;
         }
+        const int res = FPDFPage_Flatten(p, flag);
+        if (res == FLATTEN_SUCCESS) {
+            anyFlattened = true;
+        } else if (res == FLATTEN_FAIL) {
+            anyFailed = true;
+        }
+        FPDF_ClosePage(p);
+    }
+    if (anyFailed) {
+        return FlattenResult::Failed;
     }
     return anyFlattened ? FlattenResult::Success : FlattenResult::NothingToDo;
 }

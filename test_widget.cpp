@@ -7767,6 +7767,7 @@ int main(int argc, char* argv[]) {
                 std::cerr << "[FAIL] 62a: 'name' field not found" << std::endl;
                 return 1;
             }
+            // 1. Failing active editor commit (unsupported non-Latin text fails outline generation) MUST abort export
             viewer.activateFormFieldEditor(0, *nameField);
             if (!viewer.hasActiveFormFieldEditor()) {
                 std::cerr << "[FAIL] 62a: form editor did not activate" << std::endl;
@@ -7775,6 +7776,24 @@ int main(int argc, char* argv[]) {
             auto* lineEdit = viewer.findChild<QLineEdit*>();
             if (!lineEdit) {
                 std::cerr << "[FAIL] 62a: active QLineEdit editor not found" << std::endl;
+                return 1;
+            }
+            lineEdit->setText(QStringLiteral("Unrenderable \uE000"));
+            const QByteArray abortedBytes = viewer.exportFlattenedPagesPdf();
+            if (!abortedBytes.isEmpty()) {
+                std::cerr << "[FAIL] 62a: exportFlattenedPagesPdf should have aborted when active editor commit failed" << std::endl;
+                return 1;
+            }
+
+            // 2. Successful active editor commit allows export to proceed
+            viewer.activateFormFieldEditor(0, *nameField);
+            if (!viewer.hasActiveFormFieldEditor()) {
+                std::cerr << "[FAIL] 62a: form editor did not activate for second edit" << std::endl;
+                return 1;
+            }
+            lineEdit = viewer.findChild<QLineEdit*>();
+            if (!lineEdit) {
+                std::cerr << "[FAIL] 62a: active QLineEdit editor not found for valid edit" << std::endl;
                 return 1;
             }
             lineEdit->setText(QStringLiteral("UncommittedEdit"));
