@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QAbstractScrollArea>
 #include <QString>
@@ -21,6 +21,7 @@
 #include "engine/PageText.h"
 #include "engine/SearchTypes.h"
 #include "engine/EditLog.h"
+#include "engine/FormFieldTypes.h"
 
 namespace ui {
 
@@ -198,6 +199,12 @@ public:
     bool undoEdit();
     bool redoEdit();
 
+    // AcroForm cached field list (M5 Slice 1)
+    const std::vector<pdf::FormFieldItem>* cachedFormFields(int pageIndex) const;
+    bool isFormFieldsTruncated(int pageIndex) const;
+    void requestFormFieldsForPage(int pageIndex);
+    void clearFormFieldsCache();
+
 #ifdef PDF_WORKER_TEST_HOOKS
     /// Kills the worker process as a crash would (recovery is exercised by tests).
     void simulateWorkerCrashForTesting() { m_renderWorker.killWorkerForTesting(); }
@@ -275,6 +282,7 @@ Q_SIGNALS:
     void redactionModeChanged(bool enabled);
     void redactionMarksChanged();
     void inkDrawingModeChanged(bool enabled);
+    void formFieldsLoaded(int pageIndex);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -432,6 +440,13 @@ private:
     bool m_saveInProgress{false};
     bool m_editInProgress{false};
     bool m_hoverHitTestPending{false};   // a tooltip hit test is waiting for the worker; further ones are skipped
+
+    struct PageFormFieldCache {
+        bool loaded{false};
+        bool truncated{false};
+        std::vector<pdf::FormFieldItem> fields;
+    };
+    mutable std::unordered_map<int, PageFormFieldCache> m_formFieldsCache;
 
     void refreshAfterEdit();
     void recoverAfterWorkerFailure();

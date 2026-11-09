@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <QHash>
 
 namespace pdf {
 
@@ -780,6 +781,148 @@ std::vector<AnnotationItem> PdfiumPage::listAnnotations(bool* truncated) {
             const uint64_t cost = annotationBudgetCost(item);
             if (budgetUsed + cost > kMaxAnnotationListBytes) {
                 clippedAny = true;   // stop here: the rest would not fit in one IPC frame
+                break;
+            }
+            budgetUsed += cost;
+            result.push_back(std::move(item));
+        }
+    }
+
+    return result;
+}
+
+std::vector<FormFieldItem> PdfiumPage::listFormFields(bool* truncated) {
+    bool clippedAny = false;
+    uint64_t budgetUsed = 0;
+    struct TruncGuard {
+        bool* out; const bool& flag;
+        ~TruncGuard() { if (out) *out = flag; }
+    } truncGuard{truncated, clippedAny};
+
+    if (!m_page || !m_form || !m_form->handle) {
+        return {};
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+
+    int annotCount = FPDFPage_GetAnnotCount(m_page);
+    if (annotCount <= 0) {
+        return {};
+    }
+
+    std::vector<FormFieldItem> result;
+    QHash<QString, int> fieldNameToControlIndex;
+
+    auto readWideField = [&](auto&& getter, size_t maxChars) -> QString {
+        unsigned long reqLen = getter(nullptr, 0);
+        if (reqLen <= 2) {
+            return {};
+        }
+        if (reqLen > 1024 * 1024) {
+            clippedAny = true;
+            return {};
+        }
+        std::vector<unsigned char> buf(reqLen + 2, 0);
+        unsigned long actual = getter(reinterpret_cast<FPDF_WCHAR*>(buf.data()), reqLen);
+        if (actual == 0 || actual <= 2) {
+            return {};
+        }
+        const char16_t* u16 = reinterpret_cast<const char16_t*>(buf.data());
+        size_t charCount = (actual - 2) / sizeof(char16_t);
+        QString str = QString::fromUtf16(u16, static_cast<qsizetype>(charCount));
+        if (static_cast<size_t>(str.size()) > maxChars) {
+            clippedAny = true;
+            str.truncate(static_cast<qsizetype>(maxChars));
+        }
+        return str;
+    };
+
+    for (int i = 0; i < annotCount; ++i) {
+        FPDF_ANNOTATION annot = FPDFPage_GetAnnot(m_page, i);
+        if (!annot) {
+            continue;
+        }
+
+        if (FPDFAnnot_GetSubtype(annot) != FPDF_ANNOT_WIDGET) {
+            FPDFPage_CloseAnnot(annot);
+            continue;
+        }
+
+        if (result.size() >= kMaxFormFieldsPerPage) {
+            clippedAny = true;
+            FPDFPage_CloseAnnot(annot);
+            break;
+        }
+
+        FormFieldItem item;
+        item.pageIndex = m_pageIndex;
+
+        FS_RECTF rect{};
+        if (FPDFAnnot_GetRect(annot, &rect)) {
+            item.left = rect.left;
+            item.top = rect.top;
+            item.right = rect.right;
+            item.bottom = rect.bottom;
+        }
+
+        int rawType = FPDFAnnot_GetFormFieldType(m_form->handle, annot);
+        switch (rawType) {
+            case FPDF_FORMFIELD_PUSHBUTTON:  item.type = FormFieldType::PushButton; break;
+            case FPDF_FORMFIELD_CHECKBOX:    item.type = FormFieldType::CheckBox; break;
+            case FPDF_FORMFIELD_RADIOBUTTON: item.type = FormFieldType::RadioButton; break;
+            case FPDF_FORMFIELD_COMBOBOX:    item.type = FormFieldType::ComboBox; break;
+            case FPDF_FORMFIELD_LISTBOX:     item.type = FormFieldType::ListBox; break;
+            case FPDF_FORMFIELD_TEXTFIELD:   item.type = FormFieldType::TextField; break;
+            case FPDF_FORMFIELD_SIGNATURE:   item.type = FormFieldType::Signature; break;
+            default:                         item.type = FormFieldType::Unknown; break;
+        }
+
+        int flags = FPDFAnnot_GetFormFieldFlags(m_form->handle, annot);
+        if (flags > 0) {
+            item.flags = static_cast<uint32_t>(flags);
+        }
+
+        item.fieldName = readWideField([&](FPDF_WCHAR* b, unsigned long l) {
+            return FPDFAnnot_GetFormFieldName(m_form->handle, annot, b, l);
+        }, kMaxFormFieldNameChars);
+
+        item.controlIndex = fieldNameToControlIndex[item.fieldName]++;
+
+        item.value = readWideField([&](FPDF_WCHAR* b, unsigned long l) {
+            return FPDFAnnot_GetFormFieldValue(m_form->handle, annot, b, l);
+        }, kMaxFormFieldTextCodeUnits);
+
+        if (item.type == FormFieldType::CheckBox || item.type == FormFieldType::RadioButton) {
+            item.isChecked = (FPDFAnnot_IsChecked(m_form->handle, annot) != 0);
+        }
+
+        if (item.type == FormFieldType::ComboBox || item.type == FormFieldType::ListBox) {
+            int optCount = FPDFAnnot_GetOptionCount(m_form->handle, annot);
+            if (optCount > 0) {
+                if (static_cast<size_t>(optCount) > kMaxFormFieldOptions) {
+                    clippedAny = true;
+                    optCount = static_cast<int>(kMaxFormFieldOptions);
+                }
+                item.options.reserve(static_cast<size_t>(optCount));
+                for (int o = 0; o < optCount; ++o) {
+                    QString optStr = readWideField([&](FPDF_WCHAR* b, unsigned long l) {
+                        return FPDFAnnot_GetOptionLabel(m_form->handle, annot, o, b, l);
+                    }, kMaxFormFieldOptionChars);
+                    item.options.push_back(std::move(optStr));
+
+                    if (FPDFAnnot_IsOptionSelected(m_form->handle, annot, o)) {
+                        item.selectedIndices.push_back(o);
+                    }
+                }
+            }
+        }
+
+        FPDFPage_CloseAnnot(annot);
+
+        if (item.isValid()) {
+            const uint64_t cost = formFieldBudgetCost(item);
+            if (budgetUsed + cost > kMaxFormFieldListBytes) {
+                clippedAny = true;
                 break;
             }
             budgetUsed += cost;

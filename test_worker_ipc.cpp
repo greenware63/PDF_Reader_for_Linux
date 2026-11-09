@@ -3617,6 +3617,127 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: bounded wire data round-trips, hostile frames are rejected, and worker dispatch survives." << std::endl;
     }
 
+    // --- TEST 39: Milestone M5 Slice 1 Read-only Form Field List (Protocol 13) ---
+    std::cout << "[TEST 39] Testing Form Field list IPC protocol, serialization bounds, and response budget (Milestone M5 Slice 1)..." << std::endl;
+    {
+        using namespace pdf::ipc;
+
+        // 39a: Wire serialization round-trip of FormFieldItem and ListFormFieldsResponse
+        pdf::FormFieldItem item;
+        item.pageIndex = 2;
+        item.fieldName = QStringLiteral("billing.country");
+        item.controlIndex = 1;
+        item.type = pdf::FormFieldType::ComboBox;
+        item.flags = pdf::FormFieldFlag::Combo | pdf::FormFieldFlag::Required;
+        item.left = 72.0;
+        item.top = 400.0;
+        item.right = 250.0;
+        item.bottom = 376.0;
+        item.value = QStringLiteral("Iran");
+        item.isChecked = false;
+        item.options = {QStringLiteral("Germany"), QStringLiteral("Iran"), QStringLiteral("France")};
+        item.selectedIndices = {1};
+
+        QByteArray bItem = serialize(item);
+        pdf::FormFieldItem itemBack;
+        if (!deserialize(bItem, itemBack) || itemBack.pageIndex != 2 ||
+            itemBack.fieldName != item.fieldName || itemBack.controlIndex != 1 ||
+            itemBack.type != pdf::FormFieldType::ComboBox || itemBack.flags != item.flags ||
+            itemBack.value != QStringLiteral("Iran") || itemBack.options.size() != 3 ||
+            itemBack.selectedIndices.size() != 1 || itemBack.selectedIndices[0] != 1) {
+            std::cerr << "[FAIL] 39a: FormFieldItem serialization round-trip failed" << std::endl;
+            return 1;
+        }
+
+        ListFormFieldsResponse resp;
+        resp.documentId = 55;
+        resp.pageIndex = 2;
+        resp.success = true;
+        resp.truncated = true;
+        resp.fields.push_back(item);
+
+        QByteArray bResp = serialize(resp);
+        ListFormFieldsResponse respBack;
+        if (!deserialize(bResp, respBack) || !respBack.success || !respBack.truncated ||
+            respBack.documentId != 55 || respBack.pageIndex != 2 || respBack.fields.size() != 1) {
+            std::cerr << "[FAIL] 39a: ListFormFieldsResponse round-trip failed" << std::endl;
+            return 1;
+        }
+
+        // 39b: Deserializer response budget enforcement (16 MiB per-page budget)
+        ListFormFieldsResponse overBudgetResp;
+        overBudgetResp.documentId = 55;
+        overBudgetResp.pageIndex = 0;
+        overBudgetResp.success = true;
+        for (int i = 0; i < 600; ++i) { // 600 x 32,768 code units x 2 bytes = ~39 MB > 16 MiB budget
+            pdf::FormFieldItem f;
+            f.pageIndex = 0;
+            f.controlIndex = i;
+            f.fieldName = QStringLiteral("field_") + QString::number(i);
+            f.value = QString(32768, QLatin1Char('X'));
+            overBudgetResp.fields.push_back(std::move(f));
+        }
+        ListFormFieldsResponse overBudgetBack;
+        if (deserialize(serialize(overBudgetResp), overBudgetBack)) {
+            std::cerr << "[FAIL] 39b: Deserializer accepted a form field list exceeding the 16 MiB budget" << std::endl;
+            return 1;
+        }
+
+        // 39c: Deserializer field count cap (> 1,000 fields per page)
+        QByteArray craftedOversizedCount;
+        QDataStream outCrafted(&craftedOversizedCount, QIODevice::WriteOnly);
+        outCrafted.setVersion(QDataStream::Qt_6_4);
+        outCrafted << static_cast<qint64>(55) << static_cast<qint32>(0) << true << false << static_cast<quint32>(1001);
+        ListFormFieldsResponse oversizedCountBack;
+        if (deserialize(craftedOversizedCount, oversizedCountBack)) {
+            std::cerr << "[FAIL] 39c: Deserializer accepted field count > 1000" << std::endl;
+            return 1;
+        }
+
+        // 39d: End-to-end IPC query through WorkerClient
+        WorkerClient client;
+        auto opened = client.openDocumentSync(390, samplePdf.toStdString());
+        if (opened.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 39d: Failed to open sample PDF for IPC form fields test" << std::endl;
+            return 1;
+        }
+
+        ListFormFieldsResponse syncList = client.listFormFieldsSync(390, 0, 5000);
+        if (!syncList.success || !syncList.fields.empty() || syncList.truncated) {
+            std::cerr << "[FAIL] 39d: Expected empty form field list on plain PDF page, got success="
+                      << syncList.success << " count=" << syncList.fields.size() << std::endl;
+            return 1;
+        }
+
+        // Out-of-bounds page index should return success = false
+        ListFormFieldsResponse badPage = client.listFormFieldsSync(390, -1, 5000);
+        if (badPage.success) {
+            std::cerr << "[FAIL] 39d: Out-of-bounds page should fail" << std::endl;
+            return 1;
+        }
+
+        // Test with annots_forms.pdf
+        QString formsPdf = QFileInfo(samplePdf).dir().filePath(QStringLiteral("tests/fixtures/redaction/annots_forms.pdf"));
+        if (!QFileInfo::exists(formsPdf)) {
+            formsPdf = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../tests/fixtures/redaction/annots_forms.pdf"));
+        }
+        if (QFileInfo::exists(formsPdf)) {
+            formsPdf = QFileInfo(formsPdf).canonicalFilePath();
+            auto openedForms = client.openDocumentSync(391, formsPdf.toStdString());
+            if (openedForms.error == pdf::DocumentError::None) {
+                auto formList = client.listFormFieldsSync(391, 0, 5000);
+                if (!formList.success || formList.fields.empty() || formList.truncated) {
+                    std::cerr << "[FAIL] 39d: Expected form fields from annots_forms.pdf over IPC, got success="
+                              << formList.success << " count=" << formList.fields.size() << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        client.closeDocumentSync();
+        client.stop();
+        std::cout << "  -> Passed: FormFieldItem wire format, 16 MiB budget enforcement, and WorkerClient IPC round-trip verified." << std::endl;
+    }
 
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;

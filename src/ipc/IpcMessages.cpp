@@ -1,4 +1,4 @@
-﻿#include "ipc/IpcMessages.h"
+#include "ipc/IpcMessages.h"
 #include <algorithm>
 #include <limits>
 
@@ -542,6 +542,90 @@ QDataStream& operator>>(QDataStream& in, AnnotationItem& item) {
     }
     if (in.status() != QDataStream::Ok || !isValidAnnotationPayload(item)) {
         in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
+// FormFieldItem
+QDataStream& operator<<(QDataStream& out, const FormFieldItem& item) {
+    out << static_cast<qint32>(item.pageIndex)
+        << item.fieldName
+        << static_cast<qint32>(item.controlIndex)
+        << static_cast<quint32>(item.type)
+        << static_cast<quint32>(item.flags)
+        << item.left
+        << item.top
+        << item.right
+        << item.bottom
+        << item.value
+        << item.isChecked
+        << static_cast<quint32>(item.options.size());
+    for (const auto& opt : item.options) {
+        out << opt;
+    }
+    out << static_cast<quint32>(item.selectedIndices.size());
+    for (int idx : item.selectedIndices) {
+        out << static_cast<qint32>(idx);
+    }
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, FormFieldItem& item) {
+    qint32 pageIdx = 0, ctrlIdx = 0;
+    quint32 typeVal = 0, flags = 0;
+    in >> pageIdx >> item.fieldName >> ctrlIdx >> typeVal >> flags;
+    item.pageIndex = pageIdx;
+    item.controlIndex = ctrlIdx;
+    item.type = (typeVal <= static_cast<quint32>(FormFieldType::Signature))
+                ? static_cast<FormFieldType>(typeVal)
+                : FormFieldType::Unknown;
+    item.flags = flags;
+
+    in >> item.left >> item.top >> item.right >> item.bottom;
+    if (!item.isValid()) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+
+    in >> item.value >> item.isChecked;
+    if (item.fieldName.size() > static_cast<qsizetype>(kMaxFormFieldNameChars) ||
+        item.value.size() > static_cast<qsizetype>(kMaxFormFieldTextCodeUnits)) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+
+    quint32 optCount = 0;
+    in >> optCount;
+    if (!validateCollection(in, optCount, static_cast<quint32>(kMaxFormFieldOptions), 4)) {
+        return in;
+    }
+    item.options.clear();
+    item.options.reserve(optCount);
+    for (quint32 i = 0; i < optCount; ++i) {
+        QString opt;
+        in >> opt;
+        if (opt.size() > static_cast<qsizetype>(kMaxFormFieldOptionChars)) {
+            in.setStatus(QDataStream::ReadCorruptData);
+            return in;
+        }
+        item.options.push_back(std::move(opt));
+    }
+
+    quint32 selCount = 0;
+    in >> selCount;
+    if (!validateCollection(in, selCount, static_cast<quint32>(kMaxFormFieldOptions), 4)) {
+        return in;
+    }
+    item.selectedIndices.clear();
+    item.selectedIndices.reserve(selCount);
+    for (quint32 i = 0; i < selCount; ++i) {
+        qint32 idx = 0;
+        in >> idx;
+        if (idx < 0 || (optCount > 0 && static_cast<quint32>(idx) >= optCount) || (optCount == 0 && selCount > 0)) {
+            in.setStatus(QDataStream::ReadCorruptData);
+            return in;
+        }
+        item.selectedIndices.push_back(idx);
     }
     return in;
 }
@@ -1488,6 +1572,68 @@ QDataStream& operator>>(QDataStream& in, SaveDocumentResponse& res) {
     res.bytesWritten = bytes;
     if (res.errorMessage.size() > 4096) {
         in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
+// ListFormFieldsRequest
+QDataStream& operator<<(QDataStream& out, const ListFormFieldsRequest& req) {
+    out << static_cast<qint64>(req.documentId) << static_cast<qint32>(req.pageIndex);
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, ListFormFieldsRequest& req) {
+    qint64 docId = 0;
+    qint32 pageIdx = 0;
+    in >> docId >> pageIdx;
+    req.documentId = docId;
+    req.pageIndex = pageIdx;
+    if (pageIdx < 0) {
+        in.setStatus(QDataStream::ReadCorruptData);
+    }
+    return in;
+}
+
+// ListFormFieldsResponse
+QDataStream& operator<<(QDataStream& out, const ListFormFieldsResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << static_cast<qint32>(res.pageIndex)
+        << res.success
+        << res.truncated
+        << static_cast<quint32>(res.fields.size());
+    for (const auto& f : res.fields) {
+        out << f;
+    }
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, ListFormFieldsResponse& res) {
+    qint64 docId = 0;
+    qint32 pageIdx = 0;
+    in >> docId >> pageIdx >> res.success >> res.truncated;
+    res.documentId = docId;
+    res.pageIndex = pageIdx;
+
+    quint32 count = 0;
+    in >> count;
+    if (!validateCollection(in, count, static_cast<quint32>(kMaxFormFieldsPerPage), 32)) {
+        return in;
+    }
+    res.fields.clear();
+    res.fields.reserve(std::min<quint32>(count, 256));
+    uint64_t budgetUsed = 0;
+    for (quint32 i = 0; i < count; ++i) {
+        FormFieldItem item;
+        in >> item;
+        if (in.status() != QDataStream::Ok) {
+            return in;
+        }
+        budgetUsed += formFieldBudgetCost(item);
+        if (budgetUsed > kMaxFormFieldListBytes) {
+            in.setStatus(QDataStream::ReadCorruptData);
+            return in;
+        }
+        res.fields.push_back(std::move(item));
     }
     return in;
 }

@@ -1,4 +1,4 @@
-﻿#include "WorkerServer.h"
+#include "WorkerServer.h"
 #include <QCoreApplication>
 #include <QRandomGenerator>
 #include <algorithm>
@@ -39,6 +39,7 @@ bool isRequestType(uint32_t type) {
         case ipc::MessageType::ExtractPagesRequest:
         case ipc::MessageType::RedactDocumentRequest:
         case ipc::MessageType::ListAnnotationsRequest:
+        case ipc::MessageType::ListFormFieldsRequest:
         case ipc::MessageType::HitTestAnnotationRequest:
         case ipc::MessageType::AddAnnotationRequest:
         case ipc::MessageType::RemoveAnnotationRequest:
@@ -93,6 +94,10 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
             this, &WorkerServer::onAnnotationsReady, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::annotationsFailed,
             this, &WorkerServer::onAnnotationsFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::formFieldsReady,
+            this, &WorkerServer::onFormFieldsReady, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::formFieldsFailed,
+            this, &WorkerServer::onFormFieldsFailed, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::annotationHitTestReady,
             this, &WorkerServer::onAnnotationHitTestReady, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::annotationHitTestFailed,
@@ -548,6 +553,16 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             break;
         }
 
+        case ipc::MessageType::ListFormFieldsRequest: {
+            ipc::ListFormFieldsRequest req;
+            if (ipc::deserialize(payload, req)) {
+                m_engineWorker.requestListFormFields(req.documentId, req.pageIndex);
+            } else {
+                onFormFieldsFailed(req.documentId, req.pageIndex);
+            }
+            break;
+        }
+
         case ipc::MessageType::HitTestAnnotationRequest: {
             ipc::HitTestAnnotationRequest req;
             if (ipc::deserialize(payload, req)) {
@@ -911,6 +926,24 @@ void WorkerServer::onAnnotationsFailed(int64_t documentId, int pageIndex) {
     res.pageIndex = pageIndex;
     res.success = false;
     sendPacket(ipc::MessageType::ListAnnotationsResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onFormFieldsReady(int64_t documentId, int pageIndex, const std::vector<pdf::FormFieldItem>& fields, bool truncated) {
+    ipc::ListFormFieldsResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.success = true;
+    res.fields = fields;
+    res.truncated = truncated;
+    sendPacket(ipc::MessageType::ListFormFieldsResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onFormFieldsFailed(int64_t documentId, int pageIndex) {
+    ipc::ListFormFieldsResponse res;
+    res.documentId = documentId;
+    res.pageIndex = pageIndex;
+    res.success = false;
+    sendPacket(ipc::MessageType::ListFormFieldsResponse, ipc::serialize(res));
 }
 
 void WorkerServer::onAnnotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation) {

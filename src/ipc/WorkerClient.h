@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "ipc/IpcMessages.h"
 
@@ -30,8 +30,10 @@ public:
     void enqueueRequests(std::vector<TileRenderRequest> requests);
     void requestPageText(int64_t documentId, int pageIndex);
     void requestListAnnotations(int64_t documentId, int pageIndex);
+    void requestListFormFields(int64_t documentId, int pageIndex);
     void requestHitTestAnnotation(int64_t documentId, int pageIndex, double xPoints, double yPoints);
     ListAnnotationsResponse listAnnotationsSync(int64_t documentId, int pageIndex, int timeoutMs = 10000);
+    ListFormFieldsResponse listFormFieldsSync(int64_t documentId, int pageIndex, int timeoutMs = 10000);
     HitTestAnnotationResponse hitTestAnnotationSync(int64_t documentId, int pageIndex, double xPoints, double yPoints, int timeoutMs = 5000);
     std::shared_ptr<const PageText> getPageTextSync(int64_t documentId, int pageIndex);
     void startSearch(int64_t documentId, int64_t searchId, const QString& query,
@@ -93,6 +95,8 @@ Q_SIGNALS:
     void pageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text);
     void annotationsReady(int64_t documentId, int pageIndex, const std::vector<pdf::AnnotationItem>& annotations, bool truncated);
     void annotationsFailed(int64_t documentId, int pageIndex);
+    void formFieldsReady(int64_t documentId, int pageIndex, const std::vector<pdf::FormFieldItem>& fields, bool truncated);
+    void formFieldsFailed(int64_t documentId, int pageIndex);
     void annotationHitTestReady(int64_t documentId, int pageIndex, bool hit, const pdf::AnnotationItem& annotation);
     void annotationHitTestFailed(int64_t documentId, int pageIndex);
     void searchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex,

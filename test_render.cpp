@@ -15,6 +15,7 @@
 #include "engine/PageText.h"
 #include "engine/PdfiumDocument.h"
 #include "engine/PdfiumPage.h"
+#include "engine/FormFieldTypes.h"
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -4552,8 +4553,91 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: /FS file bytes persist exactly, filenames are fail-closed, and listing stays metadata-only." << std::endl;
     }
 
+    // --- TEST 44: Milestone M5 Slice 1 Read-only Form Field Enumeration ---
+    std::cout << "[TEST 44] Testing interactive form field enumeration (Milestone M5 Slice 1)..." << std::endl;
+    {
+        // 44a: Form fields on a plain document without widgets
+        auto plainDoc = pdf::createDocument();
+        if (plainDoc->loadFromFile(samplePath) == pdf::DocumentError::None) {
+            auto plainPage = plainDoc->getPage(0);
+            if (plainPage) {
+                bool truncated = false;
+                auto fields = plainPage->listFormFields(&truncated);
+                if (!fields.empty() || truncated) {
+                    std::cerr << "[FAIL] Test 44a: Plain page must return empty form fields list without truncation" << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // 44b: Form field enumeration on annots_forms.pdf
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        std::string formsPath = root + "/tests/fixtures/redaction/annots_forms.pdf";
+        if (!QFile::exists(QString::fromStdString(formsPath))) {
+            formsPath = "tests/fixtures/redaction/annots_forms.pdf";
+        }
+        if (QFile::exists(QString::fromStdString(formsPath))) {
+            auto formsDoc = pdf::createDocument();
+            if (formsDoc->loadFromFile(formsPath) != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Test 44b: Failed to load annots_forms.pdf" << std::endl;
+                return 1;
+            }
+            auto formsPage = formsDoc->getPage(0);
+            if (!formsPage) {
+                std::cerr << "[FAIL] Test 44b: Page 0 is null in annots_forms.pdf" << std::endl;
+                return 1;
+            }
+            bool truncated = false;
+            auto fields = formsPage->listFormFields(&truncated);
+            if (fields.empty()) {
+                std::cerr << "[FAIL] Test 44b: Expected form fields in annots_forms.pdf, got 0" << std::endl;
+                return 1;
+            }
+            if (truncated) {
+                std::cerr << "[FAIL] Test 44b: annots_forms.pdf should not be truncated" << std::endl;
+                return 1;
+            }
+            const auto& firstField = fields[0];
+            if (!firstField.isValid() || firstField.pageIndex != 0 || firstField.controlIndex < 0) {
+                std::cerr << "[FAIL] Test 44b: Invalid FormFieldItem extracted" << std::endl;
+                return 1;
+            }
+            if (firstField.right <= firstField.left || firstField.top <= firstField.bottom) {
+                std::cerr << "[FAIL] Test 44b: Invalid bounding box geometry for form field" << std::endl;
+                return 1;
+            }
+            // Verify contains() hit testing
+            const double midX = (firstField.left + firstField.right) / 2.0;
+            const double midY = (firstField.bottom + firstField.top) / 2.0;
+            if (!firstField.contains(midX, midY)) {
+                std::cerr << "[FAIL] Test 44b: FormFieldItem::contains failed for center point" << std::endl;
+                return 1;
+            }
+            if (firstField.contains(firstField.left - 10.0, midY)) {
+                std::cerr << "[FAIL] Test 44b: FormFieldItem::contains false positive outside rect" << std::endl;
+                return 1;
+            }
+        }
+
+        // 44c: Budget calculation check
+        pdf::FormFieldItem testBudgetField;
+        testBudgetField.fieldName = QStringLiteral("testField");
+        testBudgetField.value = QStringLiteral("someValue");
+        testBudgetField.options = {QStringLiteral("opt1"), QStringLiteral("opt2")};
+        testBudgetField.selectedIndices = {0};
+        const uint64_t cost = pdf::formFieldBudgetCost(testBudgetField);
+        if (cost <= 128) {
+            std::cerr << "[FAIL] Test 44c: formFieldBudgetCost failed to account for field content" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: Form fields enumerated cleanly with valid geometry, control indices, and budget tracking." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 43 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 44 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
