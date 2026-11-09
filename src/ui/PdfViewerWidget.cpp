@@ -57,11 +57,15 @@ void rotateRectPointsForDisplay(const pdf::PageCharBox& r, double pageW, double 
 #include <QDir>
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QApplication>
 #include <QClipboard>
 #include <QScopedValueRollback>
 #include <QToolTip>
 #include <QInputDialog>
 #include <QHelpEvent>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QComboBox>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -113,6 +117,7 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
             [this](int64_t documentId, int pageIndex, const std::vector<pdf::FormFieldItem>& fields, bool truncated) {
                 if (documentId == m_currentDocumentId && pageIndex >= 0 && pageIndex < m_pageCount) {
                     auto& entry = m_formFieldsCache[pageIndex];
+                    entry.requested = false;
                     entry.loaded = true;
                     entry.truncated = truncated;
                     entry.fields = fields;
@@ -123,6 +128,7 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
             [this](int64_t documentId, int pageIndex) {
                 if (documentId == m_currentDocumentId && pageIndex >= 0 && pageIndex < m_pageCount) {
                     auto& entry = m_formFieldsCache[pageIndex];
+                    entry.requested = false;
                     entry.loaded = true;
                     entry.truncated = false;
                     entry.fields.clear();
@@ -898,6 +904,7 @@ void PdfViewerWidget::onScrollValueChanged() {
             Q_EMIT pageChanged(m_currentPage + 1, pageCount());
         }
     }
+    updateActiveFormFieldEditorGeometry();
     viewport()->update();
 }
 
@@ -973,6 +980,7 @@ void PdfViewerWidget::ensurePageTextRequested(int pageIndex) {
 void PdfViewerWidget::resizeEvent(QResizeEvent* event) {
     QAbstractScrollArea::resizeEvent(event);
     updateLayoutGeometry();
+    updateActiveFormFieldEditorGeometry();
 }
 
 void PdfViewerWidget::wheelEvent(QWheelEvent* event) {
@@ -1651,6 +1659,44 @@ void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
                 return;
             }
         }
+        if (m_activeFormEditor) {
+            const QPoint vpPt = event->position().toPoint();
+            if (!m_activeFormEditor->geometry().contains(vpPt)) {
+                commitActiveFormFieldEditor();
+            }
+        }
+
+        int formHitPage = -1;
+        const auto* hitField = hitTestFormField(docX, docY, &formHitPage);
+        if (hitField && formHitPage >= 0) {
+            if (hitField->isReadOnly()) {
+                event->accept();
+                return;
+            }
+            switch (hitField->type) {
+                case pdf::FormFieldType::PushButton:
+                    event->accept();
+                    return;
+                case pdf::FormFieldType::CheckBox:
+                    toggleFormField(formHitPage, hitField->fieldName, hitField->controlIndex, !hitField->isChecked);
+                    event->accept();
+                    return;
+                case pdf::FormFieldType::RadioButton:
+                    if (!hitField->isChecked) {
+                        toggleFormField(formHitPage, hitField->fieldName, hitField->controlIndex, true);
+                    }
+                    event->accept();
+                    return;
+                case pdf::FormFieldType::TextField:
+                case pdf::FormFieldType::ComboBox:
+                case pdf::FormFieldType::ListBox:
+                    activateFormFieldEditor(formHitPage, *hitField);
+                    event->accept();
+                    return;
+                default:
+                    break;
+            }
+        }
 
         int page = m_layout.getPageAt(docX, docY);
         if (page >= 0) {
@@ -1782,10 +1828,29 @@ void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
             }
         }
     } else if (isDocumentOpen()) {
-        // Hover cursor: show IBeam if over text
         const double dpr = effectiveDpr();
         const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(event->position().x() * dpr));
         const int64_t docY = m_docScrollY + static_cast<int64_t>(std::round(event->position().y() * dpr));
+
+        int formHitPage = -1;
+        const auto* hitField = hitTestFormField(docX, docY, &formHitPage);
+        if (hitField) {
+            if (hitField->isReadOnly()) {
+                viewport()->setCursor(Qt::ForbiddenCursor);
+            } else if (hitField->type == pdf::FormFieldType::TextField) {
+                viewport()->setCursor(Qt::IBeamCursor);
+            } else if (hitField->type == pdf::FormFieldType::CheckBox ||
+                       hitField->type == pdf::FormFieldType::RadioButton ||
+                       hitField->type == pdf::FormFieldType::ComboBox ||
+                       hitField->type == pdf::FormFieldType::ListBox ||
+                       hitField->type == pdf::FormFieldType::PushButton) {
+                viewport()->setCursor(Qt::PointingHandCursor);
+            } else {
+                viewport()->setCursor(Qt::ArrowCursor);
+            }
+            QAbstractScrollArea::mouseMoveEvent(event);
+            return;
+        }
 
         int page = m_layout.getPageAt(docX, docY);
         bool overText = false;
@@ -1875,6 +1940,22 @@ void PdfViewerWidget::keyPressEvent(QKeyEvent* event) {
 
     const int key = event->key();
     const Qt::KeyboardModifiers mods = event->modifiers();
+
+    if (key == Qt::Key_Tab && !(mods & Qt::ControlModifier)) {
+        if (navigateFormField(true)) {
+            event->accept();
+            return;
+        }
+    } else if (key == Qt::Key_Backtab || (key == Qt::Key_Tab && (mods & Qt::ShiftModifier))) {
+        if (navigateFormField(false)) {
+            event->accept();
+            return;
+        }
+    } else if (key == Qt::Key_Escape && m_activeFormEditor) {
+        cancelActiveFormFieldEditor();
+        event->accept();
+        return;
+    }
 
     const int singleStepY = verticalScrollBar()->singleStep() > 0 ? verticalScrollBar()->singleStep() : 40;
     const int singleStepX = horizontalScrollBar()->singleStep() > 0 ? horizontalScrollBar()->singleStep() : 40;
@@ -2012,6 +2093,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     if (visPages.isValid()) {
         for (int p = visPages.firstVisiblePage; p <= visPages.lastVisiblePage; ++p) {
             ensurePageTextRequested(p);
+            requestFormFieldsForPage(p);
 
             const auto& pl = m_layout.getPageLayout(p);
             QRectF pageRect(
@@ -3312,6 +3394,17 @@ bool PdfViewerWidget::viewportEvent(QEvent* event) {
         const double dpr = effectiveDpr();
         const int64_t docX = m_docScrollX + static_cast<int64_t>(std::round(helpEvent->pos().x() * dpr));
         const int64_t docY = m_docScrollY + static_cast<int64_t>(std::round(helpEvent->pos().y() * dpr));
+
+        int formHitPage = -1;
+        const auto* hitField = hitTestFormField(docX, docY, &formHitPage);
+        if (hitField) {
+            const QString tip = formFieldTooltipHtml(*hitField);
+            if (!tip.isEmpty()) {
+                QToolTip::showText(helpEvent->globalPos(), tip, viewport());
+                return true;
+            }
+        }
+
         const int page = m_layout.getPageAt(docX, docY);
         if (page >= 0) {
             double ax = 0.0, ay = 0.0;
@@ -3382,6 +3475,64 @@ bool PdfViewerWidget::undoEdit() {
             Q_EMIT loadError(tr("Could not undo modification: %1").arg(response.errorMessage));
             return false;
         }
+    } else if (cmd.type == pdf::EditCommandType::SetFormFieldText) {
+        const auto response = m_renderWorker.setFormFieldTextSync(m_currentDocumentId, cmd.pageIndex, cmd.fieldName, cmd.controlIndex, cmd.textBefore, cmd.vectorOutlines);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.redo(restored);
+            Q_EMIT loadError(tr("Could not undo form text change: %1").arg(response.errorMessage));
+            return false;
+        }
+        auto it = m_formFieldsCache.find(cmd.pageIndex);
+        if (it != m_formFieldsCache.end() && it->second.loaded) {
+            for (auto& f : it->second.fields) {
+                if (f.fieldName == cmd.fieldName && f.controlIndex == cmd.controlIndex) {
+                    f.value = cmd.textBefore;
+                    break;
+                }
+            }
+        }
+    } else if (cmd.type == pdf::EditCommandType::ToggleFormField) {
+        const auto response = m_renderWorker.toggleFormFieldSync(m_currentDocumentId, cmd.pageIndex, cmd.fieldName, cmd.controlIndex, cmd.checkedBefore);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.redo(restored);
+            Q_EMIT loadError(tr("Could not undo toggle: %1").arg(response.errorMessage));
+            return false;
+        }
+        auto it = m_formFieldsCache.find(cmd.pageIndex);
+        if (it != m_formFieldsCache.end() && it->second.loaded) {
+            for (auto& f : it->second.fields) {
+                if (f.fieldName == cmd.fieldName) {
+                    if (f.controlIndex == cmd.controlIndex) {
+                        f.isChecked = cmd.checkedBefore;
+                    } else if (f.type == pdf::FormFieldType::RadioButton && cmd.checkedBefore) {
+                        f.isChecked = false;
+                    }
+                }
+            }
+        }
+    } else if (cmd.type == pdf::EditCommandType::SetFormFieldChoice) {
+        const auto response = m_renderWorker.setFormFieldChoiceSync(m_currentDocumentId, cmd.pageIndex, cmd.fieldName, cmd.controlIndex, cmd.choiceBefore);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.redo(restored);
+            Q_EMIT loadError(tr("Could not undo choice change: %1").arg(response.errorMessage));
+            return false;
+        }
+        auto it = m_formFieldsCache.find(cmd.pageIndex);
+        if (it != m_formFieldsCache.end() && it->second.loaded) {
+            for (auto& f : it->second.fields) {
+                if (f.fieldName == cmd.fieldName && f.controlIndex == cmd.controlIndex) {
+                    f.selectedIndices = cmd.choiceBefore;
+                    if (!cmd.choiceBefore.empty() && cmd.choiceBefore[0] >= 0 &&
+                        cmd.choiceBefore[0] < static_cast<int>(f.options.size())) {
+                        f.value = f.options[cmd.choiceBefore[0]];
+                    }
+                    break;
+                }
+            }
+        }
     }
     refreshAfterEdit();
     return true;
@@ -3421,6 +3572,64 @@ bool PdfViewerWidget::redoEdit() {
             Q_EMIT loadError(tr("Could not redo modification: %1").arg(response.errorMessage));
             return false;
         }
+    } else if (cmd.type == pdf::EditCommandType::SetFormFieldText) {
+        const auto response = m_renderWorker.setFormFieldTextSync(m_currentDocumentId, cmd.pageIndex, cmd.fieldName, cmd.controlIndex, cmd.textAfter, cmd.vectorOutlines);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.undo(restored);
+            Q_EMIT loadError(tr("Could not redo form text change: %1").arg(response.errorMessage));
+            return false;
+        }
+        auto it = m_formFieldsCache.find(cmd.pageIndex);
+        if (it != m_formFieldsCache.end() && it->second.loaded) {
+            for (auto& f : it->second.fields) {
+                if (f.fieldName == cmd.fieldName && f.controlIndex == cmd.controlIndex) {
+                    f.value = cmd.textAfter;
+                    break;
+                }
+            }
+        }
+    } else if (cmd.type == pdf::EditCommandType::ToggleFormField) {
+        const auto response = m_renderWorker.toggleFormFieldSync(m_currentDocumentId, cmd.pageIndex, cmd.fieldName, cmd.controlIndex, cmd.checkedAfter);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.undo(restored);
+            Q_EMIT loadError(tr("Could not redo toggle: %1").arg(response.errorMessage));
+            return false;
+        }
+        auto it = m_formFieldsCache.find(cmd.pageIndex);
+        if (it != m_formFieldsCache.end() && it->second.loaded) {
+            for (auto& f : it->second.fields) {
+                if (f.fieldName == cmd.fieldName) {
+                    if (f.controlIndex == cmd.controlIndex) {
+                        f.isChecked = cmd.checkedAfter;
+                    } else if (f.type == pdf::FormFieldType::RadioButton && cmd.checkedAfter) {
+                        f.isChecked = false;
+                    }
+                }
+            }
+        }
+    } else if (cmd.type == pdf::EditCommandType::SetFormFieldChoice) {
+        const auto response = m_renderWorker.setFormFieldChoiceSync(m_currentDocumentId, cmd.pageIndex, cmd.fieldName, cmd.controlIndex, cmd.choiceAfter);
+        if (!response.success) {
+            pdf::EditCommand restored;
+            m_editLog.undo(restored);
+            Q_EMIT loadError(tr("Could not redo choice change: %1").arg(response.errorMessage));
+            return false;
+        }
+        auto it = m_formFieldsCache.find(cmd.pageIndex);
+        if (it != m_formFieldsCache.end() && it->second.loaded) {
+            for (auto& f : it->second.fields) {
+                if (f.fieldName == cmd.fieldName && f.controlIndex == cmd.controlIndex) {
+                    f.selectedIndices = cmd.choiceAfter;
+                    if (!cmd.choiceAfter.empty() && cmd.choiceAfter[0] >= 0 &&
+                        cmd.choiceAfter[0] < static_cast<int>(f.options.size())) {
+                        f.value = f.options[cmd.choiceAfter[0]];
+                    }
+                    break;
+                }
+            }
+        }
     }
     refreshAfterEdit();
     return true;
@@ -3449,11 +3658,24 @@ void PdfViewerWidget::recoverAfterWorkerFailure() {
     bool ok = true;
     for (const auto& op : m_editLog.opsSinceSave()) {
         bool done = false;
-        if (op.add) {
-            done = m_renderWorker.addAnnotationSync(m_currentDocumentId, op.pageIndex, op.item).success;
-        } else {
-            const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, op.pageIndex, op.name);
-            done = response.success && response.removedCount > 0;
+        switch (op.kind) {
+            case pdf::EditOp::Kind::AddAnnotation:
+                done = m_renderWorker.addAnnotationSync(m_currentDocumentId, op.pageIndex, op.item).success;
+                break;
+            case pdf::EditOp::Kind::RemoveAnnotation: {
+                const auto response = m_renderWorker.removeAnnotationSync(m_currentDocumentId, op.pageIndex, op.name);
+                done = response.success && response.removedCount > 0;
+                break;
+            }
+            case pdf::EditOp::Kind::SetFormFieldText:
+                done = m_renderWorker.setFormFieldTextSync(m_currentDocumentId, op.pageIndex, op.fieldName, op.controlIndex, op.text, op.vectorOutlines).success;
+                break;
+            case pdf::EditOp::Kind::ToggleFormField:
+                done = m_renderWorker.toggleFormFieldSync(m_currentDocumentId, op.pageIndex, op.fieldName, op.controlIndex, op.checked).success;
+                break;
+            case pdf::EditOp::Kind::SetFormFieldChoice:
+                done = m_renderWorker.setFormFieldChoiceSync(m_currentDocumentId, op.pageIndex, op.fieldName, op.controlIndex, op.selectedIndices).success;
+                break;
         }
         if (!done) {
             ok = false;
@@ -3706,14 +3928,490 @@ void PdfViewerWidget::requestFormFieldsForPage(int pageIndex) {
         return;
     }
     auto it = m_formFieldsCache.find(pageIndex);
-    if (it != m_formFieldsCache.end() && it->second.loaded) {
-        return; // already cached
+    if (it != m_formFieldsCache.end() && (it->second.loaded || it->second.requested)) {
+        return;
     }
+    m_formFieldsCache[pageIndex].requested = true;
     m_renderWorker.requestListFormFields(m_currentDocumentId, pageIndex);
 }
 
 void PdfViewerWidget::clearFormFieldsCache() {
+    cancelActiveFormFieldEditor();
     m_formFieldsCache.clear();
+}
+
+bool PdfViewerWidget::setFormFieldText(int pageIndex, const QString& fieldName, int controlIndex, const QString& text) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (pageIndex < 0 || pageIndex >= m_pageCount || fieldName.isEmpty() || controlIndex < 0) {
+        return false;
+    }
+    if (text.size() > static_cast<qsizetype>(pdf::kMaxFormFieldTextCodeUnits)) {
+        return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    QString oldValue;
+    auto cacheIt = m_formFieldsCache.find(pageIndex);
+    if (cacheIt != m_formFieldsCache.end() && cacheIt->second.loaded) {
+        for (const auto& f : cacheIt->second.fields) {
+            if (f.fieldName == fieldName && f.controlIndex == controlIndex) {
+                if (f.isReadOnly()) return false;
+                oldValue = f.value;
+                break;
+            }
+        }
+    }
+
+    const auto response = m_renderWorker.setFormFieldTextSync(m_currentDocumentId, pageIndex, fieldName, controlIndex, text, {});
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not set form field text: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordSetFormFieldText(pageIndex, fieldName, controlIndex, oldValue, text, {});
+
+    if (cacheIt != m_formFieldsCache.end() && cacheIt->second.loaded) {
+        for (auto& f : cacheIt->second.fields) {
+            if (f.fieldName == fieldName && f.controlIndex == controlIndex) {
+                f.value = text;
+                break;
+            }
+        }
+    }
+
+    refreshAfterEdit();
+    Q_EMIT formFieldEdited(pageIndex, fieldName, controlIndex);
+    return true;
+}
+
+bool PdfViewerWidget::toggleFormField(int pageIndex, const QString& fieldName, int controlIndex, bool checked) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (pageIndex < 0 || pageIndex >= m_pageCount || fieldName.isEmpty() || controlIndex < 0) {
+        return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    bool oldChecked = false;
+    bool isRadio = false;
+    auto cacheIt = m_formFieldsCache.find(pageIndex);
+    if (cacheIt != m_formFieldsCache.end() && cacheIt->second.loaded) {
+        for (const auto& f : cacheIt->second.fields) {
+            if (f.fieldName == fieldName && f.controlIndex == controlIndex) {
+                if (f.isReadOnly()) return false;
+                oldChecked = f.isChecked;
+                isRadio = (f.type == pdf::FormFieldType::RadioButton);
+                break;
+            }
+        }
+    }
+
+    const auto response = m_renderWorker.toggleFormFieldSync(m_currentDocumentId, pageIndex, fieldName, controlIndex, checked);
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not toggle form field: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordToggleFormField(pageIndex, fieldName, controlIndex, oldChecked, checked);
+
+    if (cacheIt != m_formFieldsCache.end() && cacheIt->second.loaded) {
+        for (auto& f : cacheIt->second.fields) {
+            if (f.fieldName == fieldName) {
+                if (f.controlIndex == controlIndex) {
+                    f.isChecked = checked;
+                } else if (isRadio && checked && f.type == pdf::FormFieldType::RadioButton) {
+                    f.isChecked = false;
+                }
+            }
+        }
+    }
+
+    refreshAfterEdit();
+    Q_EMIT formFieldEdited(pageIndex, fieldName, controlIndex);
+    return true;
+}
+
+bool PdfViewerWidget::setFormFieldChoice(int pageIndex, const QString& fieldName, int controlIndex, const std::vector<int>& selectedIndices) {
+    if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
+        return false;
+    }
+    if (pageIndex < 0 || pageIndex >= m_pageCount || fieldName.isEmpty() || controlIndex < 0) {
+        return false;
+    }
+    QScopedValueRollback<bool> editGuard(m_editInProgress, true);
+
+    std::vector<int> oldIndices;
+    auto cacheIt = m_formFieldsCache.find(pageIndex);
+    if (cacheIt != m_formFieldsCache.end() && cacheIt->second.loaded) {
+        for (const auto& f : cacheIt->second.fields) {
+            if (f.fieldName == fieldName && f.controlIndex == controlIndex) {
+                if (f.isReadOnly()) return false;
+                oldIndices = f.selectedIndices;
+                break;
+            }
+        }
+    }
+
+    const auto response = m_renderWorker.setFormFieldChoiceSync(m_currentDocumentId, pageIndex, fieldName, controlIndex, selectedIndices);
+    if (!response.success) {
+        Q_EMIT loadError(tr("Could not set form field choice: %1").arg(response.errorMessage));
+        return false;
+    }
+
+    m_editLog.recordSetFormFieldChoice(pageIndex, fieldName, controlIndex, oldIndices, selectedIndices);
+
+    if (cacheIt != m_formFieldsCache.end() && cacheIt->second.loaded) {
+        for (auto& f : cacheIt->second.fields) {
+            if (f.fieldName == fieldName && f.controlIndex == controlIndex) {
+                f.selectedIndices = selectedIndices;
+                if (!selectedIndices.empty() && selectedIndices[0] >= 0 &&
+                    selectedIndices[0] < static_cast<int>(f.options.size())) {
+                    f.value = f.options[selectedIndices[0]];
+                }
+                break;
+            }
+        }
+    }
+
+    refreshAfterEdit();
+    Q_EMIT formFieldEdited(pageIndex, fieldName, controlIndex);
+    return true;
+}
+
+const pdf::FormFieldItem* PdfViewerWidget::hitTestFormField(int64_t docX, int64_t docY, int* outPageIndex) const {
+    if (!isDocumentOpen()) {
+        return nullptr;
+    }
+    int page = m_layout.getPageAt(docX, docY);
+    if (page < 0) {
+        return nullptr;
+    }
+    double px = 0.0, py = 0.0;
+    if (!m_layout.documentToPagePoints(page, docX, docY, px, py)) {
+        return nullptr;
+    }
+    const auto& pl = m_layout.getPageLayout(page);
+    const double userX = px;
+    const double userY = pl.heightPoints - py;
+
+    const auto* fields = cachedFormFields(page);
+    if (!fields) {
+        return nullptr;
+    }
+    for (auto it = fields->rbegin(); it != fields->rend(); ++it) {
+        if (it->contains(userX, userY)) {
+            if (outPageIndex) {
+                *outPageIndex = page;
+            }
+            return &(*it);
+        }
+    }
+    return nullptr;
+}
+
+QRectF PdfViewerWidget::formFieldWidgetRect(int pageIndex, const pdf::FormFieldItem& field) const {
+    if (pageIndex < 0 || pageIndex >= m_pageCount || !field.isValid()) {
+        return QRectF();
+    }
+    const auto& pl = m_layout.getPageLayout(pageIndex);
+    const double minX = std::min(field.left, field.right);
+    const double maxX = std::max(field.left, field.right);
+    const double minY = std::min(field.bottom, field.top);
+    const double maxY = std::max(field.bottom, field.top);
+
+    const double topDownY0 = pl.heightPoints - maxY;
+    const double topDownY1 = pl.heightPoints - minY;
+
+    int64_t d0x = 0, d0y = 0, d1x = 0, d1y = 0;
+    if (!m_layout.pagePointsToDocument(pageIndex, minX, topDownY0, d0x, d0y) ||
+        !m_layout.pagePointsToDocument(pageIndex, maxX, topDownY1, d1x, d1y)) {
+        return QRectF();
+    }
+
+    const double dpr = effectiveDpr();
+    const double docMinX = static_cast<double>(std::min(d0x, d1x));
+    const double docMaxX = static_cast<double>(std::max(d0x, d1x));
+    const double docMinY = static_cast<double>(std::min(d0y, d1y));
+    const double docMaxY = static_cast<double>(std::max(d0y, d1y));
+
+    const double vx = (docMinX - static_cast<double>(m_docScrollX)) / dpr;
+    const double vy = (docMinY - static_cast<double>(m_docScrollY)) / dpr;
+    const double vw = (docMaxX - docMinX) / dpr;
+    const double vh = (docMaxY - docMinY) / dpr;
+
+    return QRectF(vx, vy, vw, vh);
+}
+
+void PdfViewerWidget::activateFormFieldEditor(int pageIndex, const pdf::FormFieldItem& field) {
+    if (pageIndex < 0 || pageIndex >= m_pageCount || field.isReadOnly()) {
+        return;
+    }
+    if (m_activeFormEditor) {
+        commitActiveFormFieldEditor();
+    }
+
+    const QRectF wRect = formFieldWidgetRect(pageIndex, field);
+    if (wRect.isEmpty() || wRect.width() < 4.0 || wRect.height() < 4.0) {
+        return;
+    }
+
+    m_activeEditorPage = pageIndex;
+    m_activeEditorFieldName = field.fieldName;
+    m_activeEditorControlIndex = field.controlIndex;
+    m_activeEditorType = field.type;
+    m_activeEditorInitialText = field.value;
+    m_activeEditorInitialChoices = field.selectedIndices;
+
+    if (field.type == pdf::FormFieldType::TextField) {
+        if (field.isMultiline()) {
+            auto* edit = new QPlainTextEdit(viewport());
+            edit->setPlainText(field.value);
+            edit->selectAll();
+            edit->setGeometry(wRect.toRect());
+            edit->installEventFilter(this);
+            edit->show();
+            edit->setFocus();
+            m_activeFormEditor = edit;
+        } else {
+            auto* lineEdit = new QLineEdit(viewport());
+            lineEdit->setText(field.value);
+            if (field.isPassword()) {
+                lineEdit->setEchoMode(QLineEdit::Password);
+            }
+            lineEdit->selectAll();
+            lineEdit->setGeometry(wRect.toRect());
+            lineEdit->installEventFilter(this);
+            connect(lineEdit, &QLineEdit::returnPressed, this, &PdfViewerWidget::commitActiveFormFieldEditor);
+            lineEdit->show();
+            lineEdit->setFocus();
+            m_activeFormEditor = lineEdit;
+        }
+    } else if (field.type == pdf::FormFieldType::ComboBox || field.type == pdf::FormFieldType::ListBox) {
+        auto* combo = new QComboBox(viewport());
+        for (const auto& opt : field.options) {
+            combo->addItem(opt);
+        }
+        if (!field.selectedIndices.empty() && field.selectedIndices[0] >= 0 &&
+            field.selectedIndices[0] < combo->count()) {
+            combo->setCurrentIndex(field.selectedIndices[0]);
+        }
+        if (field.type == pdf::FormFieldType::ComboBox && (field.flags & pdf::FormFieldFlag::Edit) != 0) {
+            combo->setEditable(true);
+            if (combo->lineEdit()) {
+                combo->lineEdit()->setText(field.value);
+                combo->lineEdit()->selectAll();
+            }
+        }
+        combo->setGeometry(wRect.toRect());
+        combo->installEventFilter(this);
+        connect(combo, &QComboBox::activated, this, [this](int) {
+            commitActiveFormFieldEditor();
+        });
+        combo->show();
+        combo->setFocus();
+        combo->showPopup();
+        m_activeFormEditor = combo;
+    }
+}
+
+void PdfViewerWidget::commitActiveFormFieldEditor() {
+    if (!m_activeFormEditor) {
+        return;
+    }
+    QWidget* editor = m_activeFormEditor.data();
+    const int page = m_activeEditorPage;
+    const QString fieldName = m_activeEditorFieldName;
+    const int controlIdx = m_activeEditorControlIndex;
+    const auto type = m_activeEditorType;
+    const QString initialText = m_activeEditorInitialText;
+    const auto initialChoices = m_activeEditorInitialChoices;
+
+    m_activeFormEditor.clear();
+    m_activeEditorPage = -1;
+    m_activeEditorFieldName.clear();
+    m_activeEditorControlIndex = -1;
+    m_activeEditorType = pdf::FormFieldType::Unknown;
+    m_activeEditorInitialText.clear();
+    m_activeEditorInitialChoices.clear();
+
+    if (type == pdf::FormFieldType::TextField) {
+        QString newText;
+        if (auto* lineEdit = qobject_cast<QLineEdit*>(editor)) {
+            newText = lineEdit->text();
+        } else if (auto* plainText = qobject_cast<QPlainTextEdit*>(editor)) {
+            newText = plainText->toPlainText();
+        }
+        if (newText != initialText) {
+            setFormFieldText(page, fieldName, controlIdx, newText);
+        }
+    } else if (type == pdf::FormFieldType::ComboBox || type == pdf::FormFieldType::ListBox) {
+        if (auto* combo = qobject_cast<QComboBox*>(editor)) {
+            const int idx = combo->currentIndex();
+            if (idx >= 0) {
+                std::vector<int> newIndices = {idx};
+                if (newIndices != initialChoices) {
+                    setFormFieldChoice(page, fieldName, controlIdx, newIndices);
+                }
+            }
+        }
+    }
+
+    editor->deleteLater();
+    viewport()->setFocus();
+}
+
+void PdfViewerWidget::cancelActiveFormFieldEditor() {
+    if (!m_activeFormEditor) {
+        return;
+    }
+    QWidget* editor = m_activeFormEditor.data();
+    m_activeFormEditor.clear();
+    m_activeEditorPage = -1;
+    m_activeEditorFieldName.clear();
+    m_activeEditorControlIndex = -1;
+    m_activeEditorType = pdf::FormFieldType::Unknown;
+    m_activeEditorInitialText.clear();
+    m_activeEditorInitialChoices.clear();
+
+    editor->deleteLater();
+    viewport()->setFocus();
+}
+
+void PdfViewerWidget::updateActiveFormFieldEditorGeometry() {
+    if (!m_activeFormEditor || m_activeEditorPage < 0) {
+        return;
+    }
+    const auto* fields = cachedFormFields(m_activeEditorPage);
+    if (!fields) {
+        commitActiveFormFieldEditor();
+        return;
+    }
+    const pdf::FormFieldItem* target = nullptr;
+    for (const auto& f : *fields) {
+        if (f.fieldName == m_activeEditorFieldName && f.controlIndex == m_activeEditorControlIndex) {
+            target = &f;
+            break;
+        }
+    }
+    if (!target) {
+        commitActiveFormFieldEditor();
+        return;
+    }
+    QRectF r = formFieldWidgetRect(m_activeEditorPage, *target);
+    if (r.bottom() < 0 || r.top() > viewport()->height() || r.right() < 0 || r.left() > viewport()->width()) {
+        commitActiveFormFieldEditor();
+        return;
+    }
+    m_activeFormEditor->setGeometry(r.toRect());
+}
+
+bool PdfViewerWidget::eventFilter(QObject* watched, QEvent* event) {
+    if (m_activeFormEditor && watched == m_activeFormEditor.data()) {
+        if (event->type() == QEvent::KeyPress) {
+            auto* keyEvent = static_cast<QKeyEvent*>(event);
+            if (keyEvent->key() == Qt::Key_Escape) {
+                cancelActiveFormFieldEditor();
+                return true;
+            } else if (keyEvent->key() == Qt::Key_Tab && !(keyEvent->modifiers() & Qt::ControlModifier)) {
+                commitActiveFormFieldEditor();
+                navigateFormField(true);
+                return true;
+            } else if (keyEvent->key() == Qt::Key_Backtab || (keyEvent->key() == Qt::Key_Tab && (keyEvent->modifiers() & Qt::ShiftModifier))) {
+                commitActiveFormFieldEditor();
+                navigateFormField(false);
+                return true;
+            }
+        } else if (event->type() == QEvent::FocusOut) {
+            QWidget* fw = QApplication::focusWidget();
+            if (m_activeFormEditor && (!fw || !m_activeFormEditor->isAncestorOf(fw))) {
+                commitActiveFormFieldEditor();
+            }
+        }
+    }
+    return QAbstractScrollArea::eventFilter(watched, event);
+}
+
+bool PdfViewerWidget::navigateFormField(bool forward) {
+    if (!m_hasDocument || m_pageCount == 0) {
+        return false;
+    }
+    struct FieldRef {
+        int page;
+        const pdf::FormFieldItem* field;
+    };
+    std::vector<FieldRef> navigable;
+
+    for (int p = 0; p < m_pageCount; ++p) {
+        const auto* fields = cachedFormFields(p);
+        if (fields) {
+            for (const auto& f : *fields) {
+                if (!f.isReadOnly() && f.type != pdf::FormFieldType::Unknown &&
+                    f.type != pdf::FormFieldType::Signature) {
+                    navigable.push_back({p, &f});
+                }
+            }
+        }
+    }
+    if (navigable.empty()) {
+        return false;
+    }
+
+    int curIdx = -1;
+    if (m_activeEditorPage >= 0) {
+        for (size_t i = 0; i < navigable.size(); ++i) {
+            if (navigable[i].page == m_activeEditorPage &&
+                navigable[i].field->fieldName == m_activeEditorFieldName &&
+                navigable[i].field->controlIndex == m_activeEditorControlIndex) {
+                curIdx = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+
+    int nextIdx = 0;
+    if (curIdx >= 0) {
+        if (forward) {
+            nextIdx = (curIdx + 1) % static_cast<int>(navigable.size());
+        } else {
+            nextIdx = (curIdx - 1 + static_cast<int>(navigable.size())) % static_cast<int>(navigable.size());
+        }
+    } else {
+        nextIdx = forward ? 0 : static_cast<int>(navigable.size()) - 1;
+    }
+
+    const auto& target = navigable[nextIdx];
+    ensurePageShown(target.page);
+    activateFormFieldEditor(target.page, *target.field);
+    return true;
+}
+
+QString PdfViewerWidget::formFieldTooltipHtml(const pdf::FormFieldItem& field) {
+    if (field.fieldName.isEmpty() && field.value.isEmpty()) {
+        return QString();
+    }
+    constexpr qsizetype kMaxTipChars = 1000;
+    auto prep = [](QString s) {
+        if (s.size() > kMaxTipChars) s = s.left(kMaxTipChars) + QStringLiteral("…");
+        return s.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
+    };
+    QString tip;
+    if (!field.fieldName.isEmpty()) {
+        tip += QStringLiteral("<b>") + prep(field.fieldName) + QStringLiteral("</b>");
+    }
+    if (field.isReadOnly()) {
+        tip += QStringLiteral(" <i>(Read-Only)</i>");
+    }
+    if (field.isRequired()) {
+        tip += QStringLiteral(" <i>(Required)</i>");
+    }
+    if (!field.value.isEmpty() && !field.isPassword()) {
+        if (!tip.isEmpty()) tip += QStringLiteral("<br>");
+        tip += prep(field.value);
+    }
+    return tip;
 }
 
 } // namespace ui

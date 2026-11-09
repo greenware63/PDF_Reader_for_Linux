@@ -13,6 +13,7 @@
 #include <QPixmap>
 #include <QDateTime>
 #include <QContextMenuEvent>
+#include <QPointer>
 #include "ColorMode.h"
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
@@ -205,6 +206,22 @@ public:
     void requestFormFieldsForPage(int pageIndex);
     void clearFormFieldsCache();
 
+    // AcroForm UI interaction & mutations (M5 Slice 3)
+    bool setFormFieldText(int pageIndex, const QString& fieldName, int controlIndex, const QString& text);
+    bool toggleFormField(int pageIndex, const QString& fieldName, int controlIndex, bool checked);
+    bool setFormFieldChoice(int pageIndex, const QString& fieldName, int controlIndex, const std::vector<int>& selectedIndices);
+
+    const pdf::FormFieldItem* hitTestFormField(int64_t docX, int64_t docY, int* outPageIndex = nullptr) const;
+    QRectF formFieldWidgetRect(int pageIndex, const pdf::FormFieldItem& field) const;
+
+    void activateFormFieldEditor(int pageIndex, const pdf::FormFieldItem& field);
+    void commitActiveFormFieldEditor();
+    void cancelActiveFormFieldEditor();
+    bool hasActiveFormFieldEditor() const noexcept { return m_activeFormEditor != nullptr; }
+
+    bool navigateFormField(bool forward = true);
+    static QString formFieldTooltipHtml(const pdf::FormFieldItem& field);
+
 #ifdef PDF_WORKER_TEST_HOOKS
     /// Kills the worker process as a crash would (recovery is exercised by tests).
     void simulateWorkerCrashForTesting() { m_renderWorker.killWorkerForTesting(); }
@@ -283,6 +300,7 @@ Q_SIGNALS:
     void redactionMarksChanged();
     void inkDrawingModeChanged(bool enabled);
     void formFieldsLoaded(int pageIndex);
+    void formFieldEdited(int pageIndex, const QString& fieldName, int controlIndex);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -295,6 +313,7 @@ protected:
     void contextMenuEvent(QContextMenuEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     bool viewportEvent(QEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private Q_SLOTS:
     void onScrollValueChanged();
@@ -442,11 +461,22 @@ private:
     bool m_hoverHitTestPending{false};   // a tooltip hit test is waiting for the worker; further ones are skipped
 
     struct PageFormFieldCache {
+        bool requested{false};
         bool loaded{false};
         bool truncated{false};
         std::vector<pdf::FormFieldItem> fields;
     };
     mutable std::unordered_map<int, PageFormFieldCache> m_formFieldsCache;
+
+    void updateActiveFormFieldEditorGeometry();
+
+    QPointer<QWidget> m_activeFormEditor;
+    int m_activeEditorPage{-1};
+    QString m_activeEditorFieldName;
+    int m_activeEditorControlIndex{-1};
+    pdf::FormFieldType m_activeEditorType{pdf::FormFieldType::Unknown};
+    QString m_activeEditorInitialText;
+    std::vector<int> m_activeEditorInitialChoices;
 
     void refreshAfterEdit();
     void recoverAfterWorkerFailure();

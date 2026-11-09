@@ -6808,7 +6808,340 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Stamp and FileAttachment annotations creation, hostile input rejection, undo/redo, save/reload, and deletion verified." << std::endl;
     }
 
-    std::cout << " ALL 59 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- Test 60: Milestone M5 Slice 3 - AcroForm UI Interaction, Hit-Testing, In-Place Editors, Toggle Controls, Choices, Tab Navigation, and EditLog Undo/Redo ---
+    std::cout << "[TEST 60] Testing AcroForm UI interaction, hit-testing, in-place editors, toggle controls, choices, Tab navigation, and EditLog undo/redo in PdfViewerWidget..." << std::endl;
+    {
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        std::string fixturePath = root + "/tests/fixtures/form_fields_test.pdf";
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "tests/fixtures/form_fields_test.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "../tests/fixtures/form_fields_test.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            std::cerr << "[FAIL] Test 60: form_fields_test.pdf fixture not found at " << fixturePath << std::endl;
+            return 1;
+        }
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(1000, 1000);
+        viewer.show();
+        viewer.openDocument(QString::fromStdString(fixturePath));
+
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 60: document did not open" << std::endl;
+            return 1;
+        }
+
+        // 60a: Request form fields for page 0 and verify cached list
+        viewer.requestFormFieldsForPage(0);
+        timer.restart();
+        while (timer.elapsed() < 8000 && !viewer.cachedFormFields(0)) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+
+        const auto* fields = viewer.cachedFormFields(0);
+        if (!fields || fields->empty()) {
+            std::cerr << "[FAIL] 60a: cached form fields empty or not loaded" << std::endl;
+            return 1;
+        }
+        if (viewer.isFormFieldsTruncated(0)) {
+            std::cerr << "[FAIL] 60a: form fields unexpectedly marked truncated" << std::endl;
+            return 1;
+        }
+
+        // 60b: Hit-testing, bounding boxes and tooltips
+        for (const auto& f : *fields) {
+            const double cx = (f.left + f.right) / 2.0;
+            const double cy = (f.bottom + f.top) / 2.0;
+            const auto& pl = viewer.layout().getPageLayout(0);
+            const double topDownY = pl.heightPoints - cy;
+            int64_t docX = 0, docY = 0;
+            if (!viewer.layout().pagePointsToDocument(0, cx, topDownY, docX, docY)) {
+                std::cerr << "[FAIL] 60b: pagePointsToDocument failed for field " << f.fieldName.toStdString() << std::endl;
+                return 1;
+            }
+            int hitPage = -1;
+            const auto* hit = viewer.hitTestFormField(docX, docY, &hitPage);
+            if (!hit || hitPage != 0 || hit->fieldName != f.fieldName) {
+                std::cerr << "[FAIL] 60b: hitTestFormField failed for field " << f.fieldName.toStdString() << std::endl;
+                return 1;
+            }
+
+            const QRectF wRect = viewer.formFieldWidgetRect(0, f);
+            if (wRect.isEmpty() || wRect.width() <= 0.0 || wRect.height() <= 0.0) {
+                std::cerr << "[FAIL] 60b: formFieldWidgetRect returned invalid rect for " << f.fieldName.toStdString() << std::endl;
+                return 1;
+            }
+
+            const QString tip = ui::PdfViewerWidget::formFieldTooltipHtml(f);
+            if (tip.isEmpty() || !tip.contains(f.fieldName.toHtmlEscaped())) {
+                std::cerr << "[FAIL] 60b: formFieldTooltipHtml missing field name for " << f.fieldName.toStdString() << std::endl;
+                return 1;
+            }
+        }
+
+        // 60c: Read-only field protection
+        const pdf::FormFieldItem* roField = nullptr;
+        for (const auto& f : *fields) {
+            if (f.fieldName == "readonly_text") {
+                roField = &f;
+                break;
+            }
+        }
+        if (!roField || !roField->isReadOnly()) {
+            std::cerr << "[FAIL] 60c: readonly_text field not found or not marked read-only" << std::endl;
+            return 1;
+        }
+        if (viewer.setFormFieldText(0, QStringLiteral("readonly_text"), 0, QStringLiteral("Hacked"))) {
+            std::cerr << "[FAIL] 60c: setFormFieldText succeeded on read-only field!" << std::endl;
+            return 1;
+        }
+        viewer.activateFormFieldEditor(0, *roField);
+        if (viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 60c: activateFormFieldEditor activated an editor for read-only field!" << std::endl;
+            return 1;
+        }
+
+        // 60d: In-place text editor activation, typing, commit, and EditLog tracking
+        const pdf::FormFieldItem* nameField = nullptr;
+        for (const auto& f : *fields) {
+            if (f.fieldName == "name") {
+                nameField = &f;
+                break;
+            }
+        }
+        if (!nameField) {
+            std::cerr << "[FAIL] 60d: 'name' field not found" << std::endl;
+            return 1;
+        }
+        viewer.activateFormFieldEditor(0, *nameField);
+        if (!viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 60d: failed to activate in-place editor for 'name'" << std::endl;
+            return 1;
+        }
+        if (viewer.setFormFieldText(0, QStringLiteral("name"), 0, QStringLiteral("Charlie"))) {
+            const auto* recheckedFields = viewer.cachedFormFields(0);
+            bool updated = false;
+            for (const auto& f : *recheckedFields) {
+                if (f.fieldName == "name" && f.value == "Charlie") {
+                    updated = true;
+                    break;
+                }
+            }
+            if (!updated) {
+                std::cerr << "[FAIL] 60d: cached form field 'name' not updated to Charlie" << std::endl;
+                return 1;
+            }
+        } else {
+            std::cerr << "[FAIL] 60d: setFormFieldText failed for 'name'" << std::endl;
+            return 1;
+        }
+        viewer.commitActiveFormFieldEditor();
+        if (viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 60d: editor still active after commit" << std::endl;
+            return 1;
+        }
+
+        // 60e: Checkbox toggle & radio button sibling deactivation
+        if (!viewer.toggleFormField(0, QStringLiteral("agree"), 0, true)) {
+            std::cerr << "[FAIL] 60e: toggleFormField failed for 'agree'" << std::endl;
+            return 1;
+        }
+        const pdf::FormFieldItem* agreeField = nullptr;
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "agree") { agreeField = &f; break; }
+        }
+        if (!agreeField || !agreeField->isChecked) {
+            std::cerr << "[FAIL] 60e: 'agree' checkbox not checked after toggle" << std::endl;
+            return 1;
+        }
+
+        if (!viewer.toggleFormField(0, QStringLiteral("rg"), 1, true)) {
+            std::cerr << "[FAIL] 60e: toggleFormField failed for 'rg' control 1" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "rg") {
+                if (f.controlIndex == 0 && f.isChecked) {
+                    std::cerr << "[FAIL] 60e: 'rg' control 0 not deactivated when control 1 checked" << std::endl;
+                    return 1;
+                }
+                if (f.controlIndex == 1 && !f.isChecked) {
+                    std::cerr << "[FAIL] 60e: 'rg' control 1 not checked" << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // 60f: Choice selection
+        if (!viewer.setFormFieldChoice(0, QStringLiteral("country"), 0, {1})) {
+            std::cerr << "[FAIL] 60f: setFormFieldChoice failed for 'country'" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "country") {
+                if (f.selectedIndices != std::vector<int>{1} || f.value != "Canada") {
+                    std::cerr << "[FAIL] 60f: 'country' choice not updated to Canada" << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // 60g: Tab / Shift+Tab Navigation
+        if (!viewer.navigateFormField(true)) {
+            std::cerr << "[FAIL] 60g: navigateFormField(forward) returned false" << std::endl;
+            return 1;
+        }
+        if (!viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 60g: navigateFormField did not activate an editor" << std::endl;
+            return 1;
+        }
+        viewer.navigateFormField(true);
+        if (!viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 60g: second navigateFormField did not maintain an editor" << std::endl;
+            return 1;
+        }
+        viewer.navigateFormField(false);
+        viewer.cancelActiveFormFieldEditor();
+        if (viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 60g: cancelActiveFormFieldEditor did not clear active editor" << std::endl;
+            return 1;
+        }
+
+        // 60h: EditLog Undo and Redo
+        if (!viewer.editLog().isDirty() || !viewer.editLog().canUndo()) {
+            std::cerr << "[FAIL] 60h: EditLog should be dirty with undoable commands" << std::endl;
+            return 1;
+        }
+
+        // Undo choice
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 60h: undo choice failed" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "country" && (f.selectedIndices != std::vector<int>{0} || f.value != "US")) {
+                std::cerr << "[FAIL] 60h: undo choice did not restore country to US" << std::endl;
+                return 1;
+            }
+        }
+
+        // Undo radio
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 60h: undo radio failed" << std::endl;
+            return 1;
+        }
+
+        // Undo checkbox
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 60h: undo checkbox failed" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "agree" && f.isChecked) {
+                std::cerr << "[FAIL] 60h: undo checkbox did not restore agree to unchecked" << std::endl;
+                return 1;
+            }
+        }
+
+        // Undo text
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 60h: undo text failed" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "name" && f.value != "Alice") {
+                std::cerr << "[FAIL] 60h: undo text did not restore name to Alice" << std::endl;
+                return 1;
+            }
+        }
+
+        if (viewer.editLog().isDirty() || viewer.editLog().canUndo() || !viewer.editLog().canRedo()) {
+            std::cerr << "[FAIL] 60h: EditLog state after undoing all commands should be clean and canRedo" << std::endl;
+            return 1;
+        }
+
+        // Redo text
+        if (!viewer.redoEdit()) {
+            std::cerr << "[FAIL] 60h: redo text failed" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "name" && f.value != "Charlie") {
+                std::cerr << "[FAIL] 60h: redo text did not restore name to Charlie" << std::endl;
+                return 1;
+            }
+        }
+        if (!viewer.editLog().isDirty()) {
+            std::cerr << "[FAIL] 60h: EditLog should be dirty after redo" << std::endl;
+            return 1;
+        }
+
+        // 60i: Incremental save verification
+        QTemporaryDir saveDir;
+        if (!saveDir.isValid()) {
+            std::cerr << "[FAIL] 60i: failed to create temp save dir" << std::endl;
+            return 1;
+        }
+        const QString savedFile = saveDir.filePath(QStringLiteral("saved_form.pdf"));
+        if (!viewer.saveDocument(savedFile)) {
+            std::cerr << "[FAIL] 60i: saveDocument failed" << std::endl;
+            return 1;
+        }
+
+        // Reopen saved document and verify 'name' is 'Charlie'
+        ui::PdfViewerWidget reloader;
+        reloader.resize(800, 600);
+        reloader.show();
+        reloader.openDocument(savedFile);
+        timer.restart();
+        while (timer.elapsed() < 8000 && !reloader.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        if (!reloader.isDocumentOpen()) {
+            std::cerr << "[FAIL] 60i: failed to reopen saved document" << std::endl;
+            return 1;
+        }
+        reloader.requestFormFieldsForPage(0);
+        timer.restart();
+        while (timer.elapsed() < 8000 && !reloader.cachedFormFields(0)) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        const auto* reloadedFields = reloader.cachedFormFields(0);
+        if (!reloadedFields) {
+            std::cerr << "[FAIL] 60i: failed to get reloaded form fields" << std::endl;
+            return 1;
+        }
+        bool charlieFound = false;
+        for (const auto& f : *reloadedFields) {
+            if (f.fieldName == "name" && f.value == "Charlie") {
+                charlieFound = true;
+                break;
+            }
+        }
+        if (!charlieFound) {
+            std::cerr << "[FAIL] 60i: 'name' field in reloaded saved document does not hold Charlie" << std::endl;
+            return 1;
+        }
+
+        std::cout << "  -> Passed: AcroForm UI interaction, hit-testing, in-place editors, toggle controls, choices, Tab navigation, and EditLog undo/redo verified." << std::endl;
+    }
+
+    std::cout << " ALL 60 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
