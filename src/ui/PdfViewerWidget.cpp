@@ -66,6 +66,7 @@ void rotateRectPointsForDisplay(const pdf::PageCharBox& r, double pageW, double 
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QComboBox>
+#include <QListWidget>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -3488,6 +3489,15 @@ bool PdfViewerWidget::undoEdit() {
             for (auto& f : it->second.fields) {
                 if (f.fieldName == cmd.fieldName && f.controlIndex == cmd.controlIndex) {
                     f.value = cmd.textBefore;
+                    if (f.type == pdf::FormFieldType::ComboBox) {
+                        f.selectedIndices.clear();
+                        for (size_t optIdx = 0; optIdx < f.options.size(); ++optIdx) {
+                            if (f.options[optIdx] == cmd.textBefore) {
+                                f.selectedIndices.push_back(static_cast<int>(optIdx));
+                                break;
+                            }
+                        }
+                    }
                     break;
                 }
             }
@@ -3591,6 +3601,15 @@ bool PdfViewerWidget::redoEdit() {
             for (auto& f : it->second.fields) {
                 if (f.fieldName == cmd.fieldName && f.controlIndex == cmd.controlIndex) {
                     f.value = cmd.textAfter;
+                    if (f.type == pdf::FormFieldType::ComboBox) {
+                        f.selectedIndices.clear();
+                        for (size_t optIdx = 0; optIdx < f.options.size(); ++optIdx) {
+                            if (f.options[optIdx] == cmd.textAfter) {
+                                f.selectedIndices.push_back(static_cast<int>(optIdx));
+                                break;
+                            }
+                        }
+                    }
                     break;
                 }
             }
@@ -3982,6 +4001,15 @@ bool PdfViewerWidget::setFormFieldText(int pageIndex, const QString& fieldName, 
         for (auto& f : cacheIt->second.fields) {
             if (f.fieldName == fieldName && f.controlIndex == controlIndex) {
                 f.value = text;
+                if (f.type == pdf::FormFieldType::ComboBox) {
+                    f.selectedIndices.clear();
+                    for (size_t optIdx = 0; optIdx < f.options.size(); ++optIdx) {
+                        if (f.options[optIdx] == text) {
+                            f.selectedIndices.push_back(static_cast<int>(optIdx));
+                            break;
+                        }
+                    }
+                }
                 break;
             }
         }
@@ -4199,7 +4227,7 @@ void PdfViewerWidget::activateFormFieldEditor(int pageIndex, const pdf::FormFiel
             lineEdit->setFocus();
             m_activeFormEditor = lineEdit;
         }
-    } else if (field.type == pdf::FormFieldType::ComboBox || field.type == pdf::FormFieldType::ListBox) {
+    } else if (field.type == pdf::FormFieldType::ComboBox) {
         auto* combo = new QComboBox(viewport());
         for (const auto& opt : field.options) {
             combo->addItem(opt);
@@ -4208,11 +4236,14 @@ void PdfViewerWidget::activateFormFieldEditor(int pageIndex, const pdf::FormFiel
             field.selectedIndices[0] < combo->count()) {
             combo->setCurrentIndex(field.selectedIndices[0]);
         }
-        if (field.type == pdf::FormFieldType::ComboBox && (field.flags & pdf::FormFieldFlag::Edit) != 0) {
+        const bool isEditable = (field.flags & pdf::FormFieldFlag::Edit) != 0;
+        if (isEditable) {
             combo->setEditable(true);
             if (combo->lineEdit()) {
                 combo->lineEdit()->setText(field.value);
                 combo->lineEdit()->selectAll();
+                combo->lineEdit()->installEventFilter(this);
+                connect(combo->lineEdit(), &QLineEdit::returnPressed, this, &PdfViewerWidget::commitActiveFormFieldEditor);
             }
         }
         combo->setGeometry(wRect.toRect());
@@ -4222,8 +4253,33 @@ void PdfViewerWidget::activateFormFieldEditor(int pageIndex, const pdf::FormFiel
         });
         combo->show();
         combo->setFocus();
-        combo->showPopup();
+        if (!isEditable) {
+            combo->showPopup();
+        }
         m_activeFormEditor = combo;
+    } else if (field.type == pdf::FormFieldType::ListBox) {
+        auto* listWidget = new QListWidget(viewport());
+        for (const auto& opt : field.options) {
+            listWidget->addItem(opt);
+        }
+        const bool isMulti = (field.flags & pdf::FormFieldFlag::MultiSelect) != 0;
+        listWidget->setSelectionMode(isMulti ? QAbstractItemView::ExtendedSelection
+                                             : QAbstractItemView::SingleSelection);
+        for (int idx : field.selectedIndices) {
+            if (idx >= 0 && idx < listWidget->count()) {
+                listWidget->item(idx)->setSelected(true);
+            }
+        }
+        listWidget->setGeometry(wRect.toRect());
+        listWidget->installEventFilter(this);
+        if (!isMulti) {
+            connect(listWidget, &QListWidget::itemActivated, this, [this](QListWidgetItem*) {
+                commitActiveFormFieldEditor();
+            });
+        }
+        listWidget->show();
+        listWidget->setFocus();
+        m_activeFormEditor = listWidget;
     }
 }
 
@@ -4257,14 +4313,33 @@ void PdfViewerWidget::commitActiveFormFieldEditor() {
         if (newText != initialText) {
             setFormFieldText(page, fieldName, controlIdx, newText);
         }
-    } else if (type == pdf::FormFieldType::ComboBox || type == pdf::FormFieldType::ListBox) {
+    } else if (type == pdf::FormFieldType::ComboBox) {
         if (auto* combo = qobject_cast<QComboBox*>(editor)) {
-            const int idx = combo->currentIndex();
-            if (idx >= 0) {
-                std::vector<int> newIndices = {idx};
-                if (newIndices != initialChoices) {
-                    setFormFieldChoice(page, fieldName, controlIdx, newIndices);
+            if (combo->isEditable()) {
+                const QString newText = combo->currentText();
+                if (newText != initialText) {
+                    setFormFieldText(page, fieldName, controlIdx, newText);
                 }
+            } else {
+                const int idx = combo->currentIndex();
+                if (idx >= 0) {
+                    std::vector<int> newIndices = {idx};
+                    if (newIndices != initialChoices) {
+                        setFormFieldChoice(page, fieldName, controlIdx, newIndices);
+                    }
+                }
+            }
+        }
+    } else if (type == pdf::FormFieldType::ListBox) {
+        if (auto* listWidget = qobject_cast<QListWidget*>(editor)) {
+            std::vector<int> newIndices;
+            for (int i = 0; i < listWidget->count(); ++i) {
+                if (listWidget->item(i)->isSelected()) {
+                    newIndices.push_back(i);
+                }
+            }
+            if (newIndices != initialChoices) {
+                setFormFieldChoice(page, fieldName, controlIdx, newIndices);
             }
         }
     }
@@ -4319,7 +4394,8 @@ void PdfViewerWidget::updateActiveFormFieldEditorGeometry() {
 }
 
 bool PdfViewerWidget::eventFilter(QObject* watched, QEvent* event) {
-    if (m_activeFormEditor && watched == m_activeFormEditor.data()) {
+    if (m_activeFormEditor && (watched == m_activeFormEditor.data() ||
+                               (watched->isWidgetType() && m_activeFormEditor->isAncestorOf(static_cast<QWidget*>(watched))))) {
         if (event->type() == QEvent::KeyPress) {
             auto* keyEvent = static_cast<QKeyEvent*>(event);
             if (keyEvent->key() == Qt::Key_Escape) {
@@ -4331,11 +4407,26 @@ bool PdfViewerWidget::eventFilter(QObject* watched, QEvent* event) {
             } else if (keyEvent->key() == Qt::Key_Backtab || (keyEvent->key() == Qt::Key_Tab && (keyEvent->modifiers() & Qt::ShiftModifier))) {
                 navigateFormField(false);
                 return true;
+            } else if ((keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) &&
+                       qobject_cast<QListWidget*>(m_activeFormEditor.data())) {
+                commitActiveFormFieldEditor();
+                return true;
             }
         } else if (event->type() == QEvent::FocusOut) {
             QWidget* fw = QApplication::focusWidget();
-            if (m_activeFormEditor && (!fw || !m_activeFormEditor->isAncestorOf(fw))) {
-                commitActiveFormFieldEditor();
+            if (m_activeFormEditor) {
+                bool isChild = (fw && (fw == m_activeFormEditor.data() || m_activeFormEditor->isAncestorOf(fw)));
+                if (!isChild) {
+                    if (auto* combo = qobject_cast<QComboBox*>(m_activeFormEditor.data())) {
+                        if (combo->view() && combo->view()->window() &&
+                            (combo->view()->window() == fw || combo->view()->window()->isAncestorOf(fw))) {
+                            isChild = true;
+                        }
+                    }
+                }
+                if (!isChild) {
+                    commitActiveFormFieldEditor();
+                }
             }
         }
     }

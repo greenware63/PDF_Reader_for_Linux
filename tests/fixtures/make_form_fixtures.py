@@ -4,7 +4,7 @@ def build_pdf(out_path):
     objs = {}
     
     # 1: Catalog
-    objs[1] = b"<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R 5 0 R 6 0 R 7 0 R 10 0 R 11 0 R]/DR<</Font<</Helv 3 0 R>>>>/NeedAppearances false>>>>"
+    objs[1] = b"<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R 5 0 R 6 0 R 7 0 R 10 0 R 11 0 R 19 0 R]/DR<</Font<</Helv 3 0 R>>>>/NeedAppearances false>>>>"
     # 2: Pages
     objs[2] = b"<</Type/Pages/Kids[8 0 R]/Count 1>>"
     # 3: Font
@@ -18,7 +18,7 @@ def build_pdf(out_path):
     # 7: Radio group 'rg' parent (Ff 49152 = Radio 32768 | NoToggleToOff 16384)
     objs[7] = b"<</FT/Btn/T(rg)/Ff 49152/V/Choice1/Kids[14 0 R 15 0 R]>>"
     # 8: Page
-    objs[8] = b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 9 0 R/Resources<</Font<</Helv 3 0 R>>>>/Annots[4 0 R 5 0 R 6 0 R 14 0 R 15 0 R 10 0 R 11 0 R]>>"
+    objs[8] = b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 9 0 R/Resources<</Font<</Helv 3 0 R>>>>/Annots[4 0 R 5 0 R 6 0 R 14 0 R 15 0 R 10 0 R 11 0 R 19 0 R]>>"
     # 9: Page Contents
     content = b"BT /Helv 12 Tf 72 750 Td (M5 Form Fixture) Tj ET"
     objs[9] = b"<</Length %d>>\nstream\n%s\nendstream" % (len(content), content)
@@ -38,6 +38,8 @@ def build_pdf(out_path):
     objs[16] = b"<</Type/XObject/Subtype/Form/BBox[0 0 20 20]/Resources<<>>/Length %d>>\nstream\n%s\nendstream" % (len(ap_stream), ap_stream)
     objs[17] = b"<</Type/XObject/Subtype/Form/BBox[0 0 20 20]/Resources<<>>/Length 0>>\nstream\n\nendstream"
     objs[18] = b"<</Type/XObject/Subtype/Form/BBox[0 0 20 20]/Resources<<>>/Length %d>>\nstream\n%s\nendstream" % (len(ap_stream), ap_stream)
+    # 19: Editable combo 'editable_combo' (Ff 393216 = Combo 131072 | Edit 262144)
+    objs[19] = b"<</Type/Annot/Subtype/Widget/FT/Ch/Ff 393216/T(editable_combo)/V(Apple)/Opt[(Apple)(Banana)(Cherry)]/Rect[72 320 250 344]/DA(/Helv 12 Tf 0 g)/F 4/P 8 0 R>>"
 
     out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
     offs = {}

@@ -27,6 +27,8 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QComboBox>
+#include <QListWidget>
 #include <QAction>
 #include <QMessageBox>
 #include <QPushButton>
@@ -6985,7 +6987,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // 60f: Choice selection
+        // 60f: Choice selection & in-place choice editors
+        // 1. Single-select combo 'country'
         if (!viewer.setFormFieldChoice(0, QStringLiteral("country"), 0, {1})) {
             std::cerr << "[FAIL] 60f: setFormFieldChoice failed for 'country'" << std::endl;
             return 1;
@@ -6994,6 +6997,80 @@ int main(int argc, char* argv[]) {
             if (f.fieldName == "country") {
                 if (f.selectedIndices != std::vector<int>{1} || f.value != "Iran") {
                     std::cerr << "[FAIL] 60f: 'country' choice not updated to Iran" << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // 2. Multi-select list box 'langs'
+        const pdf::FormFieldItem* langsField = nullptr;
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "langs") { langsField = &f; break; }
+        }
+        if (!langsField) {
+            std::cerr << "[FAIL] 60f: 'langs' field not found" << std::endl;
+            return 1;
+        }
+        viewer.activateFormFieldEditor(0, *langsField);
+        if (!viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 60f: failed to activate in-place editor for 'langs'" << std::endl;
+            return 1;
+        }
+        auto* listWidget = viewer.findChild<QListWidget*>();
+        if (!listWidget) {
+            std::cerr << "[FAIL] 60f: in-place editor for 'langs' is not a QListWidget" << std::endl;
+            return 1;
+        }
+        if (listWidget->selectionMode() != QAbstractItemView::ExtendedSelection) {
+            std::cerr << "[FAIL] 60f: 'langs' QListWidget does not have ExtendedSelection mode" << std::endl;
+            return 1;
+        }
+        listWidget->item(0)->setSelected(true);
+        listWidget->item(2)->setSelected(true);
+        viewer.commitActiveFormFieldEditor();
+        if (viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 60f: editor still active after commit for 'langs'" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "langs") {
+                const std::vector<int> expected = {0, 2};
+                if (f.selectedIndices != expected) {
+                    std::cerr << "[FAIL] 60f: 'langs' multi-selection not updated to {0, 2}" << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // 3. Editable combo box 'editable_combo'
+        const pdf::FormFieldItem* editComboField = nullptr;
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "editable_combo") { editComboField = &f; break; }
+        }
+        if (!editComboField) {
+            std::cerr << "[FAIL] 60f: 'editable_combo' field not found" << std::endl;
+            return 1;
+        }
+        viewer.activateFormFieldEditor(0, *editComboField);
+        if (!viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 60f: failed to activate in-place editor for 'editable_combo'" << std::endl;
+            return 1;
+        }
+        auto* editCombo = viewer.findChild<QComboBox*>();
+        if (!editCombo || !editCombo->isEditable() || !editCombo->lineEdit()) {
+            std::cerr << "[FAIL] 60f: in-place editor for 'editable_combo' is not an editable QComboBox" << std::endl;
+            return 1;
+        }
+        editCombo->lineEdit()->setText(QStringLiteral("Mango"));
+        viewer.commitActiveFormFieldEditor();
+        if (viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 60f: editor still active after commit for 'editable_combo'" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "editable_combo") {
+                if (f.value != "Mango") {
+                    std::cerr << "[FAIL] 60f: 'editable_combo' custom text not updated to Mango, got: " << f.value.toStdString() << std::endl;
                     return 1;
                 }
             }
@@ -7026,7 +7103,31 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Undo choice
+        // Undo editable combo
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 60h: undo editable combo failed" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "editable_combo" && f.value != "Apple") {
+                std::cerr << "[FAIL] 60h: undo editable combo did not restore to Apple, got: " << f.value.toStdString() << std::endl;
+                return 1;
+            }
+        }
+
+        // Undo langs listbox
+        if (!viewer.undoEdit()) {
+            std::cerr << "[FAIL] 60h: undo langs listbox failed" << std::endl;
+            return 1;
+        }
+        for (const auto& f : *viewer.cachedFormFields(0)) {
+            if (f.fieldName == "langs" && f.selectedIndices != std::vector<int>{0}) {
+                std::cerr << "[FAIL] 60h: undo langs listbox did not restore to {0}" << std::endl;
+                return 1;
+            }
+        }
+
+        // Undo country choice
         if (!viewer.undoEdit()) {
             std::cerr << "[FAIL] 60h: undo choice failed" << std::endl;
             return 1;
