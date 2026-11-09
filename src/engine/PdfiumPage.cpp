@@ -1082,9 +1082,7 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
         const bool rollbackOk = (rbFocused && rbSelected && rbKilled && (restoredVal == originalVal));
         if (!rollbackOk) {
             std::cerr << "[PdfiumPage] FATAL: Form field rollback failed for '"
-                      << fieldName.toStdString() << "'. Inconsistent worker state: expected '"
-                      << originalVal.toStdString() << "', but held '"
-                      << restoredVal.toStdString() << "'. Aborting to prevent unlogged mutation."
+                      << fieldName.toStdString() << "'. Inconsistent worker state. Aborting to prevent unlogged mutation."
                       << std::endl;
             FPDFPage_CloseAnnot(annot);
             std::abort();
