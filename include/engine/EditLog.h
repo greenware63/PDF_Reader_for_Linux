@@ -34,7 +34,8 @@ struct EditCommand {
     int controlIndex{0};
     QString textBefore;
     QString textAfter;
-    std::vector<AnnotationPathElement> vectorOutlines;
+    std::vector<AnnotationPathElement> vectorOutlines; // outlines for textAfter
+    std::vector<AnnotationPathElement> vectorOutlinesBefore; // outlines for textBefore
     bool checkedBefore{false};
     bool checkedAfter{false};
     int priorCheckedControlIndex{-1};
@@ -80,7 +81,8 @@ public:
 
     uint64_t recordSetFormFieldText(int pageIndex, const QString& fieldName, int controlIndex,
                                     const QString& before, const QString& after,
-                                    const std::vector<AnnotationPathElement>& vectorOutlines = {});
+                                    const std::vector<AnnotationPathElement>& vectorOutlines = {},
+                                    const std::vector<AnnotationPathElement>& vectorOutlinesBefore = {});
     uint64_t recordToggleFormField(int pageIndex, const QString& fieldName, int controlIndex,
                                    bool before, bool after, int priorCheckedControlIndex = -1);
     uint64_t recordSetFormFieldChoice(int pageIndex, const QString& fieldName, int controlIndex,

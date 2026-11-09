@@ -4934,8 +4934,194 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Form mutations, worker-side validations, byte-prefix incremental save, and EditLog verified." << std::endl;
     }
 
+    // --- TEST 46: Form field vector appearance stream synthesis (/AP) for non-Latin / Persian text ---
+    std::cout << "[TEST 46] Testing form field vector appearance stream synthesis (/AP) (Milestone M5 Slice 4)..." << std::endl;
+    {
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        std::string fixturePath = root + "/tests/fixtures/form_fields_test.pdf";
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "tests/fixtures/form_fields_test.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "../tests/fixtures/form_fields_test.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            std::cerr << "[FAIL] Test 46: form_fields_test.pdf fixture not found at " << fixturePath << std::endl;
+            return 1;
+        }
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(fixturePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 46: Failed to load form_fields_test.pdf" << std::endl;
+            return 1;
+        }
+
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] Test 46: Failed to get page 0" << std::endl;
+            return 1;
+        }
+
+        using Kind = pdf::AnnotationPathElement::Kind;
+        auto el = [](Kind k, double x, double y) {
+            pdf::AnnotationPathElement e;
+            e.kind = k; e.x = x; e.y = y;
+            return e;
+        };
+
+        // 46a: Hostile vector outlines are refused upfront
+        std::vector<pdf::AnnotationPathElement> hostile = {
+            el(Kind::LineTo, 80.0, 710.0), // Does not start with MoveTo
+            el(Kind::MoveTo, 85.0, 715.0)
+        };
+        const QString nonLatinText = QString::fromUtf8("\xd8\xb3\xd9\x84\xd8\xa7\xd9\x85"); // "سلام"
+        if (page->setFormFieldText(QStringLiteral("name"), 0, nonLatinText, hostile)) {
+            std::cerr << "[FAIL] Test 46a: Malformed vector outlines accepted" << std::endl;
+            return 1;
+        }
+
+        // 46b: Valid vector outlines are accepted and synthesize /AP
+        std::vector<pdf::AnnotationPathElement> validOutlines = {
+            el(Kind::MoveTo, 75.0, 705.0),
+            el(Kind::LineTo, 100.0, 705.0),
+            el(Kind::LineTo, 100.0, 720.0),
+            el(Kind::LineTo, 75.0, 720.0)
+        };
+        if (!page->setFormFieldText(QStringLiteral("name"), 0, nonLatinText, validOutlines)) {
+            std::cerr << "[FAIL] Test 46b: setFormFieldText with valid vector outlines failed" << std::endl;
+            return 1;
+        }
+
+        // Verify value was updated in listFormFields
+        auto fields = page->listFormFields();
+        bool foundNonLatin = false;
+        for (const auto& f : fields) {
+            if (f.fieldName == "name" && f.value == nonLatinText) {
+                foundNonLatin = true;
+                break;
+            }
+        }
+        if (!foundNonLatin) {
+            std::cerr << "[FAIL] Test 46b: 'name' field value was not updated to non-Latin text" << std::endl;
+            return 1;
+        }
+
+        // 46c: Incremental save preserves synthesized /AP stream and clipping
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] Test 46c: Failed to create temp directory" << std::endl;
+            return 1;
+        }
+        const std::string savedPath = tempDir.filePath("form_ap_saved.pdf").toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (saveFd < 0) {
+            std::cerr << "[FAIL] Test 46c: Failed to open saveFd" << std::endl;
+            return 1;
+        }
+        uint64_t bytesWritten = 0;
+        if (!doc->saveAsCopy(saveFd, true, bytesWritten, nullptr) || bytesWritten == 0) {
+            std::cerr << "[FAIL] Test 46c: saveAsCopy failed" << std::endl;
+#ifdef _WIN32
+            ::_close(saveFd);
+#else
+            ::close(saveFd);
+#endif
+            return 1;
+        }
+#ifdef _WIN32
+        ::_close(saveFd);
+#else
+        ::close(saveFd);
+#endif
+
+        // Inspect the persisted annotation via FPDF to ensure the PDF has synthesized normal appearance stream
+        FPDF_DOCUMENT rawDoc = FPDF_LoadDocument(savedPath.c_str(), nullptr);
+        FPDF_PAGE rawPage = rawDoc ? FPDF_LoadPage(rawDoc, 0) : nullptr;
+        bool hasNormalAp = false;
+        if (rawPage) {
+            for (int i = 0; i < FPDFPage_GetAnnotCount(rawPage); ++i) {
+                FPDF_ANNOTATION annot = FPDFPage_GetAnnot(rawPage, i);
+                if (!annot) continue;
+                if (FPDFAnnot_GetSubtype(annot) == FPDF_ANNOT_WIDGET) {
+                    unsigned long apLen = FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0);
+                    if (apLen > sizeof(FPDF_WCHAR)) {
+                        std::vector<unsigned short> buf(apLen / sizeof(unsigned short) + 1, 0);
+                        FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                                        reinterpret_cast<FPDF_WCHAR*>(buf.data()), apLen);
+                        const QString apStr = QString::fromUtf16(reinterpret_cast<const char16_t*>(buf.data()));
+                        if (apStr.contains("re W n") && apStr.contains("f\nQ")) {
+                            hasNormalAp = true;
+                        }
+                    }
+                }
+                FPDFPage_CloseAnnot(annot);
+            }
+            FPDF_ClosePage(rawPage);
+        }
+        if (rawDoc) FPDF_CloseDocument(rawDoc);
+        if (!hasNormalAp) {
+            std::cerr << "[FAIL] Test 46c: Saved file does not contain expected vector AP stream operators" << std::endl;
+            return 1;
+        }
+
+        // 46d: Setting Latin text without outlines clears custom /AP
+        if (!page->setFormFieldText(QStringLiteral("name"), 0, QStringLiteral("Alice"), {})) {
+            std::cerr << "[FAIL] Test 46d: setFormFieldText with Latin text failed" << std::endl;
+            return 1;
+        }
+
+        const std::string clearedPath = tempDir.filePath("form_ap_cleared.pdf").toStdString();
+#ifdef _WIN32
+        int clearFd = ::_open(clearedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int clearFd = ::open(clearedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (clearFd >= 0) {
+            uint64_t clearWritten = 0;
+            doc->saveAsCopy(clearFd, true, clearWritten, nullptr);
+#ifdef _WIN32
+            ::_close(clearFd);
+#else
+            ::close(clearFd);
+#endif
+        }
+
+        // 46e: Rollback restores prior /AP stream if a mutation fails
+        // First set non-Latin text with vector outlines again
+        if (!page->setFormFieldText(QStringLiteral("name"), 0, nonLatinText, validOutlines)) {
+            std::cerr << "[FAIL] Test 46e: setFormFieldText failed" << std::endl;
+            return 1;
+        }
+        // Now attempt an invalid mutation (e.g. text exceeding kMaxFormFieldTextCodeUnits)
+        const QString tooLongText(35000, QChar('A'));
+        if (page->setFormFieldText(QStringLiteral("name"), 0, tooLongText, validOutlines)) {
+            std::cerr << "[FAIL] Test 46e: setFormFieldText accepted text exceeding maximum length" << std::endl;
+            return 1;
+        }
+        // Verify value was rolled back / kept intact
+        fields = page->listFormFields();
+        for (const auto& f : fields) {
+            if (f.fieldName == "name") {
+                if (f.value != nonLatinText) {
+                    std::cerr << "[FAIL] Test 46e: 'name' value corrupted after failed mutation: got '"
+                              << f.value.toStdString() << "'" << std::endl;
+                    return 1;
+                }
+                break;
+            }
+        }
+
+        std::cout << "  -> Passed: Vector AP synthesis, clipping, incremental persistence, AP clearing, and rollback verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 45 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 46 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

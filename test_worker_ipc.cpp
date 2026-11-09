@@ -4026,6 +4026,106 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: WorkerClient form mutations, worker-side validations, bounds enforcement, and crash replay verified." << std::endl;
     }
 
+    // --- TEST 41: Vector appearance stream outlines in SetFormFieldText across IPC (Milestone M5 Slice 4) ---
+    std::cout << "[TEST 41] Testing form field vector appearance outlines over IPC..." << std::endl;
+    {
+        QString fixturePdf = QFileInfo(samplePdf).dir().filePath(QStringLiteral("tests/fixtures/form_fields_test.pdf"));
+        if (!QFile::exists(fixturePdf)) {
+            fixturePdf = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../tests/fixtures/form_fields_test.pdf"));
+        }
+        if (!QFile::exists(fixturePdf)) {
+            fixturePdf = QStringLiteral("tests/fixtures/form_fields_test.pdf");
+        }
+        if (!QFile::exists(fixturePdf)) {
+            std::cerr << "[FAIL] 41: form_fields_test.pdf not found at " << fixturePdf.toStdString() << std::endl;
+            return 1;
+        }
+
+        pdf::ipc::WorkerClient client;
+        auto openRes = client.openDocumentSync(410, fixturePdf.toStdString());
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 41: Failed to open fixture PDF" << std::endl;
+            return 1;
+        }
+
+        using Kind = pdf::AnnotationPathElement::Kind;
+        auto el = [](Kind k, double x, double y) {
+            pdf::AnnotationPathElement e;
+            e.kind = k; e.x = x; e.y = y;
+            return e;
+        };
+
+        std::vector<pdf::AnnotationPathElement> outlines = {
+            el(Kind::MoveTo, 75.0, 705.0),
+            el(Kind::LineTo, 100.0, 705.0),
+            el(Kind::LineTo, 100.0, 720.0),
+            el(Kind::LineTo, 75.0, 720.0)
+        };
+        const QString nonLatin = QString::fromUtf8("\xd8\xb3\xd9\x84\xd8\xa7\xd9\x85"); // "سلام"
+
+        auto setRes = client.setFormFieldTextSync(410, 0, QStringLiteral("name"), 0, nonLatin, outlines, 5000);
+        if (!setRes.success) {
+            std::cerr << "[FAIL] 41: setFormFieldTextSync with vectorOutlines failed: " << setRes.errorMessage.toStdString() << std::endl;
+            return 1;
+        }
+
+        auto listRes = client.listFormFieldsSync(410, 0, 5000);
+        if (!listRes.success) {
+            std::cerr << "[FAIL] 41: listFormFieldsSync failed" << std::endl;
+            return 1;
+        }
+        bool nonLatinFound = false;
+        for (const auto& f : listRes.fields) {
+            if (f.fieldName == "name" && f.value == nonLatin) {
+                nonLatinFound = true;
+                break;
+            }
+        }
+        if (!nonLatinFound) {
+            std::cerr << "[FAIL] 41: 'name' field value not updated to nonLatin across IPC" << std::endl;
+            return 1;
+        }
+
+        // Test EditLog crash recovery replay with vectorOutlines
+        pdf::EditLog log;
+        log.recordSetFormFieldText(0, QStringLiteral("name"), 0, QStringLiteral("Alice"), nonLatin, outlines, {});
+
+        // Kill worker process
+        client.killWorkerForTesting();
+
+        // Fresh worker client replay
+        pdf::ipc::WorkerClient freshClient;
+        auto freshOpen = freshClient.openDocumentSync(411, fixturePdf.toStdString());
+        if (freshOpen.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 41: Reopening fixture on fresh worker failed" << std::endl;
+            return 1;
+        }
+        if (!log.replay(&freshClient, 411)) {
+            std::cerr << "[FAIL] 41: log.replay with vectorOutlines failed" << std::endl;
+            return 1;
+        }
+        auto replayedList = freshClient.listFormFieldsSync(411, 0, 5000);
+        if (!replayedList.success) {
+            std::cerr << "[FAIL] 41: listFormFieldsSync after replay failed" << std::endl;
+            return 1;
+        }
+        bool replayedOk = false;
+        for (const auto& f : replayedList.fields) {
+            if (f.fieldName == "name" && f.value == nonLatin) {
+                replayedOk = true;
+                break;
+            }
+        }
+        if (!replayedOk) {
+            std::cerr << "[FAIL] 41: Replayed form field 'name' did not hold nonLatin" << std::endl;
+            return 1;
+        }
+
+        freshClient.closeDocumentSync();
+        freshClient.stop();
+        std::cout << "  -> Passed: Vector outlines over IPC and crash recovery replay verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

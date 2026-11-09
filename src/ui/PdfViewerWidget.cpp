@@ -221,7 +221,9 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_inFlightKeys.clear();
     m_pageTextCache.clear();
     m_transformedPixmapCache.clear();
-    clearFormFieldsCache();
+    if (!m_preserveEditLogOnOpen) {
+        clearFormFieldsCache();
+    }
     clearSelection();
     clearSearch();
     if (!m_preserveEditLogOnOpen) {
@@ -3477,7 +3479,7 @@ bool PdfViewerWidget::undoEdit() {
             return false;
         }
     } else if (cmd.type == pdf::EditCommandType::SetFormFieldText) {
-        const auto response = m_renderWorker.setFormFieldTextSync(m_currentDocumentId, cmd.pageIndex, cmd.fieldName, cmd.controlIndex, cmd.textBefore, cmd.vectorOutlines);
+        const auto response = m_renderWorker.setFormFieldTextSync(m_currentDocumentId, cmd.pageIndex, cmd.fieldName, cmd.controlIndex, cmd.textBefore, cmd.vectorOutlinesBefore);
         if (!response.success) {
             pdf::EditCommand restored;
             m_editLog.redo(restored);
@@ -3965,6 +3967,75 @@ void PdfViewerWidget::clearFormFieldsCache() {
     m_formFieldsCache.clear();
 }
 
+namespace {
+
+static bool isDrawableByBuiltInFont(const QString& text) {
+    for (const QChar ch : text) {
+        const char16_t u = ch.unicode();
+        if (u > 0xFF || (u < 0x20 && u != u'\t') || (u >= 0x7F && u < 0xA0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+enum class FormFieldOutlineResult {
+    NotNeeded,  // Plain Latin text, standard PDF font can be used
+    Success,    // Synthesized valid vector outlines
+    Failed      // Generation failed (unsupported glyphs, too large, invalid outlines, or widget too small)
+};
+
+static FormFieldOutlineResult generateFormFieldOutlines(const pdf::FormFieldItem& f, const QString& text,
+                                                        std::vector<pdf::AnnotationPathElement>& out) {
+    out.clear();
+    if (text.isEmpty() || isDrawableByBuiltInFont(text)) {
+        return FormFieldOutlineResult::NotNeeded;
+    }
+    const double fLeft = std::min(f.left, f.right);
+    const double fRight = std::max(f.left, f.right);
+    const double fBottom = std::min(f.bottom, f.top);
+    const double fTop = std::max(f.bottom, f.top);
+    const double fieldW = fRight - fLeft;
+    const double fieldH = fTop - fBottom;
+    if (fieldW <= 4.0 || fieldH <= 4.0) {
+        return FormFieldOutlineResult::Failed;
+    }
+
+    constexpr double kPadding = 2.0;
+    const double availW = std::max(1.0, fieldW - 2.0 * kPadding);
+    const double availH = std::max(1.0, fieldH - 2.0 * kPadding);
+
+    const bool isMulti = f.isMultiline();
+    const double wrapWidthPt = isMulti ? availW : 0.0;
+    const double fontSizePt = isMulti ? 12.0 : std::clamp(availH * 0.72, 8.0, 14.0);
+
+    ui::FreeTextLayoutResult laid = ui::layoutFreeText(text, fontSizePt, wrapWidthPt, true);
+    if (laid.tooLarge || laid.outline.empty() || !laid.undrawable.isEmpty() || !pdf::isValidTextOutline(laid.outline)) {
+        return FormFieldOutlineResult::Failed;
+    }
+
+    double originX = fLeft + kPadding;
+    if (!isMulti && text.isRightToLeft()) {
+        if (laid.size.width() < availW) {
+            originX = fRight - kPadding - laid.size.width();
+        }
+    }
+
+    double originY = fTop - kPadding;
+    if (!isMulti) {
+        const double textH = laid.size.height();
+        if (textH < fieldH) {
+            originY = fTop - (fieldH - textH) / 2.0;
+        }
+    }
+
+    ui::translateOutline(laid.outline, originX, originY);
+    out = std::move(laid.outline);
+    return FormFieldOutlineResult::Success;
+}
+
+} // namespace
+
 bool PdfViewerWidget::setFormFieldText(int pageIndex, const QString& fieldName, int controlIndex, const QString& text) {
     if (!m_hasDocument || m_saveInProgress || m_editInProgress || m_loading || m_recovering) {
         return false;
@@ -3978,24 +4049,44 @@ bool PdfViewerWidget::setFormFieldText(int pageIndex, const QString& fieldName, 
     QScopedValueRollback<bool> editGuard(m_editInProgress, true);
 
     QString oldValue;
+    const pdf::FormFieldItem* targetField = nullptr;
     auto cacheIt = m_formFieldsCache.find(pageIndex);
     if (cacheIt != m_formFieldsCache.end() && cacheIt->second.loaded) {
         for (const auto& f : cacheIt->second.fields) {
             if (f.fieldName == fieldName && f.controlIndex == controlIndex) {
                 if (f.isReadOnly()) return false;
                 oldValue = f.value;
+                targetField = &f;
                 break;
             }
         }
     }
 
-    const auto response = m_renderWorker.setFormFieldTextSync(m_currentDocumentId, pageIndex, fieldName, controlIndex, text, {});
+    std::vector<pdf::AnnotationPathElement> newOutlines;
+    std::vector<pdf::AnnotationPathElement> oldOutlines;
+    if (targetField) {
+        const auto res = generateFormFieldOutlines(*targetField, text, newOutlines);
+        if (res == FormFieldOutlineResult::Failed) {
+            Q_EMIT loadError(tr("Could not generate vector appearance for text in form field '%1'.").arg(fieldName));
+            return false;
+        }
+        const auto oldRes = generateFormFieldOutlines(*targetField, oldValue, oldOutlines);
+        if (oldRes == FormFieldOutlineResult::Failed) {
+            Q_EMIT loadError(tr("Could not generate vector appearance for existing text in form field '%1'.").arg(fieldName));
+            return false;
+        }
+    } else if (!isDrawableByBuiltInFont(text) || !isDrawableByBuiltInFont(oldValue)) {
+        Q_EMIT loadError(tr("Field '%1' geometry unavailable for vector text appearance.").arg(fieldName));
+        return false;
+    }
+
+    const auto response = m_renderWorker.setFormFieldTextSync(m_currentDocumentId, pageIndex, fieldName, controlIndex, text, newOutlines);
     if (!response.success) {
         Q_EMIT loadError(tr("Could not set form field text: %1").arg(response.errorMessage));
         return false;
     }
 
-    m_editLog.recordSetFormFieldText(pageIndex, fieldName, controlIndex, oldValue, text, {});
+    m_editLog.recordSetFormFieldText(pageIndex, fieldName, controlIndex, oldValue, text, newOutlines, oldOutlines);
 
     if (cacheIt != m_formFieldsCache.end() && cacheIt->second.loaded) {
         for (auto& f : cacheIt->second.fields) {

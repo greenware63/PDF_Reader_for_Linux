@@ -130,6 +130,38 @@ static QByteArray freeTextAppearanceContent(const AnnotationItem& item, double r
     return out;
 }
 
+static QByteArray formFieldAppearanceContent(const std::vector<AnnotationPathElement>& path,
+                                             double r, double g, double b,
+                                             const FS_RECTF& rect) {
+    QByteArray out;
+    out.reserve(static_cast<qsizetype>(path.size()) * 14 + 128);
+    out += "q\n";
+    const double minX = std::min(rect.left, rect.right);
+    const double minY = std::min(rect.bottom, rect.top);
+    const double w = std::abs(rect.right - rect.left);
+    const double h = std::abs(rect.top - rect.bottom);
+    if (w > 0.0 && h > 0.0) {
+        out += pdfNumber(minX) + ' ' + pdfNumber(minY) + ' ' +
+               pdfNumber(w) + ' ' + pdfNumber(h) + " re W n\n";
+    }
+    const QByteArray color = pdfNumber(r) + ' ' + pdfNumber(g) + ' ' + pdfNumber(b);
+    out += color + " rg\n";
+    for (size_t i = 0; i < path.size();) {
+        const auto& e = path[i];
+        if (e.kind == AnnotationPathElement::Kind::CurveTo) {
+            out += pdfNumber(path[i].x) + ' ' + pdfNumber(path[i].y) + ' ' + pdfNumber(path[i + 1].x) + ' ' +
+                   pdfNumber(path[i + 1].y) + ' ' + pdfNumber(path[i + 2].x) + ' ' + pdfNumber(path[i + 2].y) + " c\n";
+            i += 3;
+        } else {
+            out += pdfNumber(e.x) + ' ' + pdfNumber(e.y) +
+                   (e.kind == AnnotationPathElement::Kind::MoveTo ? " m\n" : " l\n");
+            ++i;
+        }
+    }
+    out += "f\nQ\n";
+    return out;
+}
+
 PdfiumPage::PdfiumPage(DocumentHandle doc, int pageIndex, std::shared_ptr<FormEnv> form)
     : m_doc(std::move(doc)), m_form(std::move(form)), m_pageIndex(pageIndex) {
     if (m_doc) {
@@ -981,9 +1013,11 @@ FPDF_ANNOTATION findWidgetAnnot(FPDF_PAGE page, FPDF_FORMHANDLE form, const QStr
 
 bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, const QString& text,
                                   const std::vector<AnnotationPathElement>& vectorOutlines) {
-    (void)vectorOutlines; // Outlines deferred to Slice 4
     if (!m_page || !m_form || !m_form->handle || fieldName.isEmpty() || controlIndex < 0 ||
         text.size() > static_cast<qsizetype>(kMaxFormFieldTextCodeUnits)) {
+        return false;
+    }
+    if (!vectorOutlines.empty() && !isValidTextOutline(vectorOutlines)) {
         return false;
     }
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
@@ -1025,6 +1059,15 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
         }
     }
 
+    // Capture prior AP for rollback
+    unsigned long origApLen = FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0);
+    std::vector<unsigned short> origApWide;
+    if (origApLen > 2) {
+        origApWide.resize(origApLen / sizeof(unsigned short) + 1, 0);
+        FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                        reinterpret_cast<FPDF_WCHAR*>(origApWide.data()), origApLen);
+    }
+
     bool killed = false;
     if (isEditableCombo) {
         FORM_ForceToKillFocus(m_form->handle);
@@ -1059,12 +1102,38 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
         }
     }
 
-    const bool success = (killed && committedVal == text);
+    bool apOk = true;
+    if (!vectorOutlines.empty()) {
+        unsigned int fontR = 0, fontG = 0, fontB = 0;
+        double rf = 0.0, gf = 0.0, bf = 0.0;
+        if (FPDFAnnot_GetFontColor(m_form->handle, annot, &fontR, &fontG, &fontB)) {
+            rf = fontR / 255.0;
+            gf = fontG / 255.0;
+            bf = fontB / 255.0;
+        }
+        FS_RECTF rect{};
+        FPDFAnnot_GetRect(annot, &rect);
+        const QByteArray apContent = formFieldAppearanceContent(vectorOutlines, rf, gf, bf, rect);
+        const std::u16string apU16 = QString::fromLatin1(apContent).toStdU16String();
+        apOk = (FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                                reinterpret_cast<FPDF_WIDESTRING>(apU16.c_str())) != 0);
+    } else if (origApLen > 2) {
+        FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr);
+    }
+
+    const bool success = (killed && committedVal == text && apOk);
     if (!success) {
-        // Rollback to prior value to avoid leaving an unlogged mutation
+        // Rollback to prior value and /AP to avoid leaving an unlogged mutation
         std::vector<unsigned short> origWide(originalVal.size() + 1, 0);
         for (int i = 0; i < originalVal.size(); ++i) {
             origWide[i] = originalVal.at(i).unicode();
+        }
+
+        if (origApLen > 2 && !origApWide.empty()) {
+            FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                            reinterpret_cast<FPDF_WIDESTRING>(origApWide.data()));
+        } else {
+            FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr);
         }
 
         bool rollbackOk = false;
