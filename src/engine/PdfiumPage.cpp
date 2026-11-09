@@ -858,12 +858,17 @@ std::vector<FormFieldItem> PdfiumPage::listFormFields(bool* truncated) {
         item.pageIndex = m_pageIndex;
 
         FS_RECTF rect{};
-        if (FPDFAnnot_GetRect(annot, &rect)) {
-            item.left = rect.left;
-            item.top = rect.top;
-            item.right = rect.right;
-            item.bottom = rect.bottom;
+        if (!FPDFAnnot_GetRect(annot, &rect) ||
+            !std::isfinite(rect.left) || !std::isfinite(rect.top) ||
+            !std::isfinite(rect.right) || !std::isfinite(rect.bottom)) {
+            clippedAny = true;
+            FPDFPage_CloseAnnot(annot);
+            continue;
         }
+        item.left = rect.left;
+        item.top = rect.top;
+        item.right = rect.right;
+        item.bottom = rect.bottom;
 
         int rawType = FPDFAnnot_GetFormFieldType(m_form->handle, annot);
         switch (rawType) {
@@ -927,6 +932,8 @@ std::vector<FormFieldItem> PdfiumPage::listFormFields(bool* truncated) {
             }
             budgetUsed += cost;
             result.push_back(std::move(item));
+        } else {
+            clippedAny = true;
         }
     }
 
