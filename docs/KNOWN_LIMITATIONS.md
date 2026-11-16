@@ -7,25 +7,52 @@ deferred, not an undiscovered bug.
 
 | Capability | Status |
 |---|---|
-| Show stored form-field values and check marks | **Supported** (drawn by PDFium's form-fill layer, render-only) |
-| Edit / fill in form fields | **Not yet** (planned for phase 2) |
+| Show stored form-field values and check marks | **Supported** (drawn by PDFium's form-fill environment) |
+| Edit / fill in text fields, checkboxes, radio buttons, combo and list boxes | **Supported** (in-place Qt editors, Tab navigation, undo/redo, crash replay) |
+| Export flattened PDF | **Supported** (burns form widgets into static page graphics, non-destructive to active session) |
 | PDF JavaScript (calculation, validation, formatting, show/hide) | **Never runs** (no JavaScript engine is built in, by design: threat model T1/T2) |
 | XFA forms ("dynamic" forms, common in some government and bank PDFs) | **Not supported** |
-| Form submission, URL/launch actions | **Not supported** (never executed) |
+| Pushbuttons, ResetForm, form submission, URL/launch actions | **Inert / Not supported** (never executed) |
+| Calculated / derived fields | **Not recomputed** (no JavaScript engine) |
 
-What this means in practice:
+### Form Editing & Navigation
 
-- A field is shown with the value **stored in the file**. If a form relies on JavaScript to compute a
-  value (totals, dates, derived fields), that value is **not recomputed** and may look empty or stale.
-  Nothing tells the user this happened.
-- Forms that need JavaScript to reveal or enable parts of the page may look incomplete or inert.
-- XFA-only documents usually render as a placeholder page ("Please wait... / update your viewer").
-- Do not rely on this viewer to fill, calculate or validate official forms until phase 2 ships and
-  this page says so.
+- **Editable field types**:
+  - Single-line text fields (`QLineEdit`) and multi-line text fields (`QPlainTextEdit`) with password masking where requested by field flags.
+  - Checkboxes and radio button groups: toggled directly on click or keyboard activation. Radio buttons in a group share mutual exclusion.
+  - Dropdown combo boxes and editable combo boxes with custom typed text.
+  - List boxes with single selection or multi-selection (`ExtendedSelection`).
+- **Keyboard navigation**: Tab and Shift+Tab navigate forward and backward in document order through navigable fields across pages, scrolling the target field into view and activating its in-place editor. Escape cancels an active editor; Enter commits combo/list choices.
+- **Undo / Redo and Crash Resilience**: Form mutations participate directly in the UI-owned `EditLog`. Undo (`Ctrl+Z`) and Redo (`Ctrl+Y` / `Ctrl+Shift+Z`) revert field values, toggle states, choices, and their associated appearance streams. If the isolated worker crashes, the UI restarts it and replays the edit log automatically.
+- **Flatten & Export**: "Export Flattened PDF..." burns all annotations and interactive form fields into static page contents (`FPDFPage_Flatten`) and strips interactive form structures (`/Annots`). Flattened export is strictly non-destructive: pages are imported into an isolated temporary document, so the user's active document and in-memory form edits remain interactive.
 
-Form-field values are drawn since the form-fill environment was added to the viewer's render path
-(`PdfiumPage::drawFormFields`). Before that change, filled-in values were **not displayed at all**.
-The environment installs no callbacks, forwards no input and sets no JavaScript platform.
+### Non-Latin and Persian Values
+
+- For Persian, Arabic, and other non-Latin text values where standard PDF built-in fonts lack glyph coverage or HarfBuzz shaping, the viewer lays the text out with Qt and synthesizes custom vector appearance streams (`/AP`) directly on the field widget annotation. The text is shaped, joined (including Persian letters like گ and ی), right-aligned, and bounded to the widget's clip rectangle.
+- The raw Unicode text value is simultaneously stored in the field's `/V` entry.
+- External viewers: third-party readers like Poppler and MuPDF render the synthesized vector appearance identically without requiring embedded fonts. However, if another PDF editor modifies the field value, it may rebuild the appearance from standard PDF fonts (e.g., Helvetica) and drop non-Latin glyphs. Compatibility with Adobe Acrobat, Foxit, and Okular is currently **untested**.
+
+### Ingestion Caps & Limits
+
+To prevent memory exhaustion and denial-of-service from malformed or hostile PDFs (threat model T1/T2):
+- **Fields per page**: At most 1,000 form fields are enumerated per page.
+- **Options per choice field**: At most 1,000 choices are loaded for a combo box or list box.
+- **Value length cap**: Field values (`/V`) are capped at 32,768 UTF-16 code units (64 KiB wire bytes). Longer values are rejected.
+- **Field names and option labels**: Capped at 1,024 characters each.
+- **Field hierarchy nesting**: PDFium resolves inherited fully-qualified field names up to 31 nesting levels; deeper hierarchies return an unknown/empty name.
+- **IPC response budget**: The worker's serialized per-page form field response is strictly capped at 16 MiB. If the field count or byte budget is exceeded, the worker truncates the list safely, sets `truncated = true`, and preserves worker session integrity without crashing.
+
+### What Never Runs
+
+- **JavaScript**: No JavaScript engine is embedded. Form validation, derived calculations, formatting scripts, and visibility toggling never execute. Forms that rely on JavaScript to calculate totals, fill dates, or enable sections will show only the values stored in the file or remain inert.
+- **XFA**: Pure dynamic XFA forms are not supported and render only the static fallback page.
+- **Pushbuttons and Actions**: Pushbuttons and `ResetForm` actions do not submit data, trigger network requests, or reset fields. SubmitForm and URL actions are blocked.
+
+### Incremental Save and Byte Persistence
+
+- When saving a modified form, the viewer uses PDF incremental updates (`FPDF_INCREMENTAL`) by default to preserve original file bytes, digital signatures, and object streams.
+- **Old field values remain in the saved file bytes**: Just like deleted annotations, an incremental update appends a new revision to the end of the file. The original objects and their prior field values remain in the preceding byte stream.
+- **Privacy notice**: Do not rely on editing form fields or replacing sensitive text (passwords, identity numbers, financial information) to sanitize a document before sharing. To permanently remove prior field values, export a flattened PDF or apply burn-in redaction.
 
 ## Annotations
 

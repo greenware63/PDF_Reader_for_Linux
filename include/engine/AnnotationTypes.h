@@ -210,7 +210,7 @@ struct AnnotationItem {
     double bottom{0.0};
 
     // Standard metadata entries
-    QString contents;         // /Contents string (max 64 KiB UTF-16)
+    QString contents;         // /Contents string (max 32,768 UTF-16 code units (64 KiB of bytes))
     QString author;           // /T author string (max 256 chars)
     QString name;             // /NM unique annotation identifier string
     QString modificationDate; // /M date string

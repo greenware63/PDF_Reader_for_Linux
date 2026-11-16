@@ -148,13 +148,13 @@ Descriptor policy change (must be updated in `threat_model.md` and tests togethe
 
 | Message | Direction | Carries | Hard limits (proposal) |
 |---|---|---|---|
-| `AddAnnotation` | UI→worker | id, page, subtype, rect, quad points, colour, opacity, border, text, author | quads ≤ 4096; text ≤ 64 KiB UTF-16; author ≤ 256 chars |
+| `AddAnnotation` | UI→worker | id, page, subtype, rect, quad points, colour, opacity, border, text, author | quads ≤ 4096; text ≤ 32,768 UTF-16 code units (64 KiB of bytes); author ≤ 256 chars |
 | `AddInkAnnotation` | UI→worker | id, page, strokes, colour, width | strokes ≤ 256; total points ≤ 100 000 |
 | `ModifyAnnotation` / `DeleteAnnotation` | UI→worker | id (+ changed fields) | same field limits |
-| `ListAnnotations` / `HitTest` | UI→worker | page (+ point) | reply ≤ 10 000 items, text clipped (≤ 32,768 UTF-16 chars / 64 KiB), total per-page reply ≤ 16 MiB (truncated flag) |
+| `ListAnnotations` / `HitTest` | UI→worker | page (+ point) | reply ≤ 10 000 items, text clipped (≤ 32,768 UTF-16 code units (64 KiB of bytes)), total per-page reply ≤ 16 MiB (truncated flag) |
 | `ListFormFields` (Protocol 13) | UI→worker | page | request carries bounded page index |
-| `ListFormFieldsResponse` (Protocol 13) | worker→UI | page, truncated flag, fields (fieldName, controlIndex, type, flags, rect, value, options, checked) | fields ≤ 1 000; options ≤ 1 000; text ≤ 64 KiB UTF-16; total per-page reply ≤ 16 MiB (sets `truncated = true` when budget or caps are reached) |
-| `SetFormFieldText` (Protocol 13) | UI→worker | page, fieldName, controlIndex, text, vector outline elements (optional) | text ≤ 64 KiB UTF-16; vector elements ≤ 10 000 |
+| `ListFormFieldsResponse` (Protocol 13) | worker→UI | page, truncated flag, fields (fieldName, controlIndex, type, flags, rect, value, options, checked) | fields ≤ 1 000; options ≤ 1 000; text ≤ 32,768 UTF-16 code units (64 KiB of bytes); total per-page reply ≤ 16 MiB (sets `truncated = true` when budget or caps are reached) |
+| `SetFormFieldText` (Protocol 13) | UI→worker | page, fieldName, controlIndex, text, vector outline elements (optional) | text ≤ 32,768 UTF-16 code units (64 KiB of bytes); vector elements ≤ 10 000 |
 | `ToggleFormField` (Protocol 13) | UI→worker | page, fieldName, controlIndex, checked state | boolean state |
 | `SetFormFieldChoice` (Protocol 13) | UI→worker | page, fieldName, controlIndex, selected indices | selected indices ≤ 1 000 |
 | `SaveRequest` (+1 fd) / `SaveProgress` / `SaveResult` | both | mode, revision / progress / result | one fd; `bytesWritten` verified by the UI |
