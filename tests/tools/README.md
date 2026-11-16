@@ -29,8 +29,8 @@ a text appearance in three non-embedded fonts (`portable`), MuPDF and Poppler dr
 (`agree`, 0.28), 6 to 7 letter runs where the script requires 4 (`joined`), and a 0.55 match with the reference (`reference`).
 On the viewer's own output it passes everything: the five FreeText boxes of the golden sample, and the Persian form field
 written by the merged slice 4 (five different strings, all three readers; `reference` 0.96 to 1.00, `agree` 1.000).
-A digits-only date matches the reference less closely (0.92 to 0.96) than letters do (0.99 to 1.00), so a text made only of
-digits has the smallest margin above the 0.88 threshold.
+A digits-only date matches the reference less closely (0.95 to 0.96 in the two samples measured) than letters do (0.99 to
+1.00), so a text made only of digits has the smallest margin above the 0.88 threshold.
 
 Needs: `pikepdf numpy scipy pillow` (Pillow built with raqm, which the pip wheels are, plus `libfribidi0`), and
 optionally `pymupdf`, `pypdfium2` and Poppler's `pdftoppm` as the readers. An installed font with the Persian letters is
