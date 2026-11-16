@@ -83,16 +83,16 @@ flowchart TD
 | **Viewing Modes** | **Dark Mode & Reading Themes** | LUT-based color mode post-processing (Normal, Inverted/DarkMode `#181818`, Sepia, High Contrast) with hue preservation and zero-mutation reversibility. |
 | **Printing & Export** | **CUPS Native Printing & PDF Export** | Zero-PDFium UI printing via IPC `RenderPageRequest`, native print dialog (`QPrintDialog`), and headless PDF export. |
 | **Burn-in Redaction** | **Sanitization & Overwrite Guards** | End-to-end pixel redaction engine: vector and image flattening, metadata/stream sanitization, UI mark staging, and strict atomic save guards preventing source file collisions. |
-| **Annotations & Save Pipeline (Phase 2 / M1–M4)** | **Secure Annotation Editing & Replay** | Write-only descriptor passing over `SCM_RIGHTS`, byte-prefix invariant verification, UI-owned edit log, undo/redo with worker crash replay, markup annotations (Highlight, Underline, StrikeOut, Squiggly, Text Note, Ink, Square, Circle), image stamps, and file attachments. |
-| **Interactive AcroForms (Phase 2 / M5)** | **Form Field Editing & Flattened Export** | In-place native Qt form controls (`QLineEdit`, `QPlainTextEdit`, `QComboBox`, `QListWidget`), Tab/Shift+Tab navigation, vector `/AP` appearance stream synthesis for Persian/RTL and non-Latin text, and non-destructive whole-document flattening export via isolated temporary PDFium instances. |
+| **Annotations & Save Pipeline (Phase 2 / M1–M4)** | **Secure Annotation Editing & Replay** | Write-only descriptor passing over `SCM_RIGHTS`, byte-prefix invariant verification, UI-owned edit log, undo/redo with worker crash replay, markup annotations (Highlight, Underline, StrikeOut, Squiggly, Text Note, Ink, Square, Circle), image stamps, and file attachments (PRs #32, #33, #34, #35, #38, #39, #40, #42, #43). |
+| **Interactive AcroForms (Phase 2 / M5)** | **Form Field Editing & Flattened Export** | In-place native Qt form controls (`QLineEdit`, `QPlainTextEdit`, `QComboBox`, `QListWidget`), Tab/Shift+Tab navigation, vector `/AP` appearance stream synthesis for Persian/RTL and non-Latin text, and non-destructive whole-document flattening export via isolated temporary PDFium instances (PRs #44, #47, #48, #49). |
 | **Security Fuzzing** | **IPC Mutation Fuzz Testing** | Dedicated `IpcFuzzTestSuite` executing 1,000+ randomized mutation fuzz tests against deserializers to guarantee boundary defense against hostile packets. |
 | **Linux Packaging** | **Flatpak & Sandbox Verification** | Official Flatpak manifest (`org.greenware.PDFReader.yaml`) on KDE 6.10 runtime. Automated test runner (`scripts/test_flatpak_sandbox.sh`) verifying Landlock confinement and host font mapping under `flatpak run`. |
 
 ---
 
-## 3. Test Verification (10 Suites, 185+ Tests, 100% Pass)
+## 3. Test Verification (10 Suites, 184+ Unit/Integration Tests & 1,000+ Fuzz Tests, 100% Pass)
 
-The project enforces automated test execution through CTest, GitHub Actions CI, and local container verification:
+The project enforces automated test execution through CTest, GitHub Actions CI, and local container verification (184 unit and integration tests across the 6 primary test suites, plus 3 redaction verification suites and 1,000+ mutation fuzz tests):
 
 1. **`EngineRenderTestSuite` (47 Tests)**:
    - Handle lifetimes, render whole page caps, 37px grid-shift tile stitching, sub-pixel edge straddling at 15× zoom.
@@ -107,7 +107,7 @@ The project enforces automated test execution through CTest, GitHub Actions CI, 
    - Non-blocking asynchronous document open (deflaked timing), smooth continuous scrolling without starvation, in-flight tile deduplication, zoom fallback, prefetch rings.
    - Text selection (single/cross-page, supplementary Unicode, rotated/cropped pages), FindBar match cycling, outline/thumbnail sidebars, dark mode `#181818` viewport color, keyboard navigation, redaction mark staging, and search results panel.
    - Annotation UI tools, sticky notes, ink drawing, geometry, image stamp dialogs, file attachment extraction, in-place AcroForm editors (`QLineEdit`, `QPlainTextEdit`, `QComboBox`, `QListWidget`), Tab navigation, Persian outline generation validation, and flattened PDF export.
-5. **`WorkerIpcTestSuite` (28 Tests)**:
+5. **`WorkerIpcTestSuite` (49 Tests)**:
    - Shared-tile transport bounds security and shrunken segment SIGBUS defense.
    - Versioned protocol negotiation, document loading over IPC with descriptor passing, thumbnail/print/text extraction over IPC.
    - Crash resilience and clean socket disconnect teardown.
@@ -116,7 +116,7 @@ The project enforces automated test execution through CTest, GitHub Actions CI, 
    - **Tests 19A–19I**: Outside-worker pipe-observable descriptor lifecycle (`POLLERR` verification of packet association, non-Open rejection, stray descriptor closure, coalesced packet isolation, multi-descriptor rejection, and mid-packet disconnect hygiene).
    - **Tests 20a–20b**: Confined worker non-Latin text rendering (embedded unicode vs. non-embedded CID Japanese CJK system fonts via fontconfig).
    - **Tests 21a–21b**: Dynamic font-root probing (`--test-probe-read`) verifying the worker can read host font directories (including Flatpak `/run/host/fonts`), with truthful skip reporting when host fonts are absent.
-6. **`PasswordPromptTestSuite`**:
+6. **`PasswordPromptTestSuite` (1 Test)**:
    - Headless encrypted document handling, incorrect password rejection, and correct password unlocking.
 7. **`RedactionRotationTestSuite`**:
    - End-to-end pixel-level redaction verification with `pdftoppm` witness across rotated pages and multi-page fixtures.
@@ -154,10 +154,10 @@ Phase 2 introduces document modification, annotation editing, and interactive Ac
 flowchart TD
     M0["Milestone M0: Pinned PDFium Spike (COMPLETE)\n- 26/26 smoke checks passed\n- Incremental prefix invariant confirmed\n- /AP rendering validated"]
     M1["Milestone M1: Read-Only Annotations (COMPLETE - PR #32)\n- List, render, and hit-test existing annotations\n- Hostile-PDF fuzz corpus additions\n- Widget double-draw check"]
-    M2["Milestone M2: Save Pipeline & Highlight End-to-End (COMPLETE - PR #34)\n- Write-only descriptor passing over SCM_RIGHTS\n- UI byte-prefix verification & atomic commit\n- UI edit log, undo/redo, crash replay"]
-    M3["Milestone M3: Standard Markup & Shapes (COMPLETE - PR #36, #39, #40)\n- Underline, StrikeOut, Squiggly, Text Note, Ink, Shapes\n- Interoperability matrix testing"]
+    M2["Milestone M2: Save Pipeline & Highlight End-to-End (COMPLETE - PR #33)\n- Write-only descriptor passing over SCM_RIGHTS\n- UI byte-prefix verification & atomic commit\n- UI edit log, undo/redo, crash replay"]
+    M3["Milestone M3: Standard Markup, Shapes & FreeText (COMPLETE - PR #34, #35, #38, #39, #40, #42)\n- Underline, StrikeOut, Squiggly, Text Note, Ink, Shapes, FreeText\n- Interoperability matrix testing"]
     M4["Milestone M4: Stamps & Attachments (COMPLETE - PR #43)\n- Image stamping & file attachments\n- Dedicated security threat review"]
-    M5["Milestone M5: Interactive AcroForms & Flattening (COMPLETE - PR #45, #46, #47, #48, #49)\n- Form field event dispatch & in-place Qt editing\n- Persian/RTL vector /AP appearance synthesis\n- Non-destructive form flattening and PDF export"]
+    M5["Milestone M5: Interactive AcroForms & Flattening (COMPLETE - PR #44, #47, #48, #49)\n- Form field event dispatch & in-place Qt editing\n- Persian/RTL vector /AP appearance synthesis\n- Non-destructive form flattening and PDF export"]
 
     M0 --> M1 --> M2 --> M3 --> M4 --> M5
 ```
@@ -166,7 +166,7 @@ flowchart TD
 
 ## 5. Next Immediate Steps
 
-1. **Merge Test Suite PR #50**: Integrate Claude's hostile form fixture generator and Persian appearance checker test harness ([PR #50](https://github.com/greenware63/PDF_Reader_for_Linux/pull/50)).
+1. **Merge Test Suite PR #50**: Integrate hostile form fixture generator and Persian appearance checker test harness ([PR #50](https://github.com/greenware63/PDF_Reader_for_Linux/pull/50)).
 2. **Merge Bug Fix for Ghost Fields**: Merge the fix for oversized `/Rect` click interception and hit-testing in form fields.
-3. **Implement PR B (Hostile Test Integration & CI Validator Harness)**: Wire hostile form fixtures and Persian appearance verifiers into the automated CI build matrix.
+3. **Implement PR B (Hostile Test Integration & CI Validator Harness)**: Wire hostile form fixtures and Persian appearance verifiers into the automated CI build matrix, including tests verifying refusal of text exceeding the 250,000 vector outline element cap.
 4. **Third-Party Viewer Interoperability Validation**: Perform manual verification of saved and flattened forms across third-party viewers (Adobe Acrobat, Foxit Reader, Okular).

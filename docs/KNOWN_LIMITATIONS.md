@@ -23,12 +23,13 @@ deferred, not an undiscovered bug.
   - Dropdown combo boxes and editable combo boxes with custom typed text.
   - List boxes with single selection or multi-selection (`ExtendedSelection`).
 - **Keyboard navigation**: Tab and Shift+Tab navigate forward and backward in document order through navigable fields across pages, scrolling the target field into view and activating its in-place editor. Escape cancels an active editor; Enter commits combo/list choices.
-- **Undo / Redo and Crash Resilience**: Form mutations participate directly in the UI-owned `EditLog`. Undo (`Ctrl+Z`) and Redo (`Ctrl+Y` / `Ctrl+Shift+Z`) revert field values, toggle states, choices, and their associated appearance streams. If the isolated worker crashes, the UI restarts it and replays the edit log automatically.
+- **Undo / Redo and Crash Resilience**: Form mutations participate directly in the UI-owned `EditLog`. Undo (`QKeySequence::Undo`, typically `Ctrl+Z`) and Redo (`QKeySequence::Redo`, platform-dependent, e.g. `Ctrl+Y` or `Ctrl+Shift+Z`) revert field values, toggle states, choices, and their associated appearance streams. If the isolated worker crashes, the UI restarts it and replays the edit log automatically.
 - **Flatten & Export**: "Export Flattened PDF..." burns all annotations and interactive form fields into static page contents (`FPDFPage_Flatten`) and strips interactive form structures (`/Annots`). Flattened export is strictly non-destructive: pages are imported into an isolated temporary document, so the user's active document and in-memory form edits remain interactive.
 
 ### Non-Latin and Persian Values
 
-- For Persian, Arabic, and other non-Latin text values where standard PDF built-in fonts lack glyph coverage or HarfBuzz shaping, the viewer lays the text out with Qt and synthesizes custom vector appearance streams (`/AP`) directly on the field widget annotation. The text is shaped, joined (including Persian letters like گ and ی), right-aligned, and bounded to the widget's clip rectangle.
+- For Persian, Arabic, and other non-Latin text values where standard PDF built-in fonts lack glyph coverage or HarfBuzz shaping, the viewer lays the text out with Qt and synthesizes custom vector appearance streams (`/AP`) directly on the field widget annotation. The text is shaped and joined (including Persian letters like گ and ی). For single-line fields whose right-to-left text is narrower than the field, the layout is right-aligned.
+- Vector appearance generation and the field edit are refused if the widget is 4 pt or less in width or height, if the text requires more than 250,000 vector outline elements (`kMaxTextOutlineElements`), or if any character cannot be drawn by any installed system font.
 - The raw Unicode text value is simultaneously stored in the field's `/V` entry.
 - External viewers: third-party readers like Poppler and MuPDF render the synthesized vector appearance identically without requiring embedded fonts. However, if another PDF editor modifies the field value, it may rebuild the appearance from standard PDF fonts (e.g., Helvetica) and drop non-Latin glyphs. Compatibility with Adobe Acrobat, Foxit, and Okular is currently **untested**.
 
@@ -37,7 +38,7 @@ deferred, not an undiscovered bug.
 To prevent memory exhaustion and denial-of-service from malformed or hostile PDFs (threat model T1/T2):
 - **Fields per page**: At most 1,000 form fields are enumerated per page.
 - **Options per choice field**: At most 1,000 choices are loaded for a combo box or list box.
-- **Value length cap**: Field values (`/V`) are capped at 32,768 UTF-16 code units (64 KiB wire bytes). Longer values are rejected.
+- **Value length cap**: A value already stored in the file that is longer than 32,768 UTF-16 code units (64 KiB wire bytes) is enumerated clipped to 32,768 units and causes the page's field list to be flagged as `truncated`. Typing or setting a value exceeding 32,768 code units via the UI or API is rejected.
 - **Field names and option labels**: Capped at 1,024 characters each.
 - **Field hierarchy nesting**: PDFium resolves inherited fully-qualified field names up to 31 nesting levels; deeper hierarchies return an unknown/empty name.
 - **IPC response budget**: The worker's serialized per-page form field response is strictly capped at 16 MiB. If the field count or byte budget is exceeded, the worker truncates the list safely, sets `truncated = true`, and preserves worker session integrity without crashing.
@@ -50,9 +51,9 @@ To prevent memory exhaustion and denial-of-service from malformed or hostile PDF
 
 ### Incremental Save and Byte Persistence
 
-- When saving a modified form, the viewer uses PDF incremental updates (`FPDF_INCREMENTAL`) by default to preserve original file bytes, digital signatures, and object streams.
+- When saving a modified form, the viewer uses PDF incremental updates (`FPDF_INCREMENTAL`) by default to preserve original file bytes and byte-prefix intact.
 - **Old field values remain in the saved file bytes**: Just like deleted annotations, an incremental update appends a new revision to the end of the file. The original objects and their prior field values remain in the preceding byte stream.
-- **Privacy notice**: Do not rely on editing form fields or replacing sensitive text (passwords, identity numbers, financial information) to sanitize a document before sharing. To permanently remove prior field values, export a flattened PDF or apply burn-in redaction.
+- **Privacy notice**: Do not rely on editing form fields or replacing sensitive text (passwords, identity numbers, financial information) to sanitize a document before sharing. Older revisions remain intact in earlier file bytes. Exporting a flattened PDF creates a brand-new document without incremental revision history, purging superseded prior values; however, any active (un-cleared) field values are permanently baked into visible page content. To permanently eliminate sensitive text from a document, use the pixel redaction engine.
 
 ## Annotations
 
