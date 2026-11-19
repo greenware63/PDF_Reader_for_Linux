@@ -9,7 +9,7 @@ The project has established a production-grade, native Linux PDF workstation pow
 - **Core Viewer & Workstation Features (100% Complete)**: Continuous 64-bit layout, multi-spread view modes, arbitrary page rotation, thumbnail/page label sidebar, bookmarks outline, full-text Persian/Arabic RTL search, dark mode/reading themes, multi-document tabs, and native CUPS printing.
 - **Pixel Redaction Engine (100% Complete)**: Structural PDF sanitization, metadata elimination, vector flattening, UI mark staging, and source overwrite prevention.
 - **Distribution & Hardening (100% Complete)**: Flatpak packaging on KDE 6.10 runtime with automated container testing, IPC mutation fuzzing suite, and binary hardening (`PIE`, full `RELRO`, `BIND_NOW`).
-- **Phase 2 Annotations, Save Pipeline & Interactive Forms (100% Complete)**: Full implementation of Milestones M0 through M5. Verified save pipeline with atomic commit, UI edit log/undo/redo, standard markup/notes/ink/shapes, image stamps and file attachments, interactive AcroForms with in-place Qt editing, Persian/RTL vector `/AP` appearance synthesis, and non-destructive form flattening export.
+- **Phase 2 Annotations, Save Pipeline & Interactive Forms (feature-complete; hostile-input CI coverage and third-party viewer validation pending)**: Full implementation of Milestones M0 through M5. Verified save pipeline with atomic commit, UI edit log/undo/redo, standard markup/notes/ink/shapes, image stamps and file attachments, interactive AcroForms with in-place Qt editing, Persian/RTL vector `/AP` appearance synthesis, and non-destructive form flattening export.
 
 ---
 
@@ -92,7 +92,7 @@ flowchart TD
 
 ## 3. Test Verification (10 Suites, 184+ Unit/Integration Tests & 1,000+ Fuzz Tests, 100% Pass)
 
-The project enforces automated test execution through CTest, GitHub Actions CI, and local container verification (184 unit and integration tests across the 6 primary test suites, plus 3 redaction verification suites and 1,000+ mutation fuzz tests):
+The project enforces automated test execution through CTest, GitHub Actions CI ([run 44482272613](https://github.com/greenware63/PDF_Reader_for_Linux/actions/runs/44482272613) passed across Release, ASan/UBSan, TSan, and shipping configurations), and local container verification (184 unit and integration tests across the 6 primary test suites, plus 3 redaction verification suites and 1,000+ mutation fuzz tests):
 
 1. **`EngineRenderTestSuite` (47 Tests)**:
    - Handle lifetimes, render whole page caps, 37px grid-shift tile stitching, sub-pixel edge straddling at 15× zoom.
@@ -136,7 +136,7 @@ A GitHub Actions matrix workflow runs on `ubuntu-24.04`:
 
 ---
 
-## 4. Completed Phase 2: Annotations, Save Pipeline & Forms
+## 4. Phase 2: Annotations, Save Pipeline & Forms (Feature-Complete)
 
 Phase 2 introduces document modification, annotation editing, and interactive AcroForms while strictly preserving write confinement and fail-closed security.
 
