@@ -36,6 +36,8 @@ text_rot270_crop.pdf
 text_test.pdf
 actual_supp_unicode.pdf
 persian_test.pdf
+widget_*.pdf
+exported_*.pdf
 .mcp.json
 
 # Flatpak build artifacts

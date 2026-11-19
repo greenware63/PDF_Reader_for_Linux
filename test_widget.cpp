@@ -7714,7 +7714,13 @@ int main(int argc, char* argv[]) {
     // --- TEST 62: Milestone M5 Slice 5 Form Flattening & Export in Viewer and Window ---
     std::cout << "[TEST 62] Testing form flattening & export in PdfViewerWidget & MainWindow (Milestone M5 Slice 5)..." << std::endl;
     {
-        std::string fixturePath = "tests/fixtures/form_fields_test.pdf";
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        std::string fixturePath = root + "/tests/fixtures/form_fields_test.pdf";
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "tests/fixtures/form_fields_test.pdf";
+        }
         if (!QFile::exists(QString::fromStdString(fixturePath))) {
             fixturePath = "../tests/fixtures/form_fields_test.pdf";
         }
@@ -7722,7 +7728,7 @@ int main(int argc, char* argv[]) {
             fixturePath = "../../tests/fixtures/form_fields_test.pdf";
         }
         if (!QFile::exists(QString::fromStdString(fixturePath))) {
-            std::cerr << "[FAIL] 62: fixture form_fields_test.pdf not found" << std::endl;
+            std::cerr << "[FAIL] 62: fixture form_fields_test.pdf not found at " << fixturePath << std::endl;
             return 1;
         }
 
