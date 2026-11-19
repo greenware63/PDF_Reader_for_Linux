@@ -6,10 +6,11 @@ The project has established a production-grade, native Linux PDF workstation pow
 
 ### High-Level Status
 - **Process Confinement & Threat T1 (100% Complete)**: Worker confined under Landlock ABI 1–5 (denying both arbitrary filesystem reads and writes), Seccomp BPF filters, resource limits (`RLIMIT_AS = 4 GiB`, `RLIMIT_CPU = 7200s`, `PR_SET_PDEATHSIG = SIGKILL`), and document descriptor passing over UNIX domain sockets via `SCM_RIGHTS`.
+- **Threat T18 Hardening**: Namespace creation via `clone`, `clone3`, and `setns` closed (denylist filter); `fork`/`vfork` residual open (needed by self-test harness; worker never forks).
 - **Core Viewer & Workstation Features (100% Complete)**: Continuous 64-bit layout, multi-spread view modes, arbitrary page rotation, thumbnail/page label sidebar, bookmarks outline, full-text Persian/Arabic RTL search, dark mode/reading themes, multi-document tabs, and native CUPS printing.
 - **Pixel Redaction Engine (100% Complete)**: Structural PDF sanitization, metadata elimination, vector flattening, UI mark staging, and source overwrite prevention.
 - **Distribution & Hardening (100% Complete)**: Flatpak packaging on KDE 6.10 runtime with automated container testing, IPC mutation fuzzing suite, and binary hardening (`PIE`, full `RELRO`, `BIND_NOW`).
-- **Phase 2 Annotations, Save Pipeline & Interactive Forms (feature-complete; hostile-input CI coverage and third-party viewer validation pending)**: Full implementation of Milestones M0 through M5. Verified save pipeline with atomic commit, UI edit log/undo/redo, standard markup/notes/ink/shapes, image stamps and file attachments, interactive AcroForms with in-place Qt editing, Persian/RTL vector `/AP` appearance synthesis, and non-destructive form flattening export.
+- **Phase 2 Annotations, Save Pipeline & Interactive Forms (feature-complete; hostile-input CI coverage and third-party viewer validation pending)**: Full implementation of Milestones M0 through M5. Verified save pipeline with atomic commit, UI edit log/undo/redo, standard markup/notes/ink/shapes, image stamps and file attachments, interactive AcroForms with in-place Qt editing, Persian/RTL vector `/AP` appearance synthesis, non-destructive form flattening export, and fixture lookup works for out-of-tree builds.
 
 ---
 
@@ -106,12 +107,12 @@ The project enforces automated test execution through CTest, GitHub Actions CI (
 4. **`ViewportWidgetTestSuite` (62 Tests)**:
    - Non-blocking asynchronous document open (deflaked timing), smooth continuous scrolling without starvation, in-flight tile deduplication, zoom fallback, prefetch rings.
    - Text selection (single/cross-page, supplementary Unicode, rotated/cropped pages), FindBar match cycling, outline/thumbnail sidebars, dark mode `#181818` viewport color, keyboard navigation, redaction mark staging, and search results panel.
-   - Annotation UI tools, sticky notes, ink drawing, geometry, image stamp dialogs, file attachment extraction, in-place AcroForm editors (`QLineEdit`, `QPlainTextEdit`, `QComboBox`, `QListWidget`), Tab navigation, Persian outline generation validation, and flattened PDF export.
+   - Annotation UI tools, sticky notes, ink drawing, geometry, image stamp dialogs, file attachment extraction, in-place AcroForm editors (`QLineEdit`, `QPlainTextEdit`, `QComboBox`, `QListWidget`), Tab navigation, Persian outline generation validation, flattened PDF export, and fixture lookup works for out-of-tree builds (PR #53).
 5. **`WorkerIpcTestSuite` (49 Tests)**:
    - Shared-tile transport bounds security and shrunken segment SIGBUS defense.
    - Versioned protocol negotiation, document loading over IPC with descriptor passing, thumbnail/print/text extraction over IPC.
    - Crash resilience and clean socket disconnect teardown.
-   - Deterministic isolation probe (`--isolation-selftest`) verifying read/write Landlock confinement, seccomp BPF denial, and foreign `/dev/shm` blocking.
+   - Deterministic isolation probe (`--isolation-selftest`, Test 8) verifying read/write Landlock confinement, foreign `/dev/shm` blocking, and comprehensive Seccomp BPF confinement: kills `setns`, `execve`, `execveat`, `ptrace`, `bpf`, `unshare`, `kexec_load`, and namespace-creating `clone(CLONE_NEW*)` (mask `0x7E020000`), returns `ENOSYS` on `clone3` to maintain glibc 2.34+ `pthread_create` fallback while blocking struct evasion, validates positive `thread_create`, and asserts the `fork` residual (PR #54, Threat T18).
    - Watchdog heartbeat progress monitoring across engine hangs and long workloads.
    - **Tests 19A–19I**: Outside-worker pipe-observable descriptor lifecycle (`POLLERR` verification of packet association, non-Open rejection, stray descriptor closure, coalesced packet isolation, multi-descriptor rejection, and mid-packet disconnect hygiene).
    - **Tests 20a–20b**: Confined worker non-Latin text rendering (embedded unicode vs. non-embedded CID Japanese CJK system fonts via fontconfig).
