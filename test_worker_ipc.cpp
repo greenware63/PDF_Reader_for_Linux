@@ -622,6 +622,28 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] io_uring_setup must be killed by seccomp." << std::endl;
             return 1;
         }
+        for (const char* probe : {
+            "clone_newuser", "clone_newns", "clone_newnet", "clone_newpid",
+            "clone_newipc", "clone_newuts", "clone_newcgroup", "setns",
+            "execve", "execveat", "ptrace", "bpf", "unshare", "kexec_load"
+        }) {
+            if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] %1: BLOCKED").arg(QLatin1String(probe)))) {
+                std::cerr << "[FAIL] seccomp must kill the " << probe << " probe (SIGSYS)." << std::endl;
+                return 1;
+            }
+        }
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] clone3: ENOSYS"))) {
+            std::cerr << "[FAIL] clone3 must return ENOSYS." << std::endl;
+            return 1;
+        }
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] thread_create: OK"))) {
+            std::cerr << "[FAIL] thread creation must succeed under seccomp filter." << std::endl;
+            return 1;
+        }
+        if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] fork: PERMITTED (known T18 residual)"))) {
+            std::cerr << "[FAIL] fork must be reported as PERMITTED (known T18 residual)." << std::endl;
+            return 1;
+        }
         if (!output.contains(QStringLiteral("[ISOLATION_SELFTEST] getuid: OK"))) {
             std::cerr << "[FAIL] seccomp must not deny ordinary syscalls (getuid regression)." << std::endl;
             return 1;

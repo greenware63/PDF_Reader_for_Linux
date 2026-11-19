@@ -1,4 +1,4 @@
-﻿#include "WorkerServer.h"
+#include "WorkerServer.h"
 #include <QCoreApplication>
 #include <QCommandLineParser>
 #include <QCommandLineOption>
@@ -20,6 +20,8 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sched.h>
+#include <thread>
 #if __has_include(<linux/audit.h>)
 #include <linux/audit.h>
 #endif
@@ -52,6 +54,96 @@
 #define SECCOMP_AUDIT_ARCH AUDIT_ARCH_ARM
 #elif defined(__i386__)
 #define SECCOMP_AUDIT_ARCH AUDIT_ARCH_I386
+#endif
+
+#if defined(SECCOMP_AUDIT_ARCH)
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__i386__)
+// On x86_64, aarch64, arm, and i386, clone flags is args[0] in sys_clone
+#else
+#error "Unsupported architecture: verify clone() argument layout"
+#endif
+#endif
+
+#ifndef CLONE_NEWNS
+#define CLONE_NEWNS 0x00020000
+#endif
+#ifndef CLONE_NEWCGROUP
+#define CLONE_NEWCGROUP 0x02000000
+#endif
+#ifndef CLONE_NEWUTS
+#define CLONE_NEWUTS 0x04000000
+#endif
+#ifndef CLONE_NEWIPC
+#define CLONE_NEWIPC 0x08000000
+#endif
+#ifndef CLONE_NEWUSER
+#define CLONE_NEWUSER 0x10000000
+#endif
+#ifndef CLONE_NEWPID
+#define CLONE_NEWPID 0x20000000
+#endif
+#ifndef CLONE_NEWNET
+#define CLONE_NEWNET 0x40000000
+#endif
+
+#ifndef __NR_clone3
+#define __NR_clone3 435
+#endif
+#ifndef SYS_clone3
+#define SYS_clone3 __NR_clone3
+#endif
+
+#ifndef __NR_setns
+#if defined(__x86_64__)
+#define __NR_setns 308
+#elif defined(__aarch64__)
+#define __NR_setns 268
+#elif defined(__arm__)
+#define __NR_setns 375
+#elif defined(__i386__)
+#define __NR_setns 346
+#endif
+#endif
+#ifndef SYS_setns
+#ifdef __NR_setns
+#define SYS_setns __NR_setns
+#endif
+#endif
+
+#ifndef SYS_clone
+#ifdef __NR_clone
+#define SYS_clone __NR_clone
+#endif
+#endif
+#ifndef SYS_execve
+#ifdef __NR_execve
+#define SYS_execve __NR_execve
+#endif
+#endif
+#ifndef SYS_execveat
+#ifdef __NR_execveat
+#define SYS_execveat __NR_execveat
+#endif
+#endif
+#ifndef SYS_ptrace
+#ifdef __NR_ptrace
+#define SYS_ptrace __NR_ptrace
+#endif
+#endif
+#ifndef SYS_bpf
+#ifdef __NR_bpf
+#define SYS_bpf __NR_bpf
+#endif
+#endif
+#ifndef SYS_unshare
+#ifdef __NR_unshare
+#define SYS_unshare __NR_unshare
+#endif
+#endif
+#ifndef SYS_kexec_load
+#ifdef __NR_kexec_load
+#define SYS_kexec_load __NR_kexec_load
+#endif
 #endif
 
 #ifndef SECCOMP_RET_KILL_PROCESS
@@ -200,16 +292,54 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
     }
 
 #if defined(PDF_WORKER_HAS_SECCOMP_HEADERS) && defined(PR_SET_SECCOMP) && defined(SECCOMP_MODE_FILTER)
-    // 4. Seccomp BPF filter: eliminate process execution, async kernel evasion, and network vectors (T1, T2, T10)
+    // 4. Seccomp BPF filter: eliminate process execution, async kernel evasion, namespace escapes, and network vectors (T1, T2, T10, T18)
     // - Validates architecture: mismatches (e.g. 32-bit int 0x80 on x86_64) terminate the process immediately
     // - Rejects x32 ABI calls (nr >= 0x40000000)
-    // - Terminates process (KILL_PROCESS) on dangerous syscalls (execve, execveat, io_uring_*, ptrace, bpf, unshare, kexec_*)
+    // - Terminates process (KILL_PROCESS) on dangerous syscalls (execve, execveat, io_uring_*, ptrace, bpf, unshare, setns, kexec_*)
+    // - Kills clone() with namespace creation flags (CLONE_NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET)
+    // - Denies clone3 with ENOSYS (glibc 2.34+ falls back to clone(); prevents userspace struct evasion without breaking pthread_create)
     // - Denies with EPERM on network syscalls (connect, socketcall, non-AF_UNIX socket)
-    // - Automatically computes relative jump offsets to eliminate manual offset counting errors
+    // - Note: fork() and vfork() remain ALLOWED because the self-test harness probes depend on fork(). The worker process never forks.
+    // - Automatically computes and bounds-checks relative jump offsets (<= 255) to eliminate manual offset counting errors
     std::vector<sock_filter> bpfCode;
     std::vector<size_t> jumpsToKill;
     std::vector<size_t> jumpsToDeny;
+    std::vector<size_t> jumpsToEnosys;
     std::vector<size_t> jumpsToAllow;
+
+    // Helper to resolve 8-bit jump offsets with bounds checking (failing closed if offset > 255)
+    auto setJumpOffset8 = [&](size_t fromIdx, size_t toIdx, bool isTrueBranch) -> bool {
+        if (toIdx <= fromIdx) {
+            errorMessage = "Invalid backward seccomp BPF jump offset";
+            return false;
+        }
+        const size_t offset = toIdx - (fromIdx + 1);
+        if (offset > 255) {
+            errorMessage = "Seccomp BPF jump offset exceeds 8-bit limit (" + std::to_string(offset) + " > 255)";
+            return false;
+        }
+        if (isTrueBranch) {
+            bpfCode[fromIdx].jt = static_cast<__u8>(offset);
+        } else {
+            bpfCode[fromIdx].jf = static_cast<__u8>(offset);
+        }
+        return true;
+    };
+
+    auto addKillJump = [&](uint32_t syscallNr) {
+        jumpsToKill.push_back(bpfCode.size());
+        bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, syscallNr});
+    };
+
+    auto addDenyJump = [&](uint32_t syscallNr) {
+        jumpsToDeny.push_back(bpfCode.size());
+        bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, syscallNr});
+    };
+
+    auto addEnosysJump = [&](uint32_t syscallNr) {
+        jumpsToEnosys.push_back(bpfCode.size());
+        bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, syscallNr});
+    };
 
 #if defined(SECCOMP_AUDIT_ARCH)
     // Step 1: Validate architecture. Mismatches jump to KILL_PROCESS.
@@ -228,16 +358,6 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
     jumpsToKill.push_back(x32Jump);
 #endif
 
-    auto addKillJump = [&](uint32_t syscallNr) {
-        jumpsToKill.push_back(bpfCode.size());
-        bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, syscallNr});
-    };
-
-    auto addDenyJump = [&](uint32_t syscallNr) {
-        jumpsToDeny.push_back(bpfCode.size());
-        bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, syscallNr});
-    };
-
     // Step 4: Syscalls that immediately terminate the worker process (KILL_PROCESS)
 #ifdef __NR_execve
     addKillJump(__NR_execve);
@@ -254,6 +374,9 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
 #ifdef __NR_unshare
     addKillJump(__NR_unshare);
 #endif
+#ifdef __NR_setns
+    addKillJump(__NR_setns);
+#endif
 #ifdef __NR_kexec_load
     addKillJump(__NR_kexec_load);
 #endif
@@ -268,6 +391,47 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
 #endif
 #ifdef __NR_io_uring_register
     addKillJump(__NR_io_uring_register);
+#endif
+
+    // Step 4b: clone3 (ENOSYS) and clone flag inspection (T18 namespace escape prevention)
+    // clone3 flags sit in a userspace struct that seccomp cannot inspect without user memory dereference.
+    // Return ENOSYS so glibc 2.34+ transparently falls back to clone(). Returning EPERM or KILL breaks pthread_create.
+#ifdef __NR_clone3
+    addEnosysJump(__NR_clone3);
+#endif
+
+#ifdef __NR_clone
+    // Syscall nr == __NR_clone inspection:
+    // If flags & 0x7E020000 (NEWNS|NEWCGROUP|NEWUTS|NEWIPC|NEWUSER|NEWPID|NEWNET) is non-zero -> KILL_PROCESS.
+    // Otherwise ALLOW (threads still need clone).
+    // Note: fork() and vfork() remain ALLOWED because the self-test harness probes depend on fork().
+    // The worker process itself never forks or spawns subprocesses.
+    size_t cloneCheck = bpfCode.size();
+    // Compare A (nr) with __NR_clone.
+    // If equal: fall through (jt=0) to inspect args[0].
+    // If not equal: jump over the clone inspection block, leaving A (nr) untouched.
+    bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, __NR_clone});
+
+    // 1. Load low 32 bits of args[0] (flags)
+    bpfCode.push_back(sock_filter{BPF_LD | BPF_W | BPF_ABS, 0, 0, static_cast<__u32>(offsetof(struct seccomp_data, args[0]))});
+
+    // 2. Bitwise AND with namespace flags mask 0x7E020000
+    // (CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET)
+    // CLONE_NEWTIME (0x80) is deliberately excluded to prevent collision with exit signal byte in clone().
+    constexpr __u32 kDisallowedCloneFlags = 0x7E020000U;
+    bpfCode.push_back(sock_filter{BPF_ALU | BPF_AND | BPF_K, 0, 0, kDisallowedCloneFlags});
+
+    // 3. Check if result == 0
+    // If result == 0 (no disallowed flags): jump to ALLOW.
+    // If result != 0 (disallowed namespace flags present): jump to KILL_PROCESS.
+    size_t cloneFlagsCheck = bpfCode.size();
+    bpfCode.push_back(sock_filter{BPF_JMP | BPF_JEQ | BPF_K, 0, 0, 0});
+
+    // The clone block ends here. The next instruction is where non-clone syscalls jump.
+    size_t postCloneIndex = bpfCode.size();
+    if (!setJumpOffset8(cloneCheck, postCloneIndex, false)) {
+        return false;
+    }
 #endif
 
     // Step 5: Syscalls that return EPERM (networking & sockets)
@@ -287,7 +451,9 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
     bpfCode.push_back(sock_filter{BPF_JMP | BPF_JA, 0, 0, 0});
     jumpsToAllow.push_back(notSocketJump);
 
-    bpfCode[socketCheck].jt = static_cast<__u8>(bpfCode.size() - (socketCheck + 1));
+    if (!setJumpOffset8(socketCheck, bpfCode.size(), true)) {
+        return false;
+    }
 
     bpfCode.push_back(sock_filter{BPF_LD | BPF_W | BPF_ABS, 0, 0, static_cast<__u32>(offsetof(struct seccomp_data, args[0]))});
 
@@ -304,33 +470,60 @@ static bool applyProcessIsolation(std::string& errorMessage, bool testFailRlimit
     size_t denyIndex = bpfCode.size();
     bpfCode.push_back(sock_filter{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)});
 
+    size_t enosysIndex = bpfCode.size();
+    bpfCode.push_back(sock_filter{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | (ENOSYS & SECCOMP_RET_DATA)});
+
     size_t allowIndex = bpfCode.size();
     bpfCode.push_back(sock_filter{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW});
 
     // Step 8: Resolve relative jump offsets
 #if defined(SECCOMP_AUDIT_ARCH)
-    bpfCode[archJump].jf = static_cast<__u8>(killIndex - (archJump + 1));
+    if (!setJumpOffset8(archJump, killIndex, false)) {
+        return false;
+    }
+#endif
+#ifdef __NR_clone
+    if (!setJumpOffset8(cloneFlagsCheck, allowIndex, true)) {
+        return false;
+    }
+    if (!setJumpOffset8(cloneFlagsCheck, killIndex, false)) {
+        return false;
+    }
 #endif
     for (size_t idx : jumpsToKill) {
-        bpfCode[idx].jt = static_cast<__u8>(killIndex - (idx + 1));
+        if (!setJumpOffset8(idx, killIndex, true)) {
+            return false;
+        }
     }
     for (size_t idx : jumpsToDeny) {
 #ifdef __NR_socket
         if (idx == domainJump) {
-            bpfCode[idx].jf = static_cast<__u8>(denyIndex - (idx + 1));
+            if (!setJumpOffset8(idx, denyIndex, false)) {
+                return false;
+            }
             continue;
         }
 #endif
-        bpfCode[idx].jt = static_cast<__u8>(denyIndex - (idx + 1));
+        if (!setJumpOffset8(idx, denyIndex, true)) {
+            return false;
+        }
+    }
+    for (size_t idx : jumpsToEnosys) {
+        if (!setJumpOffset8(idx, enosysIndex, true)) {
+            return false;
+        }
     }
     for (size_t idx : jumpsToAllow) {
 #ifdef __NR_socket
         if (idx == notSocketJump) {
-            bpfCode[idx].k = static_cast<__u32>(allowIndex - (notSocketJump + 1));
+            const size_t offset = allowIndex - (notSocketJump + 1);
+            bpfCode[idx].k = static_cast<__u32>(offset);
             continue;
         }
 #endif
-        bpfCode[idx].jt = static_cast<__u8>(allowIndex - (idx + 1));
+        if (!setJumpOffset8(idx, allowIndex, true)) {
+            return false;
+        }
     }
 
     struct sock_fprog seccompProg = {
@@ -704,6 +897,125 @@ static int runIsolationSelftest(int testTcpPort, const std::string& testDbusSock
         report("io_uring", killedBySigsys([] { syscall(__NR_io_uring_setup, 1, nullptr); }));
 #else
         std::cout << "[ISOLATION_SELFTEST] io_uring: N/A (no syscall number)" << std::endl;
+#endif
+#if defined(SYS_clone)
+        // Namespace-creating clone calls: must be killed by SIGSYS
+        report("clone_newuser", killedBySigsys([] { syscall(SYS_clone, CLONE_NEWUSER | SIGCHLD, 0, 0, 0, 0); }));
+        report("clone_newns", killedBySigsys([] { syscall(SYS_clone, CLONE_NEWNS | SIGCHLD, 0, 0, 0, 0); }));
+        report("clone_newnet", killedBySigsys([] { syscall(SYS_clone, CLONE_NEWNET | SIGCHLD, 0, 0, 0, 0); }));
+        report("clone_newpid", killedBySigsys([] { syscall(SYS_clone, CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0); }));
+        report("clone_newipc", killedBySigsys([] { syscall(SYS_clone, CLONE_NEWIPC | SIGCHLD, 0, 0, 0, 0); }));
+        report("clone_newuts", killedBySigsys([] { syscall(SYS_clone, CLONE_NEWUTS | SIGCHLD, 0, 0, 0, 0); }));
+        report("clone_newcgroup", killedBySigsys([] { syscall(SYS_clone, CLONE_NEWCGROUP | SIGCHLD, 0, 0, 0, 0); }));
+#else
+        std::cout << "[ISOLATION_SELFTEST] clone_newuser: N/A" << std::endl;
+        std::cout << "[ISOLATION_SELFTEST] clone_newns: N/A" << std::endl;
+        std::cout << "[ISOLATION_SELFTEST] clone_newnet: N/A" << std::endl;
+        std::cout << "[ISOLATION_SELFTEST] clone_newpid: N/A" << std::endl;
+        std::cout << "[ISOLATION_SELFTEST] clone_newipc: N/A" << std::endl;
+        std::cout << "[ISOLATION_SELFTEST] clone_newuts: N/A" << std::endl;
+        std::cout << "[ISOLATION_SELFTEST] clone_newcgroup: N/A" << std::endl;
+#endif
+#if defined(SYS_setns)
+        report("setns", killedBySigsys([] { syscall(SYS_setns, -1, 0); }));
+#else
+        std::cout << "[ISOLATION_SELFTEST] setns: N/A" << std::endl;
+#endif
+#if defined(SYS_clone3)
+        // clone3: must return -1/ENOSYS and survive (not die by SIGSYS)
+        bool clone3ReturnedEnosys = false;
+        const pid_t c3Child = fork();
+        if (c3Child == 0) {
+            struct {
+                uint64_t flags = 0;
+                uint64_t pidfd = 0;
+                uint64_t child_tid = 0;
+                uint64_t parent_tid = 0;
+                uint64_t exit_signal = 0;
+                uint64_t stack = 0;
+                uint64_t stack_size = 0;
+                uint64_t tls = 0;
+                uint64_t set_tid = 0;
+                uint64_t set_tid_size = 0;
+                uint64_t cgroup = 0;
+            } c3args{};
+            errno = 0;
+            const long res = syscall(SYS_clone3, &c3args, sizeof(c3args));
+            _exit((res == -1 && errno == ENOSYS) ? 42 : 1);
+        } else if (c3Child > 0) {
+            int status = 0;
+            if (waitpid(c3Child, &status, 0) == c3Child && WIFEXITED(status) && WEXITSTATUS(status) == 42) {
+                clone3ReturnedEnosys = true;
+            }
+        }
+        std::cout << "[ISOLATION_SELFTEST] clone3: " << (clone3ReturnedEnosys ? "ENOSYS" : "FAILED") << std::endl;
+#else
+        std::cout << "[ISOLATION_SELFTEST] clone3: N/A" << std::endl;
+#endif
+        // Positive control: thread creation works under the filter
+        bool threadWorks = false;
+        try {
+            std::thread t([&threadWorks]() { threadWorks = true; });
+            t.join();
+        } catch (...) {
+            threadWorks = false;
+        }
+        std::cout << "[ISOLATION_SELFTEST] thread_create: " << (threadWorks ? "OK" : "DENIED") << std::endl;
+
+        // fork: permitted (known T18 residual for self-test probe harness; worker never forks)
+        const pid_t forkChild = fork();
+        bool forkPermitted = false;
+        if (forkChild == 0) {
+            _exit(0);
+        } else if (forkChild > 0) {
+            int status = 0;
+            waitpid(forkChild, &status, 0);
+            forkPermitted = WIFEXITED(status);
+        }
+        std::cout << "[ISOLATION_SELFTEST] fork: " << (forkPermitted ? "PERMITTED (known T18 residual)" : "DENIED") << std::endl;
+
+#if defined(SYS_execve)
+        report("execve", killedBySigsys([] {
+            char* const argv[] = {const_cast<char*>("/bin/true"), nullptr};
+            syscall(SYS_execve, "/bin/true", argv, nullptr);
+        }));
+#else
+        std::cout << "[ISOLATION_SELFTEST] execve: N/A" << std::endl;
+#endif
+#if defined(SYS_execveat)
+        report("execveat", killedBySigsys([] {
+            syscall(SYS_execveat, -1, "/bin/true", nullptr, nullptr, 0);
+        }));
+#else
+        std::cout << "[ISOLATION_SELFTEST] execveat: N/A" << std::endl;
+#endif
+#if defined(SYS_ptrace)
+        report("ptrace", killedBySigsys([] {
+            syscall(SYS_ptrace, 0, 0, nullptr, nullptr);
+        }));
+#else
+        std::cout << "[ISOLATION_SELFTEST] ptrace: N/A" << std::endl;
+#endif
+#if defined(SYS_bpf)
+        report("bpf", killedBySigsys([] {
+            syscall(SYS_bpf, 0, nullptr, 0);
+        }));
+#else
+        std::cout << "[ISOLATION_SELFTEST] bpf: N/A" << std::endl;
+#endif
+#if defined(SYS_unshare)
+        report("unshare", killedBySigsys([] {
+            syscall(SYS_unshare, 0);
+        }));
+#else
+        std::cout << "[ISOLATION_SELFTEST] unshare: N/A" << std::endl;
+#endif
+#if defined(SYS_kexec_load)
+        report("kexec_load", killedBySigsys([] {
+            syscall(SYS_kexec_load, 0, 0, nullptr, 0);
+        }));
+#else
+        std::cout << "[ISOLATION_SELFTEST] kexec_load: N/A" << std::endl;
 #endif
         // Collateral check: an ordinary syscall must still work. (A wrong fallback syscall number once made
         // the filter deny getuid on x86_64.)
