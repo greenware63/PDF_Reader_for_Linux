@@ -9,8 +9,19 @@
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
 #include "engine/FormFieldTypes.h"
+#include "engine/AnnotationTypes.h"
 #include "engine/EditLog.h"
 #include "ipc/WorkerClient.h"
+
+// Static asserts pinning every security cap constant to its literal definition.
+// Prevents accidental cap inflation or regression where tests compare against modified constants.
+static_assert(pdf::kMaxFormFieldsPerPage == 1000, "kMaxFormFieldsPerPage must be exactly 1000");
+static_assert(pdf::kMaxFormFieldNameChars == 1024, "kMaxFormFieldNameChars must be exactly 1024");
+static_assert(pdf::kMaxFormFieldTextCodeUnits == 32768, "kMaxFormFieldTextCodeUnits must be exactly 32768");
+static_assert(pdf::kMaxFormFieldOptions == 1000, "kMaxFormFieldOptions must be exactly 1000");
+static_assert(pdf::kMaxFormFieldOptionChars == 1024, "kMaxFormFieldOptionChars must be exactly 1024");
+static_assert(pdf::kMaxFormFieldListBytes == 16ull * 1024 * 1024, "kMaxFormFieldListBytes must be exactly 16 MiB");
+static_assert(pdf::kMaxTextOutlineElements == 250000, "kMaxTextOutlineElements must be exactly 250000");
 
 // Test suite for Milestone M5 hostile AcroForm fixtures (Threat T17)
 // Verifies time bounds, cap enforcement, worker survival, and mutation safety

@@ -1,16 +1,89 @@
 #!/usr/bin/env python3
 """CTest fixture determinism check (Threat T17).
 
-Regenerates all hostile AcroForm fixtures into a temporary directory
-and byte-compares them against the committed fixtures in tests/fixtures/.
-Ensures committed test binaries cannot silently drift from the generator.
+Regenerates all hostile AcroForm fixtures via tests/fixtures/make_hostile_form_fixtures.py,
+normalizes both committed and regenerated files via qpdf --qdf (ignoring compression differences
+and trailer /ID), and verifies that normalized representations are byte-identical.
+Ensures committed test fixtures cannot silently drift from the generator.
 """
-import filecmp
+import difflib
+import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+
+
+def normalize_pdf(qpdf_exe, in_path, out_path):
+    """Normalize a PDF via qpdf --qdf with uncompressed streams, no original object IDs,
+    and strip the trailer line matching `^  /ID \\[` so that differing compression or ID
+    generation does not cause false-positive drift failures.
+    """
+    tmp_qdf = out_path + ".raw.qdf"
+    cmd = [
+        qpdf_exe,
+        "--qdf",
+        "--object-streams=disable",
+        "--no-original-object-ids",
+        "--stream-data=uncompress",
+        in_path,
+        tmp_qdf,
+    ]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"qpdf normalization failed for {in_path} (exit code {res.returncode}):\n{res.stderr}")
+
+    id_pattern = re.compile(r"^  /ID \[")
+    with open(tmp_qdf, "r", encoding="latin-1", errors="replace") as fin, \
+         open(out_path, "w", encoding="latin-1", newline="\n") as fout:
+        for line in fin:
+            if id_pattern.match(line):
+                continue
+            fout.write(line)
+
+    try:
+        os.remove(tmp_qdf)
+    except OSError:
+        pass
+
+
+def compare_normalized(file_committed, file_generated, name):
+    h_com = hashlib.sha256()
+    with open(file_committed, "rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            h_com.update(chunk)
+
+    h_gen = hashlib.sha256()
+    with open(file_generated, "rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            h_gen.update(chunk)
+
+    if h_com.digest() == h_gen.digest():
+        return True
+
+    print(f"Error: Normalized QDF mismatch for {name}:", file=sys.stderr)
+    with open(file_committed, "r", encoding="latin-1", errors="replace") as f1, \
+         open(file_generated, "r", encoding="latin-1", errors="replace") as f2:
+        lines1 = f1.readlines()
+        lines2 = f2.readlines()
+
+    diff = difflib.unified_diff(lines1, lines2, fromfile=f"committed/{name}", tofile=f"regenerated/{name}", n=3)
+    printed = 0
+    for diff_line in diff:
+        print(diff_line, end="", file=sys.stderr)
+        printed += 1
+        if printed >= 20:
+            print("\n... [truncated remaining diff output] ...", file=sys.stderr)
+            break
+    return False
 
 
 def main():
@@ -22,14 +95,22 @@ def main():
         print(f"Error: Generator script not found: {generator_script}", file=sys.stderr)
         return 1
 
-    # Check if qpdf is available; if not on this machine, report and return 0 (skip)
-    if shutil.which("qpdf") is None:
+    qpdf_exe = shutil.which("qpdf")
+    if qpdf_exe is None:
+        if os.environ.get("CI"):
+            print("Error: 'qpdf' is required in CI environment but not found in PATH!", file=sys.stderr)
+            return 1
         print("Note: 'qpdf' not found in PATH; skipping fixture regeneration check on this host.")
         return 0
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        print(f"Regenerating hostile form fixtures into {tmpdir}...")
-        cmd = [sys.executable, generator_script, tmpdir]
+        regen_dir = os.path.join(tmpdir, "regen")
+        norm_dir = os.path.join(tmpdir, "norm")
+        os.makedirs(regen_dir, exist_ok=True)
+        os.makedirs(norm_dir, exist_ok=True)
+
+        print(f"Regenerating hostile form fixtures via {generator_script}...")
+        cmd = [sys.executable, generator_script, regen_dir]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if res.returncode != 0:
             print(f"Error: Generator failed with code {res.returncode}:\n{res.stderr}", file=sys.stderr)
@@ -49,27 +130,39 @@ def main():
 
         mismatches = []
         for name in fixtures:
-            committed = os.path.join(fixtures_dir, name)
-            generated = os.path.join(tmpdir, name)
-            if not os.path.isfile(committed):
-                print(f"Error: Committed fixture missing: {committed}", file=sys.stderr)
+            committed_pdf = os.path.join(fixtures_dir, name)
+            generated_pdf = os.path.join(regen_dir, name)
+
+            if not os.path.isfile(committed_pdf):
+                print(f"Error: Committed fixture missing: {committed_pdf}", file=sys.stderr)
                 mismatches.append(name)
                 continue
-            if not os.path.isfile(generated):
-                print(f"Error: Generated fixture missing: {generated}", file=sys.stderr)
+            if not os.path.isfile(generated_pdf):
+                print(f"Error: Generated fixture missing: {generated_pdf}", file=sys.stderr)
                 mismatches.append(name)
                 continue
-            if not filecmp.cmp(committed, generated, shallow=False):
-                print(f"Error: Mismatch: {name} differs from generator output", file=sys.stderr)
+
+            norm_committed = os.path.join(norm_dir, name + ".committed.norm.qdf")
+            norm_generated = os.path.join(norm_dir, name + ".generated.norm.qdf")
+
+            try:
+                normalize_pdf(qpdf_exe, committed_pdf, norm_committed)
+                normalize_pdf(qpdf_exe, generated_pdf, norm_generated)
+            except Exception as e:
+                print(f"Error normalizing {name}: {e}", file=sys.stderr)
+                mismatches.append(name)
+                continue
+
+            if not compare_normalized(norm_committed, norm_generated, name):
                 mismatches.append(name)
             else:
-                print(f"  OK (byte-identical): {name}")
+                print(f"  OK (normalized QDF identical): {name}")
 
         if mismatches:
             print(f"FAILED: {len(mismatches)} fixture(s) drifted from generator output!", file=sys.stderr)
             return 1
 
-        print("All fixtures verified byte-identical to generator output.")
+        print("All fixtures verified byte-identical in normalized QDF representation.")
         return 0
 
 

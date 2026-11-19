@@ -91,9 +91,9 @@ flowchart TD
 
 ---
 
-## 3. Test Verification (11 Suites, 185+ Unit/Integration Tests & 1,000+ Fuzz Tests, 100% Pass)
+## 3. Test Verification (12 CTest Suites & Tests, 185+ Unit/Integration Tests & 1,000+ Fuzz Tests, 100% Pass)
 
-The project enforces automated test execution through CTest, GitHub Actions CI ([run 44482272613](https://github.com/greenware63/PDF_Reader_for_Linux/actions/runs/44482272613) passed across Release, ASan/UBSan, TSan, and shipping configurations), and local container verification (185+ unit and integration tests across the 7 primary test suites, plus 3 redaction verification suites, HostileFormTestSuite, and 1,000+ mutation fuzz tests):
+The project enforces automated test execution through CTest, GitHub Actions CI ([run 44482272613](https://github.com/greenware63/PDF_Reader_for_Linux/actions/runs/44482272613) passed across Release, ASan/UBSan, TSan, and shipping configurations), and local container verification (185+ unit and integration tests across the 7 primary test suites, plus 3 redaction verification suites, HostileFormTestSuite, HostileFormFixtureDeterminismTest, and 1,000+ mutation fuzz tests):
 
 1. **`EngineRenderTestSuite` (47 Tests)**:
    - Handle lifetimes, render whole page caps, 37px grid-shift tile stitching, sub-pixel edge straddling at 15× zoom.
@@ -127,11 +127,13 @@ The project enforces automated test execution through CTest, GitHub Actions CI (
    - Comprehensive redaction engine tests verifying structural sanitization, complete metadata elimination, and independent parser inspection.
 10. **`IpcFuzzTestSuite`**:
     - 1,000+ randomized mutation fuzz tests verifying parser resilience against malformed IPC packets.
-11. **`HostileFormTestSuite` (Part 1 In-Process, Part 2 IPC Boundary, Part 3 Mutation & EditLog Protection)**:
-    - Milestone M5 hostile AcroForm test suite (Threat T17) asserting time bounds, cap enforcement, worker survival, and mutation safety across 7 hostile fixtures (`many_widgets`, `big_values`, `oversize_values`, `huge_options`, `deep_hierarchy`, `long_names`, and `cycles_and_malformed`).
-    - In-process engine verification against caps ($1,000$ fields, $1,024$ chars name, $32,768$ code units value, $1,000$ options, $16\text{ MiB}$ total budget) within $5.0\text{ s}$.
-    - Out-of-process `WorkerClient` IPC boundary verification within $8.0\text{ s}$, including page-2 worker survival check on `hostile_form_many_widgets.pdf` ($3$ ordinary fields queried promptly after the $4,000$-widget page).
-    - Hostile mutation rejection: rejects text mutations $> 32,768$ code units ($40,000$ chars) and outline mutations $> 250,000$ elements without corrupting document or `EditLog`, with positive control and undo symmetry.
+11. **`HostileFormTestSuite` (`test_hostile_forms.cpp`)**:
+    - Static asserts pinning literal constants (lines 17–24): `kMaxFormFieldsPerPage==1000`, `kMaxFormFieldNameChars==1024`, `kMaxFormFieldTextCodeUnits==32768`, `kMaxFormFieldOptions==1000`, `kMaxFormFieldOptionChars==1024`, `kMaxFormFieldListBytes==16ull*1024*1024`, `kMaxTextOutlineElements==250000`.
+    - Part 1 (lines 72–172): direct in-process engine verification against caps ($1,000$ fields, $1,024$ chars name, $32,768$ code units value, $1,000$ options, $16\text{ MiB}$ total budget) within $5.0\text{ s}$.
+    - Part 2 (lines 174–254): out-of-process `WorkerClient` IPC boundary verification within $8.0\text{ s}$, including page-2 worker survival check on `hostile_form_many_widgets.pdf` ($3$ ordinary fields queried promptly after the $4,000$-widget page).
+    - Part 3 (lines 256–341): hostile mutation rejection: rejects text mutations $> 32,768$ code units ($40,000$ chars) and outline mutations $> 250,000$ elements without corrupting document or `EditLog`, with positive control and undo symmetry.
+12. **`HostileFormFixtureDeterminismTest` (`tests/test_fixture_determinism.py`)**:
+    - Anti-drift fixture determinism verification: regenerates all 9 AcroForm fixtures via `make_hostile_form_fixtures.py`, normalizes committed and regenerated fixtures via `qpdf --qdf` (stripping the trailer `/ID` line to ignore compressor variation), and verifies byte-identical normalized QDF representations to prevent silent fixture drift. Fails closed in CI if `qpdf` is missing or any fixture differs.
 
 ### Continuous Integration Matrix
 A GitHub Actions matrix workflow runs on `ubuntu-24.04`:
