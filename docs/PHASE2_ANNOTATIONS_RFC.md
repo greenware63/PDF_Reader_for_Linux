@@ -148,13 +148,13 @@ Descriptor policy change (must be updated in `threat_model.md` and tests togethe
 
 | Message | Direction | Carries | Hard limits (proposal) |
 |---|---|---|---|
-| `AddAnnotation` | UI→worker | id, page, subtype, rect, quad points, colour, opacity, border, text, author | quads ≤ 4096; text ≤ 64 KiB UTF-16; author ≤ 256 chars |
+| `AddAnnotation` | UI→worker | id, page, subtype, rect, quad points, colour, opacity, border, text, author | quads ≤ 4096; text ≤ 32,768 UTF-16 code units (64 KiB of bytes); author ≤ 256 chars |
 | `AddInkAnnotation` | UI→worker | id, page, strokes, colour, width | strokes ≤ 256; total points ≤ 100 000 |
 | `ModifyAnnotation` / `DeleteAnnotation` | UI→worker | id (+ changed fields) | same field limits |
-| `ListAnnotations` / `HitTest` | UI→worker | page (+ point) | reply ≤ 10 000 items, text clipped (≤ 32,768 UTF-16 chars / 64 KiB), total per-page reply ≤ 16 MiB (truncated flag) |
+| `ListAnnotations` / `HitTest` | UI→worker | page (+ point) | reply ≤ 10 000 items, text clipped (≤ 32,768 UTF-16 code units (64 KiB of bytes)), total per-page reply ≤ 16 MiB (truncated flag) |
 | `ListFormFields` (Protocol 13) | UI→worker | page | request carries bounded page index |
-| `ListFormFieldsResponse` (Protocol 13) | worker→UI | page, truncated flag, fields (fieldName, controlIndex, type, flags, rect, value, options, checked) | fields ≤ 1 000; options ≤ 1 000; text ≤ 64 KiB UTF-16; total per-page reply ≤ 16 MiB (sets `truncated = true` when budget or caps are reached) |
-| `SetFormFieldText` (Protocol 13) | UI→worker | page, fieldName, controlIndex, text, vector outline elements (optional) | text ≤ 64 KiB UTF-16; vector elements ≤ 10 000 |
+| `ListFormFieldsResponse` (Protocol 13) | worker→UI | page, truncated flag, fields (fieldName, controlIndex, type, flags, rect, value, options, checked) | fields ≤ 1 000; options ≤ 1 000; text ≤ 32,768 UTF-16 code units (64 KiB of bytes); total per-page reply ≤ 16 MiB (sets `truncated = true` when budget or caps are reached) |
+| `SetFormFieldText` (Protocol 13) | UI→worker | page, fieldName, controlIndex, text, vector outline elements (optional) | text ≤ 32,768 UTF-16 code units (64 KiB of bytes); vector elements ≤ 250,000 |
 | `ToggleFormField` (Protocol 13) | UI→worker | page, fieldName, controlIndex, checked state | boolean state |
 | `SetFormFieldChoice` (Protocol 13) | UI→worker | page, fieldName, controlIndex, selected indices | selected indices ≤ 1 000 |
 | `SaveRequest` (+1 fd) / `SaveProgress` / `SaveResult` | both | mode, revision / progress / result | one fd; `bytesWritten` verified by the UI |
@@ -206,5 +206,5 @@ Manual, per release that changes annotations (checklist in the PR):
 3. **Crash-recovery journal**: Defer persistent disk journaling to post-M2. Milestone M2 implements in-memory edit log crash replay (surviving background worker process terminations) and clear UI warnings before closing windows with unsaved changes.
 4. **Flatpak permissions**: No filesystem write permissions will be added to the Flatpak manifest. All file saves in Flatpak will operate strictly through the **XDG Desktop File Chooser Portal** (`org.freedesktop.portal.FileChooser`).
 5. **Acrobat & Foxit testing**: Compatibility with Acrobat and Foxit will be documented as **untested / unverified** until manual verification on Windows/macOS is performed. Automated CI tests rely on `qpdf`, `pdftoppm` render comparisons, and `poppler-utils`.
-6. **(Proposed) AcroForm architecture & Persian/RTL fidelity**: AcroForm editing operates via high-level semantic IPC messages (Protocol 13) rather than raw mouse/key event forwarding. Form edits participate directly in the UI-owned `EditLog` for undo/redo and crash recovery. Persian and complex non-Latin field values are rendered via custom vector appearance streams (`FPDFAnnot_SetAP`) to prevent font corruption and glyph-dropping in external viewers.
+6. **AcroForm architecture & Persian/RTL fidelity**: AcroForm editing operates via high-level semantic IPC messages (Protocol 13) rather than raw mouse/key event forwarding. Form edits participate directly in the UI-owned `EditLog` for undo/redo and crash recovery. Persian and complex non-Latin field values are rendered via custom vector appearance streams (`FPDFAnnot_SetAP`) to prevent font corruption and glyph-dropping in external viewers.
 
