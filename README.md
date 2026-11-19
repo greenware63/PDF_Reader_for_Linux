@@ -1,6 +1,6 @@
 # PDF Reader Workstation (Linux)
 
-A high-performance, native PDF workstation for Linux designed with an Adobe Pro-grade feature set (forms, annotations, digital signatures, redaction) built using **C++20** and **Qt 6**, powered by **PDFium**.
+A high-performance, native PDF workstation for Linux designed with an Adobe Pro-grade feature set (forms, annotations, redaction) built using **C++20** and **Qt 6**, powered by **PDFium**.
 
 ## Architecture & Principles
 
