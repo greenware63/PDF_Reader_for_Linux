@@ -114,7 +114,7 @@ UI/OS concern.
 **L9 — Does not defend against a compromised PDFium.** The input is untrusted and
 is parsed/rendered by PDFium. A memory-safety bug in PDFium could in principle
 corrupt the output or leak. Run the engine inside the sandboxed worker
-(`docs/THREAT_MODEL`). The tests run under ASan/UBSan but fuzzing is not proof of
+(`threat_model.md`). The tests run under ASan/UBSan but fuzzing is not proof of
 absence.
 
 **L10 — Forensic scope.** "Black pixels in the image" is the guarantee. The engine
