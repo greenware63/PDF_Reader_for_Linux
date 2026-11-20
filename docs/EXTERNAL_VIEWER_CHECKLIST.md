@@ -19,7 +19,7 @@ Download the `compat-outputs` artifact zip from the GitHub Actions CI run (attac
 ### Secondary Route (Local Generation)
 Outputs can also be produced directly using:
 ```bash
-./build/test_render --dump-compat-outputs <output-directory> [sample.pdf]
+./build/test_render --dump-compat-outputs <output-directory> [sample.pdf] [work-directory]
 ```
 
 ---

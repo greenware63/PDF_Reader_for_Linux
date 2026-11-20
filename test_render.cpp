@@ -528,10 +528,17 @@ static void generateTextPdfFixture(const std::string& path, const std::string& t
     out.write(pdf.data(), pdf.size());
 }
 
-static int dumpCompatOutputs(const std::string& outDir, const std::string& samplePath) {
+static int dumpCompatOutputs(const std::string& outDir, const std::string& samplePath, const std::string& workDir = "") {
     std::cout << "[COMPAT-DUMP] Generating external viewer compatibility fixtures in: " << outDir << std::endl;
     QDir dir(QString::fromStdString(outDir));
     dir.mkpath(QStringLiteral("."));
+
+    std::string effWorkDir = workDir;
+    if (effWorkDir.empty()) {
+        effWorkDir = dir.filePath(QStringLiteral("../compat_work")).toStdString();
+    }
+    QDir wDir(QString::fromStdString(effWorkDir));
+    wDir.mkpath(QStringLiteral("."));
 
     // 1. Annotated Save (Incremental & Full)
     {
@@ -677,7 +684,7 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
 
     // 3. Redacted Export
     {
-        const std::string redactBase = QDir::temp().filePath(QStringLiteral("compat_temp_redact_base.pdf")).toStdString();
+        const std::string redactBase = wDir.filePath(QStringLiteral("compat_redacted_source.pdf")).toStdString();
         generateTextPdfFixture(redactBase, "Classified Canary Secret Keep This Safe Public Visible Content");
 
         QFile rf(QString::fromStdString(redactBase));
@@ -708,11 +715,14 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
                 }
             } else {
                 std::cerr << "[FAIL] dumpCompatOutputs: Redaction failed: " << result.message << std::endl;
-                QFile::remove(QString::fromStdString(redactBase));
                 return 1;
             }
+        } else {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to open redactBase: " << redactBase << std::endl;
+            return 1;
         }
-        QFile::remove(QString::fromStdString(redactBase));
+        // Preserved in workDir for test_output_compat.py pixel verification - do not delete early!
+        std::cout << "  -> Preserved redaction source: " << redactBase << std::endl;
     }
 
     std::cout << "[COMPAT-DUMP] All compatibility outputs successfully produced." << std::endl;
@@ -722,12 +732,13 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
 
-    // Support --dump-compat-outputs <out-dir> [sample-path]
+    // Support --dump-compat-outputs <out-dir> [sample-path] [work-dir]
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--dump-compat-outputs") {
             std::string outDir = (i + 1 < argc) ? argv[i + 1] : ".";
             std::string sample = (i + 2 < argc) ? argv[i + 2] : "sample.pdf";
-            return dumpCompatOutputs(outDir, sample);
+            std::string workDir = (i + 3 < argc) ? argv[i + 3] : "";
+            return dumpCompatOutputs(outDir, sample, workDir);
         }
     }
 

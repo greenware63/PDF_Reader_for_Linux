@@ -89,6 +89,7 @@ jobs:
             # The multi-process suites are covered by the Release and ASan/UBSan jobs.
             ctest --test-dir build --output-on-failure -R "EngineRenderTestSuite|DocumentLayoutTestSuite|TileCacheTestSuite"
           else
+            ctest --test-dir build --output-on-failure --verbose -R "^ExternalEngineCompatTest$"
             ctest --test-dir build --output-on-failure || {
               rc=$?
               # Job logs are not always retrievable; surface failing tests as annotations too.

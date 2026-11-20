@@ -92,6 +92,7 @@ def main():
     source_root = sys.argv[1] if len(sys.argv) > 1 else "."
     test_render_bin = sys.argv[2] if len(sys.argv) > 2 else "test_render"
     output_dir = sys.argv[3] if len(sys.argv) > 3 else os.path.join(source_root, "build", "compat_outputs")
+    work_dir = sys.argv[4] if len(sys.argv) > 4 else os.path.join(os.path.dirname(os.path.abspath(output_dir)), "compat_work")
     sample_pdf = os.path.join(source_root, "sample.pdf")
 
     # 1. Check required external tools (qpdf, poppler-utils, mutool required in CI)
@@ -119,6 +120,7 @@ def main():
     print("====================================================")
     print(" EXTERNAL ENGINE COMPATIBILITY TEST SUITE          ")
     print(f" Output Dir: {output_dir}")
+    print(f" Work Dir:   {work_dir}")
     print(f" qpdf:       {qpdf_exe}")
     print(f" pdfinfo:    {pdfinfo_exe}")
     print(f" pdftoppm:   {pdftoppm_exe}")
@@ -127,10 +129,11 @@ def main():
     print("====================================================")
 
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(work_dir, exist_ok=True)
 
     # Step A: Generate output PDFs via test_render --dump-compat-outputs
-    print(f"[1/4] Generating application save/export outputs in {output_dir}...")
-    gen_cmd = [test_render_bin, "--dump-compat-outputs", output_dir, sample_pdf]
+    print(f"[1/4] Generating application save/export outputs in {output_dir} (work: {work_dir})...")
+    gen_cmd = [test_render_bin, "--dump-compat-outputs", output_dir, sample_pdf, work_dir]
     code, out, err = run_command(gen_cmd)
     if code != 0:
         print(f"Error: test_render --dump-compat-outputs failed (code {code}):\n{err}", file=sys.stderr)
@@ -144,6 +147,7 @@ def main():
     ]
 
     failures = []
+    redaction_pixel_verified = False
 
     with tempfile.TemporaryDirectory() as scratch_dir:
         # Step B: Run external tools and deepened assertions on each output
@@ -266,80 +270,99 @@ def main():
 
             # 6. Redaction Pixel Verification (inside solid black, outside matches unredacted source)
             if fname == "compat_redacted_export.pdf":
-                redact_src = os.path.join(tempfile.gettempdir(), "compat_temp_redact_base.pdf")
-                if os.path.isfile(redact_src):
+                redact_src = os.path.join(work_dir, "compat_redacted_source.pdf")
+                if not os.path.isfile(redact_src):
+                    print(f"  [FAIL] Pixel verification: Redaction source file missing at {redact_src}", file=sys.stderr)
+                    failures.append(f"{fname}: Redaction source missing ({redact_src})")
+                else:
                     src_ppm_base = os.path.join(scratch_dir, "redact_src_ppm")
                     out_ppm_base = os.path.join(scratch_dir, "redact_out_ppm")
-                    run_command([pdftoppm_exe, "-r", "150", "-f", "1", "-l", "1", redact_src, src_ppm_base])
-                    run_command([pdftoppm_exe, "-r", "150", "-f", "1", "-l", "1", fpath, out_ppm_base])
+                    c1, _, e1 = run_command([pdftoppm_exe, "-r", "150", "-f", "1", "-l", "1", redact_src, src_ppm_base])
+                    c2, _, e2 = run_command([pdftoppm_exe, "-r", "150", "-f", "1", "-l", "1", fpath, out_ppm_base])
                     src_file = f"{src_ppm_base}-1.ppm"
                     out_file = f"{out_ppm_base}-1.ppm"
 
-                    data_src, ws, hs = read_ppm(src_file)
-                    data_out, wo, ho = read_ppm(out_file)
+                    if c1 != 0 or c2 != 0:
+                        print(f"  [FAIL] Pixel verification: pdftoppm rasterization failed (src={c1}, out={c2}):\n{e1}\n{e2}", file=sys.stderr)
+                        failures.append(f"{fname}: pdftoppm failed during pixel verification")
+                    else:
+                        data_src, ws, hs = read_ppm(src_file)
+                        data_out, wo, ho = read_ppm(out_file)
 
-                    if data_src and data_out and ws == wo and hs == ho:
-                        scale = 150.0 / 72.0
-                        # Redaction rectangle in PDF points: left=80, top=680, right=260, bottom=720
-                        # Pixel box with 1px edgeGrow:
-                        bx0 = int(80.0 * scale) - 1
-                        by0 = int(680.0 * scale) - 1
-                        bx1 = int(260.0 * scale) + 1
-                        by1 = int(720.0 * scale) + 1
-
-                        # A. Inside box: verify solid black (0, 0, 0)
-                        # Test inside rect with 2px margin from edge
-                        all_black = True
-                        for y in range(max(0, by0 + 2), min(ho, by1 - 2)):
-                            for x in range(max(0, bx0 + 2), min(wo, bx1 - 2)):
-                                off = (y * wo + x) * 3
-                                r, g, b = data_out[off], data_out[off + 1], data_out[off + 2]
-                                if r != 0 or g != 0 or b != 0:
-                                    all_black = False
-                                    break
-                            if not all_black:
-                                break
-
-                        if all_black:
-                            print("  [PASS] Pixel verification: Pixels inside redaction rectangle are solid black (0x000000)")
+                        if not data_src:
+                            print(f"  [FAIL] Pixel verification: Unreadable source PPM image at {src_file}", file=sys.stderr)
+                            failures.append(f"{fname}: Unreadable source PPM image")
+                        elif not data_out:
+                            print(f"  [FAIL] Pixel verification: Unreadable output PPM image at {out_file}", file=sys.stderr)
+                            failures.append(f"{fname}: Unreadable output PPM image")
+                        elif ws != wo or hs != ho:
+                            print(f"  [FAIL] Pixel verification: Dimension mismatch: source {ws}x{hs} vs output {wo}x{ho}", file=sys.stderr)
+                            failures.append(f"{fname}: Dimension mismatch: source {ws}x{hs} vs output {wo}x{ho}")
                         else:
-                            print("  [FAIL] Pixel verification: Non-black pixels found inside redaction rectangle!", file=sys.stderr)
-                            failures.append(f"{fname}: Redaction box contains non-black pixels")
+                            scale = 150.0 / 72.0
+                            # Redaction rectangle in PDF points: left=80, top=680, right=260, bottom=720
+                            # Pixel box with 1px edgeGrow:
+                            bx0 = int(80.0 * scale) - 1
+                            by0 = int(680.0 * scale) - 1
+                            bx1 = int(260.0 * scale) + 1
+                            by1 = int(720.0 * scale) + 1
 
-                        # B. Outside box: cross-engine comparison against source render
-                        # Dilate mask by 6 pixels (matching tests/redaction/test_redaction.cpp line 341)
-                        mask_x0 = max(0, bx0 - 6)
-                        mask_y0 = max(0, by0 - 6)
-                        mask_x1 = min(wo, bx1 + 6)
-                        mask_y1 = min(ho, by1 + 6)
+                            # A. Inside box: verify solid black (0, 0, 0)
+                            # Test inside rect with 2px margin from edge
+                            all_black = True
+                            non_black_count = 0
+                            total_inside = 0
+                            for y in range(max(0, by0 + 2), min(ho, by1 - 2)):
+                                for x in range(max(0, bx0 + 2), min(wo, bx1 - 2)):
+                                    total_inside += 1
+                                    off = (y * wo + x) * 3
+                                    r, g, b = data_out[off], data_out[off + 1], data_out[off + 2]
+                                    if r != 0 or g != 0 or b != 0:
+                                        all_black = False
+                                        non_black_count += 1
 
-                        sum_d = 0
-                        cnt = 0
-                        big = 0
-                        for y in range(ho):
-                            in_y = (mask_y0 <= y < mask_y1)
-                            for x in range(wo):
-                                if in_y and (mask_x0 <= x < mask_x1):
-                                    continue
-                                off = (y * wo + x) * 3
-                                ra, ga, ba = data_src[off], data_src[off + 1], data_src[off + 2]
-                                rb, gb, bb = data_out[off], data_out[off + 1], data_out[off + 2]
-                                d = (abs(int(ra) - int(rb)) + abs(int(ga) - int(gb)) + abs(int(ba) - int(bb))) // 3
-                                sum_d += d
-                                cnt += 1
-                                if d > 96:
-                                    big += 1
+                            if all_black:
+                                print(f"  [PASS] Pixel verification: Pixels inside redaction rectangle are solid black (0x000000) ({total_inside} px inspected)")
+                            else:
+                                print(f"  [FAIL] Pixel verification: {non_black_count}/{total_inside} non-black pixels found inside redaction rectangle!", file=sys.stderr)
+                                failures.append(f"{fname}: Redaction box contains non-black pixels ({non_black_count}/{total_inside})")
 
-                        mean = (sum_d / float(cnt)) if cnt > 0 else 0.0
-                        big_frac = (big / float(cnt)) if cnt > 0 else 0.0
+                            # B. Outside box: cross-engine comparison against source render
+                            # Dilate mask by 6 pixels (matching tests/redaction/test_redaction.cpp line 341)
+                            mask_x0 = max(0, bx0 - 6)
+                            mask_y0 = max(0, by0 - 6)
+                            mask_x1 = min(wo, bx1 + 6)
+                            mask_y1 = min(ho, by1 + 6)
 
-                        # Tolerance commitment from docs/REDACTION.md §234 and test_redaction.cpp lines 354-355:
-                        # mean < 4.0 intensity levels, bigFrac < 0.015 (1.5%)
-                        if mean < 4.0 and big_frac < 0.015:
-                            print(f"  [PASS] Pixel verification: Outside-box pixels match source render (mean diff={mean:.2f} < 4.0, strong diff={big_frac*100:.2f}% < 1.5%)")
-                        else:
-                            print(f"  [FAIL] Pixel verification: Outside-box difference exceeds tolerance (mean={mean:.2f}, bigFrac={big_frac:.3f})", file=sys.stderr)
-                            failures.append(f"{fname}: Outside-box pixel diff exceeded tolerance")
+                            sum_d = 0
+                            cnt = 0
+                            big = 0
+                            for y in range(ho):
+                                in_y = (mask_y0 <= y < mask_y1)
+                                for x in range(wo):
+                                    if in_y and (mask_x0 <= x < mask_x1):
+                                        continue
+                                    off = (y * wo + x) * 3
+                                    ra, ga, ba = data_src[off], data_src[off + 1], data_src[off + 2]
+                                    rb, gb, bb = data_out[off], data_out[off + 1], data_out[off + 2]
+                                    d = (abs(int(ra) - int(rb)) + abs(int(ga) - int(gb)) + abs(int(ba) - int(bb))) // 3
+                                    sum_d += d
+                                    cnt += 1
+                                    if d > 96:
+                                        big += 1
+
+                            mean = (sum_d / float(cnt)) if cnt > 0 else 0.0
+                            big_frac = (big / float(cnt)) if cnt > 0 else 0.0
+
+                            # Tolerance commitment from docs/REDACTION.md §234 and test_redaction.cpp lines 354-355:
+                            # mean < 4.0 intensity levels, bigFrac < 0.015 (1.5%)
+                            if mean < 4.0 and big_frac < 0.015:
+                                print(f"  [PASS] Pixel verification: Outside-box pixels match source render (mean diff={mean:.2f} < 4.0, strong diff={big_frac*100:.2f}% < 1.5%)")
+                            else:
+                                print(f"  [FAIL] Pixel verification: Outside-box difference exceeds tolerance (mean={mean:.2f}, bigFrac={big_frac:.3f})", file=sys.stderr)
+                                failures.append(f"{fname}: Outside-box pixel diff exceeded tolerance (mean={mean:.2f}, bigFrac={big_frac:.3f})")
+
+                            redaction_pixel_verified = True
 
             # 7. mutool info & draw (when installed, required in CI)
             if mutool_exe:
@@ -355,6 +378,11 @@ def main():
                         failures.append(f"{fname}: mutool draw failed")
                     else:
                         print(f"  [PASS] mutool (MuPDF): Document parsed and rasterized page 1 to PNG ({os.path.getsize(mutool_png)} bytes)")
+
+        # 3. Regression guard: ensure redaction pixel verification actually ran
+        if not redaction_pixel_verified:
+            print("  [FAIL] Regression guard: redaction pixel verification did not run!", file=sys.stderr)
+            failures.append("compat_redacted_export.pdf: redaction pixel verification did not run")
 
         if failures:
             print("\n====================================================")

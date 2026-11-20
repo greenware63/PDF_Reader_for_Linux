@@ -482,6 +482,7 @@ if(Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_output_compat.py"
                 "${CMAKE_CURRENT_SOURCE_DIR}" "$<TARGET_FILE:test_render>"
                 "${CMAKE_BINARY_DIR}/compat_outputs"
+                "${CMAKE_BINARY_DIR}/compat_work"
     )
 endif()
 
