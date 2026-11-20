@@ -623,7 +623,7 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
 
         // Fill in text field
         page->setFormFieldText(QStringLiteral("name"), 0, QStringLiteral("CompatibilityTester"), {});
-        page->toggleFormField(QStringLiteral("agree"), 0);
+        page->toggleFormField(QStringLiteral("agree"), 0, true);
 
         // Save incremental form
         const std::string formSavedPath = dir.filePath(QStringLiteral("compat_form_filled.pdf")).toStdString();
