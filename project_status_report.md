@@ -10,7 +10,7 @@ The project has established a production-grade, native Linux PDF workstation pow
 - **Core Viewer & Workstation Features (100% Complete)**: Continuous 64-bit layout, multi-spread view modes, arbitrary page rotation, thumbnail/page label sidebar, bookmarks outline, full-text Persian/Arabic RTL search, dark mode/reading themes, multi-document tabs, and native CUPS printing.
 - **Pixel Redaction Engine (100% Complete)**: Structural PDF sanitization, metadata elimination, vector flattening, UI mark staging, and source overwrite prevention.
 - **Distribution & Hardening (100% Complete)**: Flatpak packaging on KDE 6.10 runtime with automated container testing, IPC mutation fuzzing suite, and binary hardening (`PIE`, full `RELRO`, `BIND_NOW`).
-- **Phase 2 Annotations, Save Pipeline & Interactive Forms (feature-complete; hostile-input CI coverage and third-party viewer validation pending)**: Full implementation of Milestones M0 through M5. Verified save pipeline with atomic commit, UI edit log/undo/redo, standard markup/notes/ink/shapes, image stamps and file attachments, interactive AcroForms with in-place Qt editing, Persian/RTL vector `/AP` appearance synthesis, non-destructive form flattening export, and fixture lookup works for out-of-tree builds.
+- **Phase 2 Annotations, Save Pipeline & Interactive Forms (feature-complete; third-party viewer validation pending)**: Full implementation of Milestones M0 through M5. Verified save pipeline with atomic commit, UI edit log/undo/redo, standard markup/notes/ink/shapes, image stamps and file attachments, interactive AcroForms with in-place Qt editing, Persian/RTL vector `/AP` appearance synthesis, and non-destructive form flattening export.
 
 ---
 
@@ -91,9 +91,9 @@ flowchart TD
 
 ---
 
-## 3. Test Verification (10 Suites, 184+ Unit/Integration Tests & 1,000+ Fuzz Tests, 100% Pass)
+## 3. Test Verification (12 CTest Suites & Tests, 185+ Unit/Integration Tests & 1,000+ Fuzz Tests, 100% Pass)
 
-The project enforces automated test execution through CTest, GitHub Actions CI ([run 44482272613](https://github.com/greenware63/PDF_Reader_for_Linux/actions/runs/44482272613) passed across Release, ASan/UBSan, TSan, and shipping configurations), and local container verification (184 unit and integration tests across the 6 primary test suites, plus 3 redaction verification suites and 1,000+ mutation fuzz tests):
+The project enforces automated test execution through CTest, GitHub Actions CI ([run 44482272613](https://github.com/greenware63/PDF_Reader_for_Linux/actions/runs/44482272613) passed across Release, ASan/UBSan, TSan, and shipping configurations), and local container verification (185+ unit and integration tests across the 7 primary test suites, plus 3 redaction verification suites, HostileFormTestSuite, HostileFormFixtureDeterminismTest, and 1,000+ mutation fuzz tests):
 
 1. **`EngineRenderTestSuite` (47 Tests)**:
    - Handle lifetimes, render whole page caps, 37px grid-shift tile stitching, sub-pixel edge straddling at 15× zoom.
@@ -127,6 +127,13 @@ The project enforces automated test execution through CTest, GitHub Actions CI (
    - Comprehensive redaction engine tests verifying structural sanitization, complete metadata elimination, and independent parser inspection.
 10. **`IpcFuzzTestSuite`**:
     - 1,000+ randomized mutation fuzz tests verifying parser resilience against malformed IPC packets.
+11. **`HostileFormTestSuite` (`test_hostile_forms.cpp`)**:
+    - Static asserts pinning literal constants (lines 17–24): `kMaxFormFieldsPerPage==1000`, `kMaxFormFieldNameChars==1024`, `kMaxFormFieldTextCodeUnits==32768`, `kMaxFormFieldOptions==1000`, `kMaxFormFieldOptionChars==1024`, `kMaxFormFieldListBytes==16ull*1024*1024`, `kMaxTextOutlineElements==250000`.
+    - Part 1 (lines 72–172): direct in-process engine verification against caps ($1,000$ fields, $1,024$ chars name, $32,768$ code units value, $1,000$ options, $16\text{ MiB}$ total budget) within $5.0\text{ s}$.
+    - Part 2 (lines 174–254): out-of-process `WorkerClient` IPC boundary verification within $8.0\text{ s}$, including page-2 worker survival check on `hostile_form_many_widgets.pdf` ($3$ ordinary fields queried promptly after the $4,000$-widget page).
+    - Part 3 (lines 256–341): hostile mutation rejection: rejects text mutations $> 32,768$ code units ($40,000$ chars) and outline mutations $> 250,000$ elements without corrupting document or `EditLog`, with positive control and undo symmetry.
+12. **`HostileFormFixtureDeterminismTest` (`tests/test_fixture_determinism.py`)**:
+    - Anti-drift fixture determinism verification: regenerates all 9 AcroForm fixtures via `make_hostile_form_fixtures.py`, normalizes committed and regenerated fixtures via `qpdf --qdf` (stripping the trailer `/ID` line to ignore compressor variation), and verifies byte-identical normalized QDF representations to prevent silent fixture drift. Fails closed in CI if `qpdf` is missing or any fixture differs.
 
 ### Continuous Integration Matrix
 A GitHub Actions matrix workflow runs on `ubuntu-24.04`:
@@ -167,7 +174,6 @@ flowchart TD
 
 ## 5. Next Immediate Steps
 
-1. **Merge Test Suite PR #50**: Integrate hostile form fixture generator and Persian appearance checker test harness ([PR #50](https://github.com/greenware63/PDF_Reader_for_Linux/pull/50)).
-2. **Merge Bug Fix for Ghost Fields**: Merge the fix for oversized `/Rect` click interception and hit-testing in form fields.
-3. **Implement PR B (Hostile Test Integration & CI Validator Harness)**: Wire hostile form fixtures and Persian appearance verifiers into the automated CI build matrix, including tests verifying refusal of text exceeding the 250,000 vector outline element cap.
-4. **Third-Party Viewer Interoperability Validation**: Perform manual verification of saved and flattened forms across third-party viewers (Adobe Acrobat, Foxit Reader, Okular).
+1. **Merge PR B (HostileFormTestSuite & CI Determinism Check)**: Merge `HostileFormTestSuite` and fixture determinism drift check ([PR B](https://github.com/greenware63/PDF_Reader_for_Linux)), completing CI coverage and closing Threat T17.
+2. **Bug Fix for Ghost Fields**: Investigate and address potential oversized `/Rect` click interception and hit-testing in form fields.
+3. **Third-Party Viewer Interoperability Validation**: Perform manual verification of saved and flattened forms across third-party viewers (Adobe Acrobat, Foxit Reader, Okular).

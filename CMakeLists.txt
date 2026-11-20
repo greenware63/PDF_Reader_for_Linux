@@ -446,8 +446,37 @@ else()
     message(STATUS "zlib not found (or non-Unix): test_redaction is not built")
 endif()
 
+# Hostile AcroForm test suite (Threat T17)
+add_executable(test_hostile_forms
+    test_hostile_forms.cpp
+)
+target_include_directories(test_hostile_forms PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(test_hostile_forms PRIVATE
+    pdf_engine
+    pdf_ipc
+    Qt6::Core
+    Qt6::Network
+)
+
 # CTest registration
 enable_testing()
+add_test(
+    NAME HostileFormTestSuite
+    COMMAND test_hostile_forms "$<TARGET_FILE:pdf_worker>" "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
+)
+
+# Hostile AcroForm fixture determinism drift check (Threat T17)
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    add_test(
+        NAME HostileFormFixtureDeterminismTest
+        COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fixture_determinism.py" "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+endif()
+
 add_test(
     NAME EngineRenderTestSuite
     COMMAND test_render "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
@@ -530,6 +559,9 @@ if(WIN32)
     set_tests_properties(WorkerIpcTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
     )
+    set_tests_properties(HostileFormTestSuite PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
+    )
     set_tests_properties(IpcFuzzTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR}"
     )
@@ -543,6 +575,7 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION
     target_link_options(test_password_prompt PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(pdf_worker PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_worker_ipc PRIVATE -Wl,--allow-multiple-definition)
+    target_link_options(test_hostile_forms PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(fuzz_ipc_messages PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_redaction_rotation PRIVATE -Wl,--allow-multiple-definition)
 endif()
