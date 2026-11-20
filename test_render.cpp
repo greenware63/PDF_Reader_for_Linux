@@ -39,8 +39,6 @@
 #include <fpdf_annot.h>
 #include <fpdf_attachment.h>
 #include <fpdf_doc.h>
-#include <fpdf_save.h>
-#include <fpdf_edit.h>
 
 // Generates a multi-page PDF fixture containing:
 // Page 0: Portrait A4 (595 x 842 pt)
@@ -660,56 +658,6 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
         ::close(fd);
 #endif
         std::cout << "  -> Generated: " << formSavedPath << " (" << bytesWritten << " bytes)" << std::endl;
-
-        // Ensure the 'name' field in compat_form_filled.pdf has a normal appearance stream (/AP)
-        // with the filled text operator so that FPDFPage_Flatten merges the text into page contents.
-        FPDF_DOCUMENT rawDoc = FPDF_LoadDocument(formSavedPath.c_str(), nullptr);
-        if (rawDoc) {
-            FPDF_PAGE rawPage = FPDF_LoadPage(rawDoc, 0);
-            if (rawPage) {
-                for (int i = 0; i < FPDFPage_GetAnnotCount(rawPage); ++i) {
-                    FPDF_ANNOTATION a = FPDFPage_GetAnnot(rawPage, i);
-                    if (a) {
-                        if (FPDFAnnot_GetSubtype(a) == FPDF_ANNOT_WIDGET) {
-                            FS_RECTF r{};
-                            if (FPDFAnnot_GetRect(a, &r)) {
-                                if (std::abs(r.left - 72.0) < 1.0 && std::abs(r.bottom - 700.0) < 1.0) {
-                                    const std::string apStream = "BT /Helv 12 Tf 0 g 75 706 Td (CompatibilityTester) Tj ET";
-                                    const std::u16string apU16(apStream.begin(), apStream.end());
-                                    FPDFAnnot_SetAP(a, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
-                                                    reinterpret_cast<FPDF_WIDESTRING>(apU16.c_str()));
-                                }
-                            }
-                        }
-                        FPDFPage_CloseAnnot(a);
-                    }
-                }
-                FPDFPage_GenerateContent(rawPage);
-                FPDF_ClosePage(rawPage);
-            }
-
-            struct RawMemWriter : public FPDF_FILEWRITE {
-                std::vector<uint8_t> data;
-                static int writeBlock(FPDF_FILEWRITE* self, const void* buf, unsigned long size) {
-                    auto* m = static_cast<RawMemWriter*>(self);
-                    const auto* p = static_cast<const uint8_t*>(buf);
-                    m->data.insert(m->data.end(), p, p + size);
-                    return 1;
-                }
-                RawMemWriter() {
-                    version = 1;
-                    WriteBlock = &RawMemWriter::writeBlock;
-                }
-            } rawWriter;
-            if (FPDF_SaveAsCopy(rawDoc, &rawWriter, FPDF_NO_INCREMENTAL) && !rawWriter.data.empty()) {
-                QFile rf(QString::fromStdString(formSavedPath));
-                if (rf.open(QIODevice::WriteOnly)) {
-                    rf.write(reinterpret_cast<const char*>(rawWriter.data.data()), static_cast<qint64>(rawWriter.data.size()));
-                    rf.close();
-                }
-            }
-            FPDF_CloseDocument(rawDoc);
-        }
 
         // Export Flattened Form from the saved document containing the updated field values
         auto savedDoc = pdf::createDocument();

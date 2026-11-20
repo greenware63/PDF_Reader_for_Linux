@@ -85,15 +85,7 @@ def main():
     output_dir = sys.argv[3] if len(sys.argv) > 3 else os.path.join(source_root, "build", "compat_outputs")
     sample_pdf = os.path.join(source_root, "sample.pdf")
 
-    # 1. Check required external tools (mutool is required in CI)
-    if os.environ.get("CI") and shutil.which("mutool") is None:
-        try:
-            print("CI: mutool not found; installing mupdf-tools via apt-get...")
-            subprocess.run(["sudo", "apt-get", "update"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(["sudo", "apt-get", "install", "-y", "mupdf-tools"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            print(f"Warning: Failed to install mupdf-tools: {e}", file=sys.stderr)
-
+    # 1. Check required external tools (qpdf, poppler-utils, mutool required in CI)
     qpdf_exe = check_tool("qpdf", required_in_ci=True)
     pdfinfo_exe = check_tool("pdfinfo", required_in_ci=True)
     pdftoppm_exe = check_tool("pdftoppm", required_in_ci=True)
