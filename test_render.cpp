@@ -528,8 +528,198 @@ static void generateTextPdfFixture(const std::string& path, const std::string& t
     out.write(pdf.data(), pdf.size());
 }
 
+static int dumpCompatOutputs(const std::string& outDir, const std::string& samplePath) {
+    std::cout << "[COMPAT-DUMP] Generating external viewer compatibility fixtures in: " << outDir << std::endl;
+    QDir dir(QString::fromStdString(outDir));
+    dir.mkpath(QStringLiteral("."));
+
+    // 1. Annotated Save (Incremental & Full)
+    {
+        const std::string textFixture = dir.filePath(QStringLiteral("temp_base.pdf")).toStdString();
+        generateTextPdfFixture(textFixture, "External Compatibility Base Document");
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(textFixture) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to load temp_base.pdf" << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Page 0 is null" << std::endl;
+            return 1;
+        }
+
+        // Highlight
+        pdf::AnnotationItem hl;
+        hl.subtype = pdf::AnnotationSubtype::Highlight;
+        hl.pageIndex = 0;
+        hl.left = 80.0; hl.bottom = 680.0; hl.right = 350.0; hl.top = 720.0;
+        hl.colorArgb = 0xFFFFFF00;
+        hl.hasColor = true;
+        hl.contents = QStringLiteral("Compatibility Highlight Note");
+        hl.quadPoints.push_back({80.0, 720.0, 350.0, 720.0, 80.0, 680.0, 350.0, 680.0});
+        page->addHighlightAnnotation(hl);
+
+        // Sticky Note
+        pdf::AnnotationItem note;
+        note.subtype = pdf::AnnotationSubtype::Text;
+        note.pageIndex = 0;
+        note.left = 50.0; note.bottom = 600.0; note.right = 74.0; note.top = 624.0;
+        note.colorArgb = 0xFFFFCC00;
+        note.hasColor = true;
+        note.contents = QStringLiteral("Sticky note text for external viewers");
+        page->addTextAnnotation(note);
+
+        const std::string annotPath = dir.filePath(QStringLiteral("compat_annotated_save.pdf")).toStdString();
+#ifdef _WIN32
+        int fd = ::_open(annotPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int fd = ::open(annotPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (fd < 0) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to open compat_annotated_save.pdf" << std::endl;
+            return 1;
+        }
+        uint64_t bytesWritten = 0;
+        if (!doc->saveAsCopy(fd, true, bytesWritten, nullptr)) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to save compat_annotated_save.pdf" << std::endl;
+#ifdef _WIN32
+            ::_close(fd);
+#else
+            ::close(fd);
+#endif
+            return 1;
+        }
+#ifdef _WIN32
+        ::_close(fd);
+#else
+        ::close(fd);
+#endif
+        std::cout << "  -> Generated: " << annotPath << " (" << bytesWritten << " bytes)" << std::endl;
+    }
+
+    // 2. Form-Filled Save & Flattened Export
+    {
+        // Resolve form_fields_test.pdf fixture
+        QFileInfo sampleInfo(QString::fromStdString(samplePath));
+        QString formFixture = sampleInfo.dir().filePath(QStringLiteral("tests/fixtures/form_fields_test.pdf"));
+        if (!QFile::exists(formFixture)) {
+            formFixture = QStringLiteral("tests/fixtures/form_fields_test.pdf");
+        }
+        if (!QFile::exists(formFixture)) {
+            formFixture = QStringLiteral("../tests/fixtures/form_fields_test.pdf");
+        }
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(formFixture.toStdString()) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to load form fixture: " << formFixture.toStdString() << std::endl;
+            return 1;
+        }
+        auto page = doc->getPage(0);
+        if (!page) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Form page 0 is null" << std::endl;
+            return 1;
+        }
+
+        // Fill in text field
+        page->setFormFieldText(QStringLiteral("name"), 0, QStringLiteral("CompatibilityTester"), {});
+        page->toggleFormField(QStringLiteral("agree"), 0);
+
+        // Save incremental form
+        const std::string formSavedPath = dir.filePath(QStringLiteral("compat_form_filled.pdf")).toStdString();
+#ifdef _WIN32
+        int fd = ::_open(formSavedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int fd = ::open(formSavedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (fd < 0) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to open compat_form_filled.pdf" << std::endl;
+            return 1;
+        }
+        uint64_t bytesWritten = 0;
+        if (!doc->saveAsCopy(fd, true, bytesWritten, nullptr)) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to save compat_form_filled.pdf" << std::endl;
+#ifdef _WIN32
+            ::_close(fd);
+#else
+            ::close(fd);
+#endif
+            return 1;
+        }
+#ifdef _WIN32
+        ::_close(fd);
+#else
+        ::close(fd);
+#endif
+        std::cout << "  -> Generated: " << formSavedPath << " (" << bytesWritten << " bytes)" << std::endl;
+
+        // Export Flattened Form
+        std::vector<uint8_t> flatBytes;
+        if (doc->extractPages(0, 0, flatBytes, true, pdf::FlattenMode::NormalDisplay) && !flatBytes.empty()) {
+            const std::string flatPath = dir.filePath(QStringLiteral("compat_form_flattened.pdf")).toStdString();
+            QFile flatFile(QString::fromStdString(flatPath));
+            if (flatFile.open(QIODevice::WriteOnly)) {
+                flatFile.write(reinterpret_cast<const char*>(flatBytes.data()), static_cast<qint64>(flatBytes.size()));
+                flatFile.close();
+                std::cout << "  -> Generated: " << flatPath << " (" << flatBytes.size() << " bytes)" << std::endl;
+            }
+        }
+    }
+
+    // 3. Redacted Export
+    {
+        const std::string redactBase = dir.filePath(QStringLiteral("temp_redact_base.pdf")).toStdString();
+        generateTextPdfFixture(redactBase, "Classified Canary Secret Keep This Safe Public Visible Content");
+
+        QFile rf(QString::fromStdString(redactBase));
+        if (rf.open(QIODevice::ReadOnly)) {
+            QByteArray baseBytes = rf.readAll();
+            rf.close();
+
+            std::vector<pdf::redact::PageRedactions> redactions;
+            pdf::redact::PageRedactions pr;
+            pr.pageIndex = 0;
+            // Redact "Classified Canary Secret" at top left
+            pr.rects.push_back(pdf::redact::Rect{80.0, 680.0, 260.0, 720.0});
+            redactions.push_back(pr);
+
+            pdf::redact::Options opts;
+            opts.dpi = 150.0;
+            opts.edgeGrowPx = 1;
+            auto result = pdf::redact::redactDocument(reinterpret_cast<const uint8_t*>(baseBytes.constData()),
+                                                      static_cast<size_t>(baseBytes.size()),
+                                                      "", redactions, opts);
+            if (result.ok() && !result.pdf.empty()) {
+                const std::string redactedOut = dir.filePath(QStringLiteral("compat_redacted_export.pdf")).toStdString();
+                QFile outF(QString::fromStdString(redactedOut));
+                if (outF.open(QIODevice::WriteOnly)) {
+                    outF.write(reinterpret_cast<const char*>(result.pdf.data()), static_cast<qint64>(result.pdf.size()));
+                    outF.close();
+                    std::cout << "  -> Generated: " << redactedOut << " (" << result.pdf.size() << " bytes)" << std::endl;
+                }
+            } else {
+                std::cerr << "[FAIL] dumpCompatOutputs: Redaction failed: " << result.message << std::endl;
+                return 1;
+            }
+        }
+    }
+
+    std::cout << "[COMPAT-DUMP] All compatibility outputs successfully produced." << std::endl;
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     QCoreApplication app(argc, argv);
+
+    // Support --dump-compat-outputs <out-dir> [sample-path]
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--dump-compat-outputs") {
+            std::string outDir = (i + 1 < argc) ? argv[i + 1] : ".";
+            std::string sample = (i + 2 < argc) ? argv[i + 2] : "sample.pdf";
+            return dumpCompatOutputs(outDir, sample);
+        }
+    }
+
     std::cout << "========================================" << std::endl;
     std::cout << " Running PDF Reader Engine Test Suite   " << std::endl;
     std::cout << "========================================" << std::endl;
