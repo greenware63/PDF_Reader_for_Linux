@@ -7,6 +7,7 @@ and trailer /ID), and verifies that normalized representations are byte-identica
 Ensures committed test fixtures cannot silently drift from the generator.
 """
 import difflib
+import filecmp
 import hashlib
 import os
 import re
@@ -32,7 +33,8 @@ def normalize_pdf(qpdf_exe, in_path, out_path):
         tmp_qdf,
     ]
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if res.returncode != 0:
+    # qpdf exit codes: 0 = ok, 3 = succeeded with warnings (output is still written), 2 = error.
+    if res.returncode not in (0, 3):
         raise RuntimeError(f"qpdf normalization failed for {in_path} (exit code {res.returncode}):\n{res.stderr}")
 
     id_pattern = re.compile(r"^  /ID \[")
@@ -116,20 +118,24 @@ def main():
             print(f"Error: Generator failed with code {res.returncode}:\n{res.stderr}", file=sys.stderr)
             return 1
 
-        fixtures = [
-            "hostile_form_many_widgets.pdf",
-            "hostile_form_big_values.pdf",
-            "hostile_form_slow_load_MANUAL.pdf",
-            "hostile_form_oversize_values.pdf",
-            "hostile_form_huge_options.pdf",
-            "hostile_form_deep_hierarchy.pdf",
-            "hostile_form_long_names.pdf",
-            "hostile_form_cycles_and_malformed.pdf",
-            "forms_identity_and_topology.pdf",
-        ]
+        # Read the fixture list from the generator's own registry so a new fixture can never be
+        # forgotten here. Each entry is (file name, builder, compress). compress=False means the
+        # generator writes the bytes itself, without qpdf (needed for content qpdf cannot represent,
+        # such as integers beyond 64 bits). Those bytes are pure Python output, hence portable, and
+        # are compared exactly. Everything qpdf produced is compared in normalized QDF form, because
+        # its compressed bytes depend on the machine's zlib.
+        import importlib.util
+        sys.dont_write_bytecode = True  # do not leave __pycache__ in the source tree
+        spec = importlib.util.spec_from_file_location("hostile_form_generator", generator_script)
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        fixtures = [(entry[0], bool(entry[2])) for entry in generator.FIXTURES]
+        if not fixtures:
+            print("Error: generator registry FIXTURES is empty", file=sys.stderr)
+            return 1
 
         mismatches = []
-        for name in fixtures:
+        for name, compressed_by_qpdf in fixtures:
             committed_pdf = os.path.join(fixtures_dir, name)
             generated_pdf = os.path.join(regen_dir, name)
 
@@ -140,6 +146,15 @@ def main():
             if not os.path.isfile(generated_pdf):
                 print(f"Error: Generated fixture missing: {generated_pdf}", file=sys.stderr)
                 mismatches.append(name)
+                continue
+
+            if not compressed_by_qpdf:
+                if filecmp.cmp(committed_pdf, generated_pdf, shallow=False):
+                    print(f"  OK (raw bytes identical, written without qpdf): {name}")
+                else:
+                    print(f"Error: raw byte mismatch for {name} (written without qpdf, so it must be exact)",
+                          file=sys.stderr)
+                    mismatches.append(name)
                 continue
 
             norm_committed = os.path.join(norm_dir, name + ".committed.norm.qdf")
