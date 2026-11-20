@@ -659,15 +659,18 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
 #endif
         std::cout << "  -> Generated: " << formSavedPath << " (" << bytesWritten << " bytes)" << std::endl;
 
-        // Export Flattened Form
-        std::vector<uint8_t> flatBytes;
-        if (doc->extractPages(0, 0, flatBytes, true, pdf::FlattenMode::NormalDisplay) && !flatBytes.empty()) {
-            const std::string flatPath = dir.filePath(QStringLiteral("compat_form_flattened.pdf")).toStdString();
-            QFile flatFile(QString::fromStdString(flatPath));
-            if (flatFile.open(QIODevice::WriteOnly)) {
-                flatFile.write(reinterpret_cast<const char*>(flatBytes.data()), static_cast<qint64>(flatBytes.size()));
-                flatFile.close();
-                std::cout << "  -> Generated: " << flatPath << " (" << flatBytes.size() << " bytes)" << std::endl;
+        // Export Flattened Form from the saved document containing the updated field values
+        auto savedDoc = pdf::createDocument();
+        if (savedDoc->loadFromFile(formSavedPath) == pdf::DocumentError::None) {
+            std::vector<uint8_t> flatBytes;
+            if (savedDoc->extractPages(0, 0, flatBytes, true, pdf::FlattenMode::NormalDisplay) && !flatBytes.empty()) {
+                const std::string flatPath = dir.filePath(QStringLiteral("compat_form_flattened.pdf")).toStdString();
+                QFile flatFile(QString::fromStdString(flatPath));
+                if (flatFile.open(QIODevice::WriteOnly)) {
+                    flatFile.write(reinterpret_cast<const char*>(flatBytes.data()), static_cast<qint64>(flatBytes.size()));
+                    flatFile.close();
+                    std::cout << "  -> Generated: " << flatPath << " (" << flatBytes.size() << " bytes)" << std::endl;
+                }
             }
         }
     }
