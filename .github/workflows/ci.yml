@@ -130,7 +130,8 @@ jobs:
             libgl1-mesa-dev \
             libxkbcommon-dev \
             qpdf \
-            poppler-utils
+            poppler-utils \
+            mupdf-tools
 
       - name: Configure with shipping defaults
         run: cmake -B build-shipping -G Ninja -DCMAKE_BUILD_TYPE=Release
