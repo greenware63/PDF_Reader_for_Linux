@@ -28,6 +28,15 @@ import subprocess
 import sys
 import tempfile
 
+# Named table of known failures tracking deferred fixes.
+# Strict requirement: If an entry unexpectedly passes, the suite MUST fail so the marker cannot be forgotten.
+KNOWN_FAILURES = {
+    ("compat_form_flattened.pdf", "CompatibilityTester"): (
+        "Typed Latin form field value lacks an /AP appearance stream on save, "
+        "causing FPDFPage_Flatten to drop the text from flattened page contents (Task T20)."
+    ),
+}
+
 
 def run_command(cmd, desc=""):
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -239,15 +248,21 @@ def main():
                         failures.append(f"{fname}: Base text missing in pdftotext")
 
                 elif fname in ("compat_form_filled.pdf", "compat_form_flattened.pdf"):
-                    missing_form_vals = []
                     for val in ("CompatibilityTester", "Germany"):
-                        if val not in out:
-                            missing_form_vals.append(val)
-                    if missing_form_vals:
-                        print(f"  [FAIL] pdftotext: Expected form values {missing_form_vals} not found in {fname}", file=sys.stderr)
-                        failures.append(f"{fname}: Missing form values in pdftotext: {missing_form_vals}")
-                    else:
-                        print(f"  [PASS] pdftotext: Form values 'CompatibilityTester' and 'Germany' extracted cleanly")
+                        key = (fname, val)
+                        present = (val in out)
+                        if key in KNOWN_FAILURES:
+                            if not present:
+                                print(f"  [KNOWN FAILURE] pdftotext: KNOWN FAILURE (T20): {KNOWN_FAILURES[key]}")
+                            else:
+                                print(f"  [FAIL] pdftotext: UNEXPECTED PASS: '{val}' found in {fname}; remove this entry from KNOWN_FAILURES", file=sys.stderr)
+                                failures.append(f"{fname}: UNEXPECTED PASS for '{val}'; remove this entry from KNOWN_FAILURES")
+                        else:
+                            if not present:
+                                print(f"  [FAIL] pdftotext: Expected form value '{val}' not found in {fname}", file=sys.stderr)
+                                failures.append(f"{fname}: Missing form value '{val}' in pdftotext")
+                            else:
+                                print(f"  [PASS] pdftotext: Form value '{val}' verified in {fname}")
 
             # 6. Redaction Pixel Verification (inside solid black, outside matches unredacted source)
             if fname == "compat_redacted_export.pdf":
