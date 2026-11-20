@@ -34,7 +34,8 @@ jobs:
             libgl1-mesa-dev \
             libxkbcommon-dev \
             qpdf \
-            poppler-utils
+            poppler-utils \
+            mupdf-tools
 
       # The fault-injection hooks (watchdog hang/stall, rlimit failure tests) are compiled out of the shipping
       # configuration, and the tests that need them print "Skipped" without them. The three legs below
@@ -101,6 +102,14 @@ jobs:
               exit $rc
             }
           fi
+
+      - name: Upload Compatibility Test Artifacts
+        if: always() && matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-outputs
+          path: build/compat_outputs/
+          if-no-files-found: ignore
 
   build-shipping:
     name: Shipping config (test hooks OFF)
