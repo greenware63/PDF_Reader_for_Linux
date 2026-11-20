@@ -481,8 +481,10 @@ if(Python3_FOUND)
         NAME ExternalEngineCompatTest
         COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_output_compat.py"
                 "${CMAKE_CURRENT_SOURCE_DIR}" "$<TARGET_FILE:test_render>"
+                "${CMAKE_BINARY_DIR}/compat_outputs"
     )
 endif()
+
 
 
 add_test(

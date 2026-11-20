@@ -535,17 +535,19 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
 
     // 1. Annotated Save (Incremental & Full)
     {
-        const std::string textFixture = dir.filePath(QStringLiteral("temp_base.pdf")).toStdString();
+        const std::string textFixture = QDir::temp().filePath(QStringLiteral("compat_temp_base.pdf")).toStdString();
         generateTextPdfFixture(textFixture, "External Compatibility Base Document");
 
         auto doc = pdf::createDocument();
         if (doc->loadFromFile(textFixture) != pdf::DocumentError::None) {
             std::cerr << "[FAIL] dumpCompatOutputs: Failed to load temp_base.pdf" << std::endl;
+            QFile::remove(QString::fromStdString(textFixture));
             return 1;
         }
         auto page = doc->getPage(0);
         if (!page) {
             std::cerr << "[FAIL] dumpCompatOutputs: Page 0 is null" << std::endl;
+            QFile::remove(QString::fromStdString(textFixture));
             return 1;
         }
 
@@ -578,6 +580,7 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
 #endif
         if (fd < 0) {
             std::cerr << "[FAIL] dumpCompatOutputs: Failed to open compat_annotated_save.pdf" << std::endl;
+            QFile::remove(QString::fromStdString(textFixture));
             return 1;
         }
         uint64_t bytesWritten = 0;
@@ -588,6 +591,7 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
 #else
             ::close(fd);
 #endif
+            QFile::remove(QString::fromStdString(textFixture));
             return 1;
         }
 #ifdef _WIN32
@@ -595,6 +599,7 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
 #else
         ::close(fd);
 #endif
+        QFile::remove(QString::fromStdString(textFixture));
         std::cout << "  -> Generated: " << annotPath << " (" << bytesWritten << " bytes)" << std::endl;
     }
 
@@ -621,9 +626,10 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
             return 1;
         }
 
-        // Fill in text field
+        // Fill in text field, toggle checkbox, and set choice combo
         page->setFormFieldText(QStringLiteral("name"), 0, QStringLiteral("CompatibilityTester"), {});
         page->toggleFormField(QStringLiteral("agree"), 0, true);
+        page->setFormFieldChoice(QStringLiteral("country"), 0, {0}); // index 0 is Germany
 
         // Save incremental form
         const std::string formSavedPath = dir.filePath(QStringLiteral("compat_form_filled.pdf")).toStdString();
@@ -668,7 +674,7 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
 
     // 3. Redacted Export
     {
-        const std::string redactBase = dir.filePath(QStringLiteral("temp_redact_base.pdf")).toStdString();
+        const std::string redactBase = QDir::temp().filePath(QStringLiteral("compat_temp_redact_base.pdf")).toStdString();
         generateTextPdfFixture(redactBase, "Classified Canary Secret Keep This Safe Public Visible Content");
 
         QFile rf(QString::fromStdString(redactBase));

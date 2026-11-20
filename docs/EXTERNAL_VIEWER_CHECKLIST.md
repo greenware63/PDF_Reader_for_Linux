@@ -8,15 +8,18 @@ Because automated CI runs headless Linux environments without desktop display se
 
 ## 1. Test Artifacts to Inspect
 
-Outputs can be produced directly using:
+### Primary Route (CI Artifact Download)
+Download the `external-viewer-compat-outputs` artifact zip from the GitHub Actions CI run (attached to the `Ubuntu 24.04 (Release)` job). Unpack the four test PDFs:
+1. `compat_annotated_save.pdf`: Document saved incrementally with standard Highlight (`/Highlight`) and Sticky Note (`/Text`) markup annotations.
+2. `compat_form_filled.pdf`: Interactive form saved incrementally with typed text (`name="CompatibilityTester"`), toggled checkbox (`agree=true`), and choice selection (`country="Germany"`).
+3. `compat_form_flattened.pdf`: Flattened form export where interactive widgets are burned into static page content (`FPDFPage_Flatten`) and `/Annots` is stripped.
+4. `compat_redacted_export.pdf`: Redacted raster-only export where canary text was burned out and pages converted to pure image XObjects.
+
+### Secondary Route (Local Generation)
+Outputs can also be produced directly using:
 ```bash
 ./build/test_render --dump-compat-outputs <output-directory> [sample.pdf]
 ```
-This produces:
-1. `compat_annotated_save.pdf`: Document saved incrementally with standard Highlight (`/Highlight`) and Sticky Note (`/Text`) markup annotations.
-2. `compat_form_filled.pdf`: Interactive form saved incrementally with typed text (`name="CompatibilityTester"`) and toggled checkbox (`agree=true`).
-3. `compat_form_flattened.pdf`: Flattened form export where interactive widgets are burned into static page content (`FPDFPage_Flatten`) and `/Annots` is stripped.
-4. `compat_redacted_export.pdf`: Redacted raster-only export where canary text was burned out and pages converted to pure image XObjects.
 
 ---
 
@@ -32,6 +35,7 @@ This produces:
    - Open file: `okular compat_form_filled.pdf`
    - **Check**: Form field "name" contains `"CompatibilityTester"`.
    - **Check**: Checkbox "agree" is checked.
+   - **Check**: Combo box "country" shows `"Germany"`.
    - **Check**: Field can be focused, edited, and saved without corruption.
 3. **Flattened Document (`compat_form_flattened.pdf`)**:
    - Open file: `okular compat_form_flattened.pdf`
@@ -39,8 +43,8 @@ This produces:
    - **Check**: Fields are **not** interactive (clicking does not show form editing cursor or blue form field highlights).
 4. **Redacted Document (`compat_redacted_export.pdf`)**:
    - Open file: `okular compat_redacted_export.pdf`
-   - **Check**: Black redaction box is drawn over the redacted zone.
-   - **Check**: Text selection tool cannot select or copy `"Classified Canary Secret"`.
+   - **Check**: No text can be selected or searched anywhere on the page. This is intended: the export is raster-only and has no text layer (see `docs/REDACTION.md` G2 and L1). Testers must not log a missing text layer as a bug.
+   - **Check**: The area under the redaction box shows the solid black fill colour (`0xFF000000`), and the content outside the boxes stays visible.
 
 ---
 
@@ -52,14 +56,15 @@ This produces:
    - **Check**: Adding a new note in Acrobat and saving preserves existing annotations.
 2. **Form Document (`compat_form_filled.pdf`)**:
    - Open in Adobe Acrobat Reader.
-   - **Check**: Form fields render with entered value `"CompatibilityTester"`.
+   - **Check**: Form fields render with entered value `"CompatibilityTester"` and choice `"Germany"`.
    - **Check**: No repair warnings or syntax corruption alerts on open.
 3. **Flattened Document (`compat_form_flattened.pdf`)**:
    - Open in Adobe Acrobat Reader.
    - **Check**: Renders as static page content. No form highlight bars appear.
 4. **Redacted Document (`compat_redacted_export.pdf`)**:
    - Open in Adobe Acrobat Reader.
-   - **Check**: Search (`Ctrl+F`) for `"Canary"` or `"Classified"` returns 0 results.
+   - **Check**: No text can be selected or searched anywhere on the page (`Ctrl+F` returns 0 results for any query). This is intended: the export is raster-only and has no text layer (see `docs/REDACTION.md` G2 and L1).
+   - **Check**: The area under the redaction box shows the solid black fill colour (`0xFF000000`), and unredacted content outside the box remains visible.
 
 ---
 
@@ -70,13 +75,15 @@ This produces:
    - **Check**: Comments list displays both items with uncorrupted text.
 2. **Form Document (`compat_form_filled.pdf`)**:
    - Open in Foxit Reader.
-   - **Check**: Text field and checkbox state are recognized and editable.
+   - **Check**: Text field, checkbox, and combo choice `"Germany"` are recognized and editable.
 3. **Flattened Document (`compat_form_flattened.pdf`)**:
    - Open in Foxit Reader.
    - **Check**: Static rendering without form field prompts.
 4. **Redacted Document (`compat_redacted_export.pdf`)**:
    - Open in Foxit Reader.
-   - **Check**: Text extraction and search confirm zero residual text underneath redaction blocks.
+   - **Check**: No text can be selected or searched anywhere on the page. This is intended: the export is raster-only and has no text layer (see `docs/REDACTION.md` G2 and L1).
+   - **Check**: The area under the redaction box shows the solid black fill colour (`0xFF000000`), and content outside the boxes stays visible.
+
 
 ---
 

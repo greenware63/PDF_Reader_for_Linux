@@ -7,7 +7,7 @@ An advanced, security-focused PDF reader and editor for Linux (C++20, Qt 6, PDFi
 | Feature | Status | Evidence |
 | :--- | :--- | :--- |
 | **Viewing & tile rendering** | **Supported** | [`test_render.cpp`](test_render.cpp), [`test_tile_cache.cpp`](test_tile_cache.cpp) |
-| **Text search (Unicode & Persian/Arabic RTL)** | **Supported** | [`test_render.cpp`](test_render.cpp) (Tests 17–18, 24), [`test_widget.cpp`](test_widget.cpp) (Tests 32, 45) |
+| **Text search (Unicode & Persian/Arabic RTL)** | **Supported** | [`test_render.cpp`](test_render.cpp) (Tests 17–18, 23), [`test_widget.cpp`](test_widget.cpp) (Tests 32, 45) |
 | **Annotations (Markup, Note, Ink, Shapes, FreeText, Stamps, Attachments)** | **Supported** | [`test_render.cpp`](test_render.cpp) (Tests 25–30, 42–43), [`test_worker_ipc.cpp`](test_worker_ipc.cpp) (Tests 22–28, 38), [`test_widget.cpp`](test_widget.cpp) (Tests 46–47, 59) |
 | **AcroForm filling (Text, Checkbox, Radio, Combo, Listbox, Vector /AP)** | **Supported** | [`test_render.cpp`](test_render.cpp) (Tests 44–47), [`test_worker_ipc.cpp`](test_worker_ipc.cpp) (Tests 39–42), [`test_widget.cpp`](test_widget.cpp) (Tests 60–62), [`test_hostile_forms.cpp`](test_hostile_forms.cpp) |
 | **Raster redaction (Burn-in sanitization & overwrite guards)** | **Supported** | [`tests/redaction/test_redaction.cpp`](tests/redaction/test_redaction.cpp), [`test_redaction_rotation.cpp`](test_redaction_rotation.cpp), [`test_redaction_file_safety.cpp`](test_redaction_file_safety.cpp) |
