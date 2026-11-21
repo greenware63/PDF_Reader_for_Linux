@@ -21,9 +21,14 @@
 namespace pdf {
 
 static std::atomic<bool> s_simulateGetTextFailureForTesting{false};
+static std::atomic<bool> s_forceAppearanceVerificationFailureForTesting{false};
 
 void PdfiumPage::setSimulateGetTextFailureForTesting(bool simulate) noexcept {
     s_simulateGetTextFailureForTesting.store(simulate);
+}
+
+void PdfiumPage::setForceAppearanceVerificationFailureForTesting(bool force) noexcept {
+    s_forceAppearanceVerificationFailureForTesting.store(force);
 }
 
 // Safety bounds applied ONLY to whole-page renders to prevent bad_alloc / OOM
@@ -1251,16 +1256,6 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
     };
 
     bool killed = false;
-    if ((isTextField || isEditableCombo) && !isPasswordField && vectorOutlines.empty() &&
-        origApLen <= sizeof(FPDF_WCHAR)) {
-        const std::u16string placeholder = QStringLiteral("q\nQ\n").toStdU16String();
-        if (!FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
-                             reinterpret_cast<FPDF_WIDESTRING>(placeholder.c_str()))) {
-            restoreOriginalAp();
-            FPDFPage_CloseAnnot(annot);
-            return false;
-        }
-    }
 
     if (isEditableCombo) {
         FORM_ForceToKillFocus(m_form->handle);
@@ -1314,8 +1309,11 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
                                 reinterpret_cast<FPDF_WIDESTRING>(apU16.c_str())) != 0);
     } else if (!isPasswordField) {
         QString appearance = readFormFieldAppearance(annot);
-        apOk = formAppearanceContainsText(appearance, text);
-        if (!apOk && !text.contains(QLatin1Char('\n')) && !text.contains(QLatin1Char('\r'))) {
+        const bool forceVerificationFailure =
+            s_forceAppearanceVerificationFailureForTesting.load();
+        apOk = !forceVerificationFailure && formAppearanceContainsText(appearance, text);
+        if (!forceVerificationFailure && !apOk &&
+            !text.contains(QLatin1Char('\n')) && !text.contains(QLatin1Char('\r'))) {
             const QByteArray fallback = minimalSingleLineAppearance(m_form->handle, annot, text);
             if (!fallback.isEmpty()) {
                 const std::u16string fallbackU16 = QString::fromLatin1(fallback).toStdU16String();

@@ -19,13 +19,13 @@ deferred, not an undiscovered bug.
 
 - **Explicit appearances**: Text edits are saved with a verified normal `/AP`; PDFium regenerates standard Latin, multiline, and comb appearances. Editable combos and PDFium readback failures use a minimal single-line fallback only for printable ASCII. If a valid appearance cannot be read back or built, the edit is rolled back instead of saving a value that may appear blank.
 - **`/NeedAppearances`**: The pinned PDFium public API can set annotation appearances but does not expose a way to mutate the catalog's AcroForm `/NeedAppearances` entry. The viewer therefore does not rely on that flag; the explicit `/AP` is required. The flag may remain false.
-- **Password fields**: PDFium's regenerated password appearance is masked. Password-field security and stored-value handling are tracked separately under T20-A; this change does not alter that behavior.
+- **Password fields**: Password-type text fields (`Ff` bit 14) are not editable through the engine or viewer. This is the combined T20-A/T20-B behavior; T20-B does not apply any appearance or value edit to them.
 - **External viewers**: Automated Poppler and MuPDF checks cover saved appearances, flattened text, and widget-region ink. Manual compatibility with Adobe Acrobat, Foxit, and Okular remains unverified.
 
 ### Form Editing & Navigation
 
 - **Editable field types**:
-  - Single-line text fields (`QLineEdit`) and multi-line text fields (`QPlainTextEdit`) with password masking where requested by field flags.
+  - Single-line text fields (`QLineEdit`) and multi-line text fields (`QPlainTextEdit`); password-type fields are rejected rather than edited.
   - Checkboxes and radio button groups: toggled directly on click or keyboard activation. Radio buttons in a group share mutual exclusion.
   - Dropdown combo boxes and editable combo boxes with custom typed text.
   - List boxes with single selection or multi-selection (`ExtendedSelection`).
@@ -36,6 +36,7 @@ deferred, not an undiscovered bug.
 ### Non-Latin and Persian Values
 
 - For Persian, Arabic, and other non-Latin text values where standard PDF built-in fonts lack glyph coverage or HarfBuzz shaping, the viewer lays the text out with Qt and synthesizes custom vector appearance streams (`/AP`) directly on the field widget annotation. The text is shaped and joined (including Persian letters like گ and ی). For single-line fields whose right-to-left text is narrower than the field, the layout is right-aligned.
+- **Direct engine callers**: In Latin text mode, direct engine callers reject text that PDFium cannot verify or build a minimal fallback for, including characters above U+00FF such as euro signs, curly quotes, dashes, ellipsis, and trademark symbols when no glyph outlines are supplied. The viewer supplies glyph outlines for non-Latin and unsupported-coverage text.
 - Password text fields (`Ff` bit 14) are not editable through the engine or viewer. They do not receive value glyph outlines or synthesized visible appearance streams; their stored `/V` behavior is unchanged in this release.
 - Vector appearance generation and the field edit are refused if the widget is 4 pt or less in width or height, if the text requires more than 250,000 vector outline elements (`kMaxTextOutlineElements`), or if any character cannot be drawn by any installed system font.
 - The raw Unicode text value is simultaneously stored in the field's `/V` entry.

@@ -5434,6 +5434,95 @@ int main(int argc, char* argv[]) {
             }
         }
 
+#ifdef PDF_WORKER_TEST_HOOKS
+        // Force the appearance verification step to fail. This proves the rollback path
+        // restores both the field value and the prior /AP instead of leaving partial state.
+        pdf::PdfiumPage::setForceAppearanceVerificationFailureForTesting(true);
+        if (page->setFormFieldText(QStringLiteral("name"), 0, QStringLiteral("RollbackProbe"), {})) {
+            pdf::PdfiumPage::setForceAppearanceVerificationFailureForTesting(false);
+            std::cerr << "[FAIL] Test 46e: forced appearance-verification failure was accepted" << std::endl;
+            return 1;
+        }
+        pdf::PdfiumPage::setForceAppearanceVerificationFailureForTesting(false);
+
+        fields = page->listFormFields();
+        bool rollbackValueOk = false;
+        for (const auto& f : fields) {
+            if (f.fieldName == "name") {
+                rollbackValueOk = (f.value == nonLatinText);
+                break;
+            }
+        }
+        if (!rollbackValueOk) {
+            std::cerr << "[FAIL] Test 46e: forced verification failure did not restore the original field value" << std::endl;
+            return 1;
+        }
+
+        const std::string rollbackPath = tempDir.filePath("form_ap_rollback.pdf").toStdString();
+#ifdef _WIN32
+        int rollbackFd = ::_open(rollbackPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int rollbackFd = ::open(rollbackPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (rollbackFd < 0) {
+            std::cerr << "[FAIL] Test 46e: failed to open rollback verification PDF" << std::endl;
+            return 1;
+        }
+        uint64_t rollbackWritten = 0;
+        const bool rollbackSaved = doc->saveAsCopy(rollbackFd, true, rollbackWritten, nullptr) &&
+                                   rollbackWritten > 0;
+#ifdef _WIN32
+        ::_close(rollbackFd);
+#else
+        ::close(rollbackFd);
+#endif
+        if (!rollbackSaved) {
+            std::cerr << "[FAIL] Test 46e: failed to save rollback verification PDF" << std::endl;
+            return 1;
+        }
+
+        FPDF_DOCUMENT rollbackDoc = FPDF_LoadDocument(rollbackPath.c_str(), nullptr);
+        FPDF_PAGE rollbackPage = rollbackDoc ? FPDF_LoadPage(rollbackDoc, 0) : nullptr;
+        bool rollbackAppearanceOk = false;
+        if (rollbackPage) {
+            for (int i = 0; i < FPDFPage_GetAnnotCount(rollbackPage); ++i) {
+                FPDF_ANNOTATION annot = FPDFPage_GetAnnot(rollbackPage, i);
+                if (!annot) continue;
+                if (FPDFAnnot_GetSubtype(annot) == FPDF_ANNOT_WIDGET) {
+                    const unsigned long nameLen = FPDFAnnot_GetStringValue(annot, "T", nullptr, 0);
+                    std::vector<unsigned short> nameBuf(nameLen / sizeof(unsigned short) + 1, 0);
+                    FPDFAnnot_GetStringValue(annot, "T",
+                                             reinterpret_cast<FPDF_WCHAR*>(nameBuf.data()), nameLen);
+                    const QString fieldName = nameLen > sizeof(FPDF_WCHAR)
+                        ? QString::fromUtf16(reinterpret_cast<const char16_t*>(nameBuf.data()))
+                        : QString();
+                    if (fieldName == QStringLiteral("name")) {
+                        const unsigned long apLen = FPDFAnnot_GetAP(
+                            annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0);
+                        std::vector<unsigned short> apBuf(apLen / sizeof(unsigned short) + 1, 0);
+                        const unsigned long actualApLen = FPDFAnnot_GetAP(
+                            annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                            reinterpret_cast<FPDF_WCHAR*>(apBuf.data()), apLen);
+                        const QString apText = actualApLen > sizeof(FPDF_WCHAR)
+                            ? QString::fromUtf16(reinterpret_cast<const char16_t*>(apBuf.data()))
+                            : QString();
+                        rollbackAppearanceOk = !apText.isEmpty() &&
+                                               !apText.contains(QStringLiteral("RollbackProbe"));
+                    }
+                }
+                FPDFPage_CloseAnnot(annot);
+            }
+            FPDF_ClosePage(rollbackPage);
+        }
+        if (rollbackDoc) FPDF_CloseDocument(rollbackDoc);
+        if (!rollbackAppearanceOk) {
+            std::cerr << "[FAIL] Test 46e: forced verification failure left a partial /AP or lost the original /AP" << std::endl;
+            return 1;
+        }
+#else
+        std::cout << "  -> 46e forced-verification rollback SKIPPED: build with -DENABLE_TEST_HOOKS=ON." << std::endl;
+#endif
+
         std::cout << "  -> Passed: Vector AP synthesis, Latin AP regeneration, incremental persistence, and rollback verified." << std::endl;
     }
 

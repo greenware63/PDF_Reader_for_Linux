@@ -9,7 +9,7 @@ Because automated CI runs headless Linux environments without desktop display se
 ## 1. Test Artifacts to Inspect
 
 ### Primary Route (CI Artifact Download)
-Download the `compat-outputs` artifact zip from the GitHub Actions CI run (attached to the `Ubuntu 24.04 (Release)` job once CI has run with artifact upload enabled). Unpack the test PDFs:
+Download the `compat-outputs` artifact zip from the GitHub Actions CI run (attached to the `Ubuntu 24.04 (Release)` job once CI has run with artifact upload enabled). Password-type fields are intentionally not editable. Unpack the test PDFs:
 1. `compat_annotated_save.pdf`: Document saved incrementally with standard Highlight (`/Highlight`) and Sticky Note (`/Text`) markup annotations.
 2. `compat_form_filled.pdf`: Interactive form saved incrementally with typed text (`name="CompatibilityTester"`), toggled checkbox (`agree=true`), and choice selection (`country="Germany"`).
 3. `compat_form_flattened.pdf`: Flattened form export where interactive widgets are burned into static page content (`FPDFPage_Flatten`) and `/Annots` is stripped.

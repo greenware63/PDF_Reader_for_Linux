@@ -56,6 +56,7 @@ public:
     FlattenResult flatten(FlattenMode mode = FlattenMode::NormalDisplay) override;
 
     static void setSimulateGetTextFailureForTesting(bool simulate) noexcept;
+    static void setForceAppearanceVerificationFailureForTesting(bool force) noexcept;
 
 private:
     void drawFormFields(FPDF_BITMAP bitmap, int startX, int startY, int sizeX, int sizeY, int rotate, int flags);

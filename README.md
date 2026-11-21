@@ -148,7 +148,7 @@ The build system configures strict diagnostics and defense-in-depth compile-time
 ## Known Limitations
 
 Interactive AcroForm filling (partial) and annotations are supported. However:
-- **Form appearances**: The viewer cannot set AcroForm `/NeedAppearances` through PDFium's public API. If it cannot generate and verify an explicit appearance (including the limited ASCII fallback for single-line edits), the edit is rolled back; see [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md).
+- **Form appearances**: The viewer cannot set AcroForm `/NeedAppearances` through PDFium's public API. If it cannot generate and verify an explicit appearance (including the limited ASCII fallback for single-line edits), the edit is rolled back. Password-type fields are not editable. Direct engine callers reject unverified text above U+00FF when no glyph outlines are supplied; see [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md).
 - **PDF JavaScript and XFA**: Dynamic XFA forms and PDF JavaScript execution (calculation, validation, formatting) are not supported by design (threat model T1/T2).
 - **Digital Signatures & OCR**: Digital signatures are not supported and are invalidated on save/redaction. Optical character recognition (OCR) is not supported.
 - **Page Organization**: Inserting, deleting, or reordering pages on disk is not supported (view rotation only).
