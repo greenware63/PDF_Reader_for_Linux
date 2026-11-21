@@ -133,4 +133,4 @@ Every implementation pass must avoid broad formatting, renaming, or unrelated cl
 
 ## 8. Not verified by this RFC
 
-T22 changes documentation only. No source was moved; no characterization test was added; no local build, CTest, sanitizers, or new PR CI was run. The measured ranges, file sizes and baseline CI result above are verified against `b0a01ea`; the proposed collaborator boundaries, completion targets and migration ordering remain design decisions to validate incrementally.
+T22 changes documentation only. No source was moved; no characterization test was added; no local build, CTest, or sanitizer suite was run. The measured ranges, file sizes and baseline CI result above are verified against `b0a01ea`; any CI on this docs-only PR validates the documentation diff, not implementation behavior. The proposed collaborator boundaries, completion targets and migration ordering remain design decisions to validate incrementally.
