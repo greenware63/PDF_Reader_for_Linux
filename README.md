@@ -19,6 +19,8 @@ An advanced, security-focused PDF reader and editor for Linux (C++20, Qt 6, PDFi
 | **Page organization (Insert, delete, reorder, rotate pages on disk)** | **Not supported** | [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) (view rotation only) |
 | **External viewer compatibility (Acrobat, Foxit, Okular)** | **Unverified** | Tracked in [`docs/EXTERNAL_VIEWER_CHECKLIST.md`](docs/EXTERNAL_VIEWER_CHECKLIST.md) |
 
+For an evidence-backed capability audit against commercial PDF workstations and the phased implementation plan, see [`docs/PARITY_MATRIX.md`](docs/PARITY_MATRIX.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 
 ## Architecture & Principles
 
