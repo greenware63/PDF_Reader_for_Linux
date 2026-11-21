@@ -283,6 +283,9 @@ add_executable(test_render
 target_link_libraries(test_render PRIVATE
     pdf_engine
 )
+if(ENABLE_TEST_HOOKS)
+    target_compile_definitions(test_render PRIVATE PDF_WORKER_TEST_HOOKS=1)
+endif()
 
 # Standalone layout test (links solely to pdf_layout, 0 Qt, 0 PDFium)
 add_executable(test_layout

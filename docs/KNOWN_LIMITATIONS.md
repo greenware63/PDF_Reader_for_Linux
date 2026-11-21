@@ -8,25 +8,24 @@ deferred, not an undiscovered bug.
 | Capability | Status |
 |---|---|
 | Show stored form-field values and check marks | **Supported** (drawn by PDFium's form-fill environment) |
-| Edit / fill in text fields, checkboxes, radio buttons, combo and list boxes | **Partial** (in-place Qt editors, Tab navigation, undo/redo; Latin text lacks /AP on save, see below) |
-| Export flattened PDF | **Partial** (burns form widgets into static page graphics, but drops typed Latin text lacking /AP, see below) |
+| Edit / fill in text fields, checkboxes, radio buttons, combo and list boxes | **Partial** (in-place Qt editors, Tab navigation, undo/redo; failed appearance generation rolls the edit back, see below) |
+| Export flattened PDF | **Partial** (burns saved form appearances into static page graphics; JavaScript/XFA-dependent fields remain unsupported) |
 | PDF JavaScript (calculation, validation, formatting, show/hide) | **Never runs** (no JavaScript engine is built in, by design: threat model T1/T2) |
 | XFA forms ("dynamic" forms, common in some government and bank PDFs) | **Not supported** |
 | Pushbuttons, ResetForm, form submission, URL/launch actions | **Inert / Not supported** (never executed) |
 | Calculated / derived fields | **Not recomputed** (no JavaScript engine) |
 
-### Latin Form Field Appearances and Flattening (Known Issue)
+### Form Field Appearance Generation
 
-- **Missing Appearance Stream (`/AP`)**: After a user types a Latin value into a text field, the saved file stores the new value in the field's `/V` entry, but no explicit `/AP` appearance stream is generated, and `/NeedAppearances true` is not set in the AcroForm dictionary.
-- **External Viewers Display**: External viewers that do not construct dynamic appearances automatically (such as Adobe Acrobat Reader or Foxit Reader) may initially display the field as blank until clicked or focused.
-- **Flattened Export Omits Typed Text**: Because `FPDFPage_Flatten` requires an existing `/AP` appearance stream to bake widget content into static page graphics (`/Contents`), any typed Latin field values are silently omitted from flattened exports.
-- **Appearance Removal on Prior Values**: Fields that had an existing appearance stream before editing lose it upon committing a Latin value, because the engine explicitly clears the prior stream (in `src/engine/PdfiumPage.cpp` around the `FPDFAnnot_SetAP(..., nullptr)` branch).
-- **Resolution Plan**: A full engine-level fix synthesizing Latin appearance streams matching field font, alignment, and bounding box geometry is planned under Task T20.
+- **Explicit appearances**: Text edits are saved with a verified normal `/AP`; PDFium regenerates standard Latin, multiline, and comb appearances. Editable combos and PDFium readback failures use a minimal single-line fallback only for printable ASCII. If a valid appearance cannot be read back or built, the edit is rolled back instead of saving a value that may appear blank.
+- **`/NeedAppearances`**: The pinned PDFium public API can set annotation appearances but does not expose a way to mutate the catalog's AcroForm `/NeedAppearances` entry. The viewer therefore does not rely on that flag; the explicit `/AP` is required. The flag may remain false.
+- **Password fields**: Password-type text fields (`Ff` bit 14) are not editable through the engine or viewer. This is the combined T20-A/T20-B behavior; T20-B does not apply any appearance or value edit to them.
+- **External viewers**: Automated Poppler and MuPDF checks cover saved appearances, flattened text, and widget-region ink. Manual compatibility with Adobe Acrobat, Foxit, and Okular remains unverified.
 
 ### Form Editing & Navigation
 
 - **Editable field types**:
-  - Single-line text fields (`QLineEdit`) and multi-line text fields (`QPlainTextEdit`) with password masking where requested by field flags.
+  - Single-line text fields (`QLineEdit`) and multi-line text fields (`QPlainTextEdit`); password-type fields are rejected rather than edited.
   - Checkboxes and radio button groups: toggled directly on click or keyboard activation. Radio buttons in a group share mutual exclusion.
   - Dropdown combo boxes and editable combo boxes with custom typed text.
   - List boxes with single selection or multi-selection (`ExtendedSelection`).
@@ -37,6 +36,7 @@ deferred, not an undiscovered bug.
 ### Non-Latin and Persian Values
 
 - For Persian, Arabic, and other non-Latin text values where standard PDF built-in fonts lack glyph coverage or HarfBuzz shaping, the viewer lays the text out with Qt and synthesizes custom vector appearance streams (`/AP`) directly on the field widget annotation. The text is shaped and joined (including Persian letters like گ and ی). For single-line fields whose right-to-left text is narrower than the field, the layout is right-aligned.
+- **Direct engine callers**: In Latin text mode, direct engine callers reject text that PDFium cannot verify or build a minimal fallback for, including characters above U+00FF such as euro signs, curly quotes, dashes, ellipsis, and trademark symbols when no glyph outlines are supplied. The viewer supplies glyph outlines for non-Latin and unsupported-coverage text.
 - Password text fields (`Ff` bit 14) are not editable through the engine or viewer. They do not receive value glyph outlines or synthesized visible appearance streams; their stored `/V` behavior is unchanged in this release.
 - Vector appearance generation and the field edit are refused if the widget is 4 pt or less in width or height, if the text requires more than 250,000 vector outline elements (`kMaxTextOutlineElements`), or if any character cannot be drawn by any installed system font.
 - The raw Unicode text value is simultaneously stored in the field's `/V` entry.
