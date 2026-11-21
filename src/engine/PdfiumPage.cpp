@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <iostream>
 #include <QHash>
+#include <QRegularExpression>
 
 namespace pdf {
 
@@ -1010,6 +1011,172 @@ FPDF_ANNOTATION findWidgetAnnot(FPDF_PAGE page, FPDF_FORMHANDLE form, const QStr
     return nullptr;
 }
 
+QString readFormFieldAppearance(FPDF_ANNOTATION annot) {
+    constexpr unsigned long kMaxAppearanceBytes = 1024 * 1024;
+    const unsigned long length = FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0);
+    if (length <= sizeof(FPDF_WCHAR) || length > kMaxAppearanceBytes) {
+        return {};
+    }
+
+    std::vector<unsigned short> buffer(length / sizeof(unsigned short) + 1, 0);
+    const unsigned long actual = FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                                                  reinterpret_cast<FPDF_WCHAR*>(buffer.data()), length);
+    if (actual <= sizeof(FPDF_WCHAR) || actual > length) {
+        return {};
+    }
+    return QString::fromUtf16(reinterpret_cast<const char16_t*>(buffer.data()),
+                              static_cast<qsizetype>((actual - sizeof(FPDF_WCHAR)) / sizeof(FPDF_WCHAR)));
+}
+
+QString formAppearanceText(const QString& appearance) {
+    QString result;
+    for (qsizetype i = 0; i < appearance.size(); ++i) {
+        if (appearance.at(i) != QLatin1Char('(')) {
+            continue;
+        }
+
+        QString literal;
+        int depth = 1;
+        while (++i < appearance.size() && depth > 0) {
+            const QChar ch = appearance.at(i);
+            if (ch == QLatin1Char('\\')) {
+                if (++i >= appearance.size()) {
+                    break;
+                }
+                const QChar escaped = appearance.at(i);
+                if (escaped == QLatin1Char('n')) literal += QLatin1Char('\n');
+                else if (escaped == QLatin1Char('r')) literal += QLatin1Char('\r');
+                else if (escaped == QLatin1Char('t')) literal += QLatin1Char('\t');
+                else if (escaped == QLatin1Char('b')) literal += QLatin1Char('\b');
+                else if (escaped == QLatin1Char('f')) literal += QLatin1Char('\f');
+                else if (escaped == QLatin1Char('\n')) continue;
+                else if (escaped == QLatin1Char('\r')) {
+                    if (i + 1 < appearance.size() && appearance.at(i + 1) == QLatin1Char('\n')) ++i;
+                    continue;
+                } else if (escaped >= QLatin1Char('0') && escaped <= QLatin1Char('7')) {
+                    unsigned int octal = escaped.unicode() - QLatin1Char('0').unicode();
+                    int digits = 1;
+                    while (digits < 3 && i + 1 < appearance.size() &&
+                           appearance.at(i + 1) >= QLatin1Char('0') && appearance.at(i + 1) <= QLatin1Char('7')) {
+                        octal = octal * 8 + appearance.at(++i).unicode() - QLatin1Char('0').unicode();
+                        ++digits;
+                    }
+                    literal += QChar(static_cast<ushort>(octal));
+                } else {
+                    literal += escaped;
+                }
+                continue;
+            }
+            if (ch == QLatin1Char('(')) {
+                ++depth;
+                literal += ch;
+            } else if (ch == QLatin1Char(')')) {
+                if (--depth > 0) literal += ch;
+            } else {
+                literal += ch;
+            }
+        }
+
+        if (depth != 0) {
+            return {};
+        }
+        while (i + 1 < appearance.size() && appearance.at(i + 1).isSpace()) ++i;
+        if (appearance.mid(i + 1, 2) == QStringLiteral("Tj")) {
+            result += literal;
+        }
+    }
+    return result;
+}
+
+QString compactFormText(const QString& text) {
+    QString compact;
+    compact.reserve(text.size());
+    for (const QChar ch : text) {
+        if (!ch.isSpace()) {
+            compact += ch;
+        }
+    }
+    return compact;
+}
+
+QString normalizedFormFieldText(QString text) {
+    text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    text.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+    return text;
+}
+
+bool formAppearanceContainsText(const QString& appearance, const QString& text) {
+    if (appearance.isEmpty() || !appearance.contains(QStringLiteral("Tj"))) {
+        return false;
+    }
+    const QString expected = compactFormText(text);
+    return expected.isEmpty() || compactFormText(formAppearanceText(appearance)).contains(expected);
+}
+
+QString readFormFieldDefaultAppearance(FPDF_ANNOTATION annot) {
+    const unsigned long length = FPDFAnnot_GetStringValue(annot, "DA", nullptr, 0);
+    if (length <= sizeof(FPDF_WCHAR) || length > 65536) {
+        return {};
+    }
+    std::vector<unsigned short> buffer(length / sizeof(unsigned short) + 1, 0);
+    const unsigned long actual = FPDFAnnot_GetStringValue(annot, "DA", reinterpret_cast<FPDF_WCHAR*>(buffer.data()), length);
+    if (actual <= sizeof(FPDF_WCHAR) || actual > length) {
+        return {};
+    }
+    return QString::fromUtf16(reinterpret_cast<const char16_t*>(buffer.data()),
+                              static_cast<qsizetype>((actual - sizeof(FPDF_WCHAR)) / sizeof(FPDF_WCHAR)));
+}
+
+QByteArray minimalSingleLineAppearance(FPDF_FORMHANDLE form, FPDF_ANNOTATION annot, const QString& text) {
+    QString literal;
+    literal.reserve(text.size() + 8);
+    for (const QChar ch : text) {
+        const ushort code = ch.unicode();
+        if (code < 0x20 || code > 0x7E) {
+            return {};
+        }
+        if (ch == QLatin1Char('\\') || ch == QLatin1Char('(') || ch == QLatin1Char(')')) {
+            literal += QLatin1Char('\\');
+        }
+        literal += ch;
+    }
+
+    static const QRegularExpression fontExpression(QStringLiteral("/([A-Za-z0-9_.+-]+)\\s+([-+]?[0-9]*\\.?[0-9]+)\\s+Tf"));
+    const QRegularExpressionMatch fontMatch = fontExpression.match(readFormFieldDefaultAppearance(annot));
+    if (!fontMatch.hasMatch()) {
+        return {};
+    }
+
+    FS_RECTF rect{};
+    if (!FPDFAnnot_GetRect(annot, &rect)) {
+        return {};
+    }
+    const double width = std::abs(static_cast<double>(rect.right) - rect.left);
+    const double height = std::abs(static_cast<double>(rect.top) - rect.bottom);
+    if (!std::isfinite(width) || !std::isfinite(height) || width <= 0.0 || height <= 0.0) {
+        return {};
+    }
+
+    float fontSize = 0.0f;
+    if (!FPDFAnnot_GetFontSize(form, annot, &fontSize) || !std::isfinite(fontSize) || fontSize < 0.0f) {
+        return {};
+    }
+    if (fontSize == 0.0f) {
+        fontSize = static_cast<float>(std::min(12.0, height * 0.8));
+    }
+    if (fontSize <= 0.0f || fontSize > 1000.0f) {
+        return {};
+    }
+
+    unsigned int red = 0, green = 0, blue = 0;
+    FPDFAnnot_GetFontColor(form, annot, &red, &green, &blue);
+    const double baseline = std::max(0.0, (height - fontSize) / 2.0 + fontSize * 0.15);
+    return "q\n0 0 " + pdfNumber(width) + ' ' + pdfNumber(height) + " re W n\n" +
+           pdfNumber(red / 255.0) + ' ' + pdfNumber(green / 255.0) + ' ' + pdfNumber(blue / 255.0) +
+           " rg\nBT\n/" + fontMatch.captured(1).toLatin1() + ' ' + pdfNumber(fontSize) + " Tf\n1 " +
+           pdfNumber(baseline) + " Td\n(" + literal.toLatin1() + ") Tj\nET\nQ\n";
+}
+
 } // namespace
 
 bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, const QString& text,
@@ -1037,6 +1204,7 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
     int rawType = FPDFAnnot_GetFormFieldType(m_form->handle, annot);
     const bool isTextField = (rawType == FPDF_FORMFIELD_TEXTFIELD);
     const bool isEditableCombo = (rawType == FPDF_FORMFIELD_COMBOBOX && (flags & FormFieldFlag::Edit));
+    const bool isPasswordField = isTextField && (flags & FormFieldFlag::Password);
     if (!isTextField && !isEditableCombo) {
         FPDFPage_CloseAnnot(annot);
         return false;
@@ -1069,19 +1237,41 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
                         reinterpret_cast<FPDF_WCHAR*>(origApWide.data()), origApLen);
     }
 
+    auto restoreOriginalAp = [&]() {
+        if (origApLen > sizeof(FPDF_WCHAR) && !origApWide.empty()) {
+            FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                            reinterpret_cast<FPDF_WIDESTRING>(origApWide.data()));
+        } else {
+            FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr);
+        }
+    };
+
     bool killed = false;
+    if ((isTextField || isEditableCombo) && !isPasswordField && vectorOutlines.empty() &&
+        origApLen <= sizeof(FPDF_WCHAR)) {
+        const std::u16string placeholder = QStringLiteral("q\nQ\n").toStdU16String();
+        if (!FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                             reinterpret_cast<FPDF_WIDESTRING>(placeholder.c_str()))) {
+            restoreOriginalAp();
+            FPDFPage_CloseAnnot(annot);
+            return false;
+        }
+    }
+
     if (isEditableCombo) {
         FORM_ForceToKillFocus(m_form->handle);
         FPDFAnnot_SetStringValue(annot, "V", reinterpret_cast<FPDF_WIDESTRING>(wideText.data()));
         killed = true;
     } else {
         if (!FORM_SetFocusedAnnot(m_form->handle, annot)) {
+            restoreOriginalAp();
             FPDFPage_CloseAnnot(annot);
             return false;
         }
 
         if (!FORM_SelectAllText(m_form->handle, m_page)) {
             FORM_ForceToKillFocus(m_form->handle);
+            restoreOriginalAp();
             FPDFPage_CloseAnnot(annot);
             return false;
         }
@@ -1118,11 +1308,26 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
         const std::u16string apU16 = QString::fromLatin1(apContent).toStdU16String();
         apOk = (FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
                                 reinterpret_cast<FPDF_WIDESTRING>(apU16.c_str())) != 0);
-    } else if (origApLen > 2) {
-        FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr);
+    } else if (!isPasswordField) {
+        QString appearance = readFormFieldAppearance(annot);
+        apOk = formAppearanceContainsText(appearance, text);
+        if (!apOk && !text.contains(QLatin1Char('\n')) && !text.contains(QLatin1Char('\r'))) {
+            const QByteArray fallback = minimalSingleLineAppearance(m_form->handle, annot, text);
+            if (!fallback.isEmpty()) {
+                const std::u16string fallbackU16 = QString::fromLatin1(fallback).toStdU16String();
+                apOk = FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                                       reinterpret_cast<FPDF_WIDESTRING>(fallbackU16.c_str())) != 0;
+                if (apOk) {
+                    appearance = readFormFieldAppearance(annot);
+                    apOk = formAppearanceContainsText(appearance, text);
+                }
+            }
+        }
+    } else {
+        apOk = !readFormFieldAppearance(annot).isEmpty();
     }
 
-    const bool success = (killed && committedVal == text && apOk);
+    const bool success = (killed && normalizedFormFieldText(committedVal) == normalizedFormFieldText(text) && apOk);
     if (!success) {
         // Rollback to prior value and /AP to avoid leaving an unlogged mutation
         std::vector<unsigned short> origWide(originalVal.size() + 1, 0);
@@ -1130,12 +1335,7 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
             origWide[i] = originalVal.at(i).unicode();
         }
 
-        if (origApLen > 2 && !origApWide.empty()) {
-            FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
-                            reinterpret_cast<FPDF_WIDESTRING>(origApWide.data()));
-        } else {
-            FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr);
-        }
+        restoreOriginalAp();
 
         bool rollbackOk = false;
         if (isEditableCombo) {
@@ -1153,7 +1353,7 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
                     restoredVal = QString::fromUtf16(u16, static_cast<qsizetype>((actual - 2) / sizeof(char16_t)));
                 }
             }
-            rollbackOk = (restoredVal == originalVal);
+            rollbackOk = (normalizedFormFieldText(restoredVal) == normalizedFormFieldText(originalVal));
         } else {
             bool rbFocused = (FORM_SetFocusedAnnot(m_form->handle, annot) != 0);
             bool rbSelected = rbFocused && (FORM_SelectAllText(m_form->handle, m_page) != 0);
@@ -1175,7 +1375,8 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
                 }
             }
 
-            rollbackOk = (rbFocused && rbSelected && rbKilled && (restoredVal == originalVal));
+            rollbackOk = (rbFocused && rbSelected && rbKilled &&
+                          normalizedFormFieldText(restoredVal) == normalizedFormFieldText(originalVal));
         }
 
         if (!rollbackOk) {

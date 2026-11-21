@@ -682,6 +682,73 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
         }
     }
 
+    // 2b. Latin text appearance save and flatten outputs for independent engines
+    {
+        QFileInfo sampleInfo(QString::fromStdString(samplePath));
+        QString fixturePath = sampleInfo.dir().filePath(QStringLiteral("tests/fixtures/forms_identity_and_topology.pdf"));
+        if (!QFile::exists(fixturePath)) {
+            fixturePath = QStringLiteral("tests/fixtures/forms_identity_and_topology.pdf");
+        }
+        if (!QFile::exists(fixturePath)) {
+            fixturePath = QStringLiteral("../tests/fixtures/forms_identity_and_topology.pdf");
+        }
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(fixturePath.toStdString()) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to load appearance fixture: " << fixturePath.toStdString() << std::endl;
+            return 1;
+        }
+        auto namePage = doc->getPage(0);
+        auto notesPage = doc->getPage(1);
+        if (!namePage || !notesPage ||
+            !namePage->setFormFieldText(QStringLiteral("form1.name"), 0, QStringLiteral("LatinAppearanceName"), {}) ||
+            !namePage->setFormFieldText(QStringLiteral("persian_name"), 0, QStringLiteral("ExternalPersianField"), {}) ||
+            !notesPage->setFormFieldText(QStringLiteral("notes"), 0,
+                                         QStringLiteral("First external line\rSecond external line"), {})) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to set appearance test values" << std::endl;
+            return 1;
+        }
+
+        const std::string filledPath = dir.filePath(QStringLiteral("compat_form_appearances_filled.pdf")).toStdString();
+#ifdef _WIN32
+        int fd = ::_open(filledPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int fd = ::open(filledPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (fd < 0) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to open compat_form_appearances_filled.pdf" << std::endl;
+            return 1;
+        }
+        uint64_t bytesWritten = 0;
+        const bool saved = doc->saveAsCopy(fd, true, bytesWritten, nullptr) && bytesWritten > 0;
+#ifdef _WIN32
+        ::_close(fd);
+#else
+        ::close(fd);
+#endif
+        if (!saved) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to save appearance test PDF" << std::endl;
+            return 1;
+        }
+
+        std::vector<uint8_t> flattened;
+        if (!doc->extractPages(0, doc->pageCount() - 1, flattened, true, pdf::FlattenMode::NormalDisplay) ||
+            flattened.empty()) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to flatten appearance test PDF" << std::endl;
+            return 1;
+        }
+        const QString flattenedPath = dir.filePath(QStringLiteral("compat_form_appearances_flattened.pdf"));
+        QFile flattenedFile(flattenedPath);
+        if (!flattenedFile.open(QIODevice::WriteOnly) ||
+            flattenedFile.write(reinterpret_cast<const char*>(flattened.data()),
+                                static_cast<qint64>(flattened.size())) != static_cast<qint64>(flattened.size())) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to write flattened appearance test PDF" << std::endl;
+            return 1;
+        }
+        flattenedFile.close();
+        std::cout << "  -> Generated: " << filledPath << " and " << flattenedPath.toStdString() << std::endl;
+    }
+
     // 3. Redacted Export
     {
         const std::string redactBase = wDir.filePath(QStringLiteral("compat_redacted_source.pdf")).toStdString();
@@ -5282,7 +5349,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // 46d: Setting Latin text without outlines clears custom /AP
+        // 46d: Setting Latin text without outlines lets PDFium regenerate a text /AP
         if (!page->setFormFieldText(QStringLiteral("name"), 0, QStringLiteral("Alice"), {})) {
             std::cerr << "[FAIL] Test 46d: setFormFieldText with Latin text failed" << std::endl;
             return 1;
@@ -5302,6 +5369,44 @@ int main(int argc, char* argv[]) {
 #else
             ::close(clearFd);
 #endif
+        }
+        FPDF_DOCUMENT latinDoc = FPDF_LoadDocument(clearedPath.c_str(), nullptr);
+        FPDF_PAGE latinPage = latinDoc ? FPDF_LoadPage(latinDoc, 0) : nullptr;
+        bool hasLatinAppearance = false;
+        if (latinPage) {
+            for (int i = 0; i < FPDFPage_GetAnnotCount(latinPage); ++i) {
+                FPDF_ANNOTATION annot = FPDFPage_GetAnnot(latinPage, i);
+                if (!annot) continue;
+                if (FPDFAnnot_GetSubtype(annot) == FPDF_ANNOT_WIDGET) {
+                    const unsigned long nameLen = FPDFAnnot_GetStringValue(annot, "T", nullptr, 0);
+                    std::vector<unsigned short> nameBuf(nameLen / sizeof(unsigned short) + 1, 0);
+                    const unsigned long actualNameLen = FPDFAnnot_GetStringValue(
+                        annot, "T", reinterpret_cast<FPDF_WCHAR*>(nameBuf.data()), nameLen);
+                    const QString fieldName = actualNameLen > sizeof(FPDF_WCHAR)
+                        ? QString::fromUtf16(reinterpret_cast<const char16_t*>(nameBuf.data()),
+                            static_cast<qsizetype>((actualNameLen - sizeof(FPDF_WCHAR)) / sizeof(FPDF_WCHAR)))
+                        : QString();
+                    if (fieldName == QStringLiteral("name")) {
+                        const unsigned long apLen = FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0);
+                        std::vector<unsigned short> apBuf(apLen / sizeof(unsigned short) + 1, 0);
+                        const unsigned long actualApLen = FPDFAnnot_GetAP(
+                            annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                            reinterpret_cast<FPDF_WCHAR*>(apBuf.data()), apLen);
+                        const QString apText = actualApLen > sizeof(FPDF_WCHAR)
+                            ? QString::fromUtf16(reinterpret_cast<const char16_t*>(apBuf.data()))
+                            : QString();
+                        hasLatinAppearance = apText.contains(QStringLiteral("Alice")) &&
+                                             !apText.contains(QStringLiteral("re W n"));
+                    }
+                }
+                FPDFPage_CloseAnnot(annot);
+            }
+            FPDF_ClosePage(latinPage);
+        }
+        if (latinDoc) FPDF_CloseDocument(latinDoc);
+        if (!hasLatinAppearance) {
+            std::cerr << "[FAIL] Test 46d: saved 'name' field lacks a regenerated Alice /AP or retains stale vector clipping" << std::endl;
+            return 1;
         }
 
         // 46e: Rollback restores prior /AP stream if a mutation fails
@@ -5329,7 +5434,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        std::cout << "  -> Passed: Vector AP synthesis, clipping, incremental persistence, AP clearing, and rollback verified." << std::endl;
+        std::cout << "  -> Passed: Vector AP synthesis, Latin AP regeneration, incremental persistence, and rollback verified." << std::endl;
     }
 
     // --- TEST 47: Milestone M5 Slice 5 Form Flattening & Non-destructive Export ---
@@ -5508,8 +5613,203 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: In-place page & doc flattening, idempotency, and non-destructive export verified." << std::endl;
     }
 
+    // --- TEST 48: Latin text, multiline, and Persian-named field appearances survive save and flatten ---
+    std::cout << "[TEST 48] Testing saved and flattened appearances for name, notes, and persian_name..." << std::endl;
+    {
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        std::string fixturePath = root + "/tests/fixtures/forms_identity_and_topology.pdf";
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "tests/fixtures/forms_identity_and_topology.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "../tests/fixtures/forms_identity_and_topology.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            std::cerr << "[FAIL] Test 48: forms_identity_and_topology.pdf fixture not found" << std::endl;
+            return 1;
+        }
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(fixturePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 48: failed to load appearance fixture" << std::endl;
+            return 1;
+        }
+        auto namePage = doc->getPage(0);
+        auto notesPage = doc->getPage(1);
+        if (!namePage || !notesPage ||
+            !namePage->setFormFieldText(QStringLiteral("form1.name"), 0, QStringLiteral("EngineAppearanceName"), {}) ||
+            !notesPage->setFormFieldText(QStringLiteral("notes"), 0,
+                                         QStringLiteral("Engine first line\rEngine second line"), {})) {
+            std::cerr << "[FAIL] Test 48: failed to update name or multiline notes field" << std::endl;
+            return 1;
+        }
+
+        using Kind = pdf::AnnotationPathElement::Kind;
+        auto el = [](Kind k, double x, double y) {
+            pdf::AnnotationPathElement e;
+            e.kind = k;
+            e.x = x;
+            e.y = y;
+            return e;
+        };
+        const std::vector<pdf::AnnotationPathElement> persianOutlines = {
+            el(Kind::MoveTo, 80.0, 486.0),
+            el(Kind::LineTo, 88.0, 486.0),
+            el(Kind::LineTo, 88.0, 498.0),
+            el(Kind::LineTo, 80.0, 498.0)
+        };
+        const QString persianText = QString::fromUtf8("\xd8\xb3\xd9\x84\xd8\xa7\xd9\x85");
+        if (!namePage->setFormFieldText(QStringLiteral("persian_name"), 0, persianText, persianOutlines)) {
+            std::cerr << "[FAIL] Test 48: failed to update persian_name with vector appearance" << std::endl;
+            return 1;
+        }
+
+        bool nameValueOk = false;
+        bool persianValueOk = false;
+        for (const auto& field : namePage->listFormFields()) {
+            if (field.fieldName == "form1.name" && field.value == QStringLiteral("EngineAppearanceName")) nameValueOk = true;
+            if (field.fieldName == "persian_name" && field.value == persianText) persianValueOk = true;
+        }
+        bool notesValueOk = false;
+        for (const auto& field : notesPage->listFormFields()) {
+            QString normalizedValue = field.value;
+            normalizedValue.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+            normalizedValue.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+            if (field.fieldName == "notes" &&
+                normalizedValue == QStringLiteral("Engine first line\nEngine second line")) {
+                notesValueOk = true;
+            }
+        }
+        if (!nameValueOk || !notesValueOk || !persianValueOk) {
+            std::cerr << "[FAIL] Test 48: field values did not survive engine readback" << std::endl;
+            return 1;
+        }
+
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] Test 48: failed to create temporary directory" << std::endl;
+            return 1;
+        }
+        const std::string savedPath = tempDir.filePath(QStringLiteral("appearances_saved.pdf")).toStdString();
+#ifdef _WIN32
+        int saveFd = ::_open(savedPath.c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int saveFd = ::open(savedPath.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (saveFd < 0) {
+            std::cerr << "[FAIL] Test 48: failed to open save output" << std::endl;
+            return 1;
+        }
+        uint64_t bytesWritten = 0;
+        const bool saved = doc->saveAsCopy(saveFd, true, bytesWritten, nullptr) && bytesWritten > 0;
+#ifdef _WIN32
+        ::_close(saveFd);
+#else
+        ::close(saveFd);
+#endif
+        if (!saved) {
+            std::cerr << "[FAIL] Test 48: incremental save failed" << std::endl;
+            return 1;
+        }
+
+        FPDF_DOCUMENT rawDoc = FPDF_LoadDocument(savedPath.c_str(), nullptr);
+        auto savedAppearance = [&](int pageIndex, const QString& fieldName) {
+            FPDF_PAGE rawPage = rawDoc ? FPDF_LoadPage(rawDoc, pageIndex) : nullptr;
+            QString appearance;
+            if (rawPage) {
+                for (int i = 0; i < FPDFPage_GetAnnotCount(rawPage); ++i) {
+                    FPDF_ANNOTATION annot = FPDFPage_GetAnnot(rawPage, i);
+                    if (!annot) continue;
+                    if (FPDFAnnot_GetSubtype(annot) == FPDF_ANNOT_WIDGET) {
+                        const unsigned long nameLen = FPDFAnnot_GetStringValue(annot, "T", nullptr, 0);
+                        std::vector<unsigned short> nameBuf(nameLen / sizeof(unsigned short) + 1, 0);
+                        const unsigned long actualNameLen = FPDFAnnot_GetStringValue(
+                            annot, "T", reinterpret_cast<FPDF_WCHAR*>(nameBuf.data()), nameLen);
+                        const QString widgetName = actualNameLen > sizeof(FPDF_WCHAR)
+                            ? QString::fromUtf16(reinterpret_cast<const char16_t*>(nameBuf.data()),
+                                static_cast<qsizetype>((actualNameLen - sizeof(FPDF_WCHAR)) / sizeof(FPDF_WCHAR)))
+                            : QString();
+                        if (widgetName == fieldName) {
+                            const unsigned long apLen = FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0);
+                            std::vector<unsigned short> apBuf(apLen / sizeof(unsigned short) + 1, 0);
+                            const unsigned long actualApLen = FPDFAnnot_GetAP(
+                                annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                                reinterpret_cast<FPDF_WCHAR*>(apBuf.data()), apLen);
+                            if (actualApLen > sizeof(FPDF_WCHAR)) {
+                                appearance = QString::fromUtf16(reinterpret_cast<const char16_t*>(apBuf.data()));
+                            }
+                        }
+                    }
+                    FPDFPage_CloseAnnot(annot);
+                }
+                FPDF_ClosePage(rawPage);
+            }
+            return appearance;
+        };
+        const QString nameAppearance = savedAppearance(0, QStringLiteral("name"));
+        const QString notesAppearance = savedAppearance(1, QStringLiteral("notes"));
+        const QString persianAppearance = savedAppearance(0, QStringLiteral("persian_name"));
+        if (rawDoc) FPDF_CloseDocument(rawDoc);
+        if (!nameAppearance.contains(QStringLiteral("EngineAppearanceName")) ||
+            !notesAppearance.contains(QStringLiteral("Engine first line")) ||
+            !notesAppearance.contains(QStringLiteral("Engine second line")) ||
+            !persianAppearance.contains(QStringLiteral("re W n")) ||
+            !persianAppearance.contains(QStringLiteral("f\nQ"))) {
+            std::cerr << "[FAIL] Test 48: saved /AP is missing name/notes text or persian_name vector ink" << std::endl;
+            return 1;
+        }
+
+        std::vector<uint8_t> flatBytes;
+        if (!doc->extractPages(0, 2, flatBytes, true, pdf::FlattenMode::NormalDisplay) || flatBytes.empty()) {
+            std::cerr << "[FAIL] Test 48: failed to flatten all appearance fixture pages" << std::endl;
+            return 1;
+        }
+        const QString flatPath = tempDir.filePath(QStringLiteral("appearances_flattened.pdf"));
+        QFile flatFile(flatPath);
+        if (!flatFile.open(QIODevice::WriteOnly) ||
+            flatFile.write(reinterpret_cast<const char*>(flatBytes.data()), static_cast<qint64>(flatBytes.size())) !=
+                static_cast<qint64>(flatBytes.size())) {
+            std::cerr << "[FAIL] Test 48: failed to write flattened output" << std::endl;
+            return 1;
+        }
+        flatFile.close();
+
+        auto flatDoc = pdf::createDocument();
+        if (flatDoc->loadFromFile(flatPath.toStdString()) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] Test 48: failed to reload flattened output" << std::endl;
+            return 1;
+        }
+        const auto flatNameText = flatDoc->getPage(0)->extractText().text;
+        const auto flatNotesText = flatDoc->getPage(1)->extractText().text;
+        const QString flatName = QString::fromStdU16String(flatNameText);
+        const QString flatNotes = QString::fromStdU16String(flatNotesText);
+        if (!flatName.contains(QStringLiteral("EngineAppearanceName")) ||
+            !flatNotes.contains(QStringLiteral("Engine first line")) ||
+            !flatNotes.contains(QStringLiteral("Engine second line"))) {
+            std::cerr << "[FAIL] Test 48: flattened text extraction omitted name or multiline notes" << std::endl;
+            return 1;
+        }
+
+        const pdf::PixelBuffer flatPersianPage = flatDoc->getPage(0)->renderWholePage(1.0, 1.0);
+        int persianInk = 0;
+        for (int y = 288; flatPersianPage.isValid() && y < 312; ++y) {
+            const uint8_t* row = flatPersianPage.data() + static_cast<size_t>(y) * flatPersianPage.stride();
+            for (int x = 72; x < 300; ++x) {
+                const uint8_t* pixel = row + static_cast<size_t>(x) * 4;
+                if (pixel[0] < 235 || pixel[1] < 235 || pixel[2] < 235) ++persianInk;
+            }
+        }
+        if (!flatPersianPage.isValid() || persianInk == 0) {
+            std::cerr << "[FAIL] Test 48: flattened persian_name rectangle contains no rendered ink" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Saved AP text, flattened extraction, and persian_name rectangle ink verified." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 47 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 48 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

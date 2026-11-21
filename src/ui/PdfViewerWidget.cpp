@@ -3999,7 +3999,8 @@ namespace {
 static bool isDrawableByBuiltInFont(const QString& text) {
     for (const QChar ch : text) {
         const char16_t u = ch.unicode();
-        if (u > 0xFF || (u < 0x20 && u != u'\t') || (u >= 0x7F && u < 0xA0)) {
+        if (u > 0xFF || (u < 0x20 && u != u'\t' && u != u'\n' && u != u'\r') ||
+            (u >= 0x7F && u < 0xA0)) {
             return false;
         }
     }

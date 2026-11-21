@@ -28,15 +28,6 @@ import subprocess
 import sys
 import tempfile
 
-# Named table of known failures tracking deferred fixes.
-# Strict requirement: If an entry unexpectedly passes, the suite MUST fail so the marker cannot be forgotten.
-KNOWN_FAILURES = {
-    ("compat_form_flattened.pdf", "CompatibilityTester"): (
-        "Typed Latin form field value lacks an /AP appearance stream on save, "
-        "causing FPDFPage_Flatten to drop the text from flattened page contents (Task T20)."
-    ),
-}
-
 
 def run_command(cmd, desc=""):
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -143,6 +134,8 @@ def main():
         ("compat_annotated_save.pdf", "Annotated Document Save"),
         ("compat_form_filled.pdf", "Form-Filled Document Save"),
         ("compat_form_flattened.pdf", "Flattened Form Export"),
+        ("compat_form_appearances_filled.pdf", "Latin Text Appearance Save"),
+        ("compat_form_appearances_flattened.pdf", "Latin Text Appearance Flattened Export"),
         ("compat_redacted_export.pdf", "Redacted Document Export"),
     ]
 
@@ -204,6 +197,34 @@ def main():
                 else:
                     print("  [PASS] qdf inspection: Zero /Widget objects confirmed in flattened export")
 
+            elif fname == "compat_form_appearances_filled.pdf":
+                expected_appearance_text = (
+                    b"LatinAppearanceName",
+                    b"ExternalPersianField",
+                    b"First external line",
+                    b"Second external line",
+                )
+                missing = [value.decode("ascii") for value in expected_appearance_text
+                           if qdf_bytes.count(value) < 2]
+                if b"/AP" not in qdf_bytes or missing:
+                    print(f"  [FAIL] qdf inspection: Saved /AP text missing or incomplete: {missing}", file=sys.stderr)
+                    failures.append(f"{fname}: /AP text missing for {missing}")
+                else:
+                    print("  [PASS] qdf inspection: Saved /AP streams contain name, multiline notes, and persian_name text")
+
+            elif fname == "compat_form_appearances_flattened.pdf":
+                if b"/Subtype /Widget" in qdf_bytes or b"/Widget" in qdf_bytes:
+                    print("  [FAIL] qdf inspection: Flattened appearance export still contains /Widget annotations!", file=sys.stderr)
+                    failures.append(f"{fname}: Flattened document contains /Widget objects")
+                elif not all(value in qdf_bytes for value in (
+                    b"LatinAppearanceName", b"ExternalPersianField",
+                    b"First external line", b"Second external line",
+                )):
+                    print("  [FAIL] qdf inspection: Flattened page streams are missing form text", file=sys.stderr)
+                    failures.append(f"{fname}: Flattened page streams missing form text")
+                else:
+                    print("  [PASS] qdf inspection: Flattened page streams contain all three form values")
+
             # 3. pdfinfo
             code, out, err = run_command([pdfinfo_exe, fpath])
             if code != 0 or "Pages:" not in out:
@@ -253,20 +274,62 @@ def main():
 
                 elif fname in ("compat_form_filled.pdf", "compat_form_flattened.pdf"):
                     for val in ("CompatibilityTester", "Germany"):
-                        key = (fname, val)
                         present = (val in out)
-                        if key in KNOWN_FAILURES:
-                            if not present:
-                                print(f"  [KNOWN FAILURE] pdftotext: KNOWN FAILURE (T20): {KNOWN_FAILURES[key]}")
-                            else:
-                                print(f"  [FAIL] pdftotext: UNEXPECTED PASS: '{val}' found in {fname}; remove this entry from KNOWN_FAILURES", file=sys.stderr)
-                                failures.append(f"{fname}: UNEXPECTED PASS for '{val}'; remove this entry from KNOWN_FAILURES")
+                        if not present:
+                            print(f"  [FAIL] pdftotext: Expected form value '{val}' not found in {fname}", file=sys.stderr)
+                            failures.append(f"{fname}: Missing form value '{val}' in pdftotext")
                         else:
-                            if not present:
-                                print(f"  [FAIL] pdftotext: Expected form value '{val}' not found in {fname}", file=sys.stderr)
-                                failures.append(f"{fname}: Missing form value '{val}' in pdftotext")
-                            else:
-                                print(f"  [PASS] pdftotext: Form value '{val}' verified in {fname}")
+                            print(f"  [PASS] pdftotext: Form value '{val}' verified in {fname}")
+
+                elif fname in ("compat_form_appearances_filled.pdf", "compat_form_appearances_flattened.pdf"):
+                    normalized_text = " ".join(out.split())
+                    for val in ("LatinAppearanceName", "ExternalPersianField",
+                                "First external line", "Second external line"):
+                        if val not in normalized_text:
+                            print(f"  [FAIL] pdftotext: Expected form value '{val}' not found in {fname}", file=sys.stderr)
+                            failures.append(f"{fname}: Missing form value '{val}' in pdftotext")
+                        else:
+                            print(f"  [PASS] pdftotext: Form value '{val}' verified in {fname}")
+
+            if fname in ("compat_form_appearances_filled.pdf", "compat_form_appearances_flattened.pdf"):
+                for page_number, label, left, bottom, right, top in (
+                    (1, "name", 72.0, 690.0, 300.0, 714.0),
+                    (1, "persian_name", 72.0, 480.0, 300.0, 504.0),
+                    (2, "notes", 72.0, 500.0, 300.0, 590.0),
+                ):
+                    rect_base = os.path.join(scratch_dir, f"{fname}_{label}_{page_number}")
+                    code, _, err = run_command([
+                        pdftoppm_exe, "-singlefile", "-r", "150", "-f", str(page_number), "-l", str(page_number),
+                        fpath, rect_base,
+                    ])
+                    ppm_file = rect_base + ".ppm"
+                    if code != 0 or not os.path.isfile(ppm_file):
+                        print(f"  [FAIL] pdftoppm rectangle render failed for {label} on page {page_number}: {err}",
+                              file=sys.stderr)
+                        failures.append(f"{fname}: failed rectangle raster for {label}")
+                        continue
+                    pixels, width, height = read_ppm(ppm_file)
+                    if not pixels:
+                        print(f"  [FAIL] Could not read {label} rectangle render", file=sys.stderr)
+                        failures.append(f"{fname}: unreadable rectangle raster for {label}")
+                        continue
+                    scale = 150.0 / 72.0
+                    x0 = max(0, int(left * scale) + 2)
+                    x1 = min(width, int(right * scale) - 2)
+                    y0 = max(0, int((792.0 - top) * scale) + 2)
+                    y1 = min(height, int((792.0 - bottom) * scale) - 2)
+                    ink = 0
+                    for y in range(y0, y1):
+                        for x in range(x0, x1):
+                            offset = (y * width + x) * 3
+                            if min(pixels[offset], pixels[offset + 1], pixels[offset + 2]) < 220:
+                                ink += 1
+                    if ink < 10:
+                        print(f"  [FAIL] External-engine rectangle check: {label} has only {ink} ink pixels",
+                              file=sys.stderr)
+                        failures.append(f"{fname}: no visible ink in {label} widget rectangle")
+                    else:
+                        print(f"  [PASS] External-engine rectangle check: {label} has {ink} ink pixels")
 
             # 6. Redaction Pixel Verification (inside solid black, outside matches unredacted source)
             if fname == "compat_redacted_export.pdf":

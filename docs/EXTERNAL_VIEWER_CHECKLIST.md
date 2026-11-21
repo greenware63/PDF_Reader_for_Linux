@@ -9,12 +9,13 @@ Because automated CI runs headless Linux environments without desktop display se
 ## 1. Test Artifacts to Inspect
 
 ### Primary Route (CI Artifact Download)
-Download the `compat-outputs` artifact zip from the GitHub Actions CI run (attached to the `Ubuntu 24.04 (Release)` job once CI has run with artifact upload enabled). Unpack the four test PDFs:
+Download the `compat-outputs` artifact zip from the GitHub Actions CI run (attached to the `Ubuntu 24.04 (Release)` job once CI has run with artifact upload enabled). Unpack the test PDFs:
 1. `compat_annotated_save.pdf`: Document saved incrementally with standard Highlight (`/Highlight`) and Sticky Note (`/Text`) markup annotations.
 2. `compat_form_filled.pdf`: Interactive form saved incrementally with typed text (`name="CompatibilityTester"`), toggled checkbox (`agree=true`), and choice selection (`country="Germany"`).
-   - *Note on Field Appearances (Known Limitation T20)*: In `compat_form_filled.pdf`, the `name` text widget contains `/V (CompatibilityTester)` but has no explicit `/AP` appearance stream, and `/NeedAppearances` is false (see `docs/KNOWN_LIMITATIONS.md`). Viewers that do not automatically construct default appearances (such as Adobe Acrobat Reader or Foxit Reader) may initially display the field as blank until clicked or focused. Furthermore, `compat_form_flattened.pdf` omits the typed `CompatibilityTester` text because `FPDFPage_Flatten` requires an `/AP` stream. Testers must not log empty initial field display or missing flattened text as a new bug; it is tracked under Task T20.
 3. `compat_form_flattened.pdf`: Flattened form export where interactive widgets are burned into static page content (`FPDFPage_Flatten`) and `/Annots` is stripped.
-4. `compat_redacted_export.pdf`: Redacted raster-only export where canary text was burned out and pages converted to pure image XObjects.
+4. `compat_form_appearances_filled.pdf`: Interactive form with saved appearances for `form1.name`, multiline `notes`, and `persian_name`; automated checks verify `/AP` text, extracted values, and visible ink inside each widget rectangle.
+5. `compat_form_appearances_flattened.pdf`: Flattened export of those fields; automated checks verify that text remains extractable, widgets are removed, and each former widget rectangle still contains ink.
+6. `compat_redacted_export.pdf`: Redacted raster-only export where canary text was burned out and pages converted to pure image XObjects.
 
 ### Secondary Route (Local Generation)
 Outputs can also be produced directly using:
@@ -94,6 +95,6 @@ All external viewer rows begin in the **Not yet run** state until manual executi
 
 | External Viewer | Platform | Annotations | AcroForms | Flattened Export | Redaction Export | Verification Status | Date Verified | Sign-off / Notes |
 |---|---|---|---|---|---|---|---|---|
-| **Okular** | Ubuntu 24.04 (Linux) | Not yet run | Not yet run | Not yet run | Not yet run | **Unverified** | — | Pending manual desktop session verification (Note: Latin text missing in flattened export is a known limitation tracked in T20) |
-| **Adobe Acrobat Reader** | Windows 11 / macOS | Not yet run | Not yet run | Not yet run | Not yet run | **Unverified** | — | Requires manual Windows/macOS execution (Note: Latin field may appear blank until focused, and missing in flattened export; tracked in T20) |
-| **Foxit PDF Reader** | Windows 11 / Linux | Not yet run | Not yet run | Not yet run | Not yet run | **Unverified** | — | Requires manual desktop verification (Note: Latin field may appear blank until focused, and missing in flattened export; tracked in T20) |
+| **Okular** | Ubuntu 24.04 (Linux) | Not yet run | Not yet run | Not yet run | Not yet run | **Unverified** | — | Pending manual desktop session verification; use both saved and flattened appearance artifacts |
+| **Adobe Acrobat Reader** | Windows 11 / macOS | Not yet run | Not yet run | Not yet run | Not yet run | **Unverified** | — | Requires manual Windows/macOS execution; use both saved and flattened appearance artifacts |
+| **Foxit PDF Reader** | Windows 11 / Linux | Not yet run | Not yet run | Not yet run | Not yet run | **Unverified** | — | Requires manual desktop verification; use both saved and flattened appearance artifacts |

@@ -27,6 +27,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QComboBox>
 #include <QListWidget>
 #include <QAction>
@@ -49,6 +50,7 @@
 #include <QDir>
 #include <fpdfview.h>
 #include <fpdf_annot.h>
+#include <fpdf_text.h>
 #ifdef near
 #undef near
 #endif
@@ -7435,7 +7437,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // 61d: Undo/Redo symmetry: undo restores original Latin text and clears custom /AP
+        // 61d: Undo restores the original Latin value and regenerates its normal /AP
         if (!viewer.undoEdit()) {
             std::cerr << "[FAIL] 61: undoEdit failed" << std::endl;
             return 1;
@@ -7454,6 +7456,51 @@ int main(int argc, char* argv[]) {
         }
         if (!undoOk) {
             std::cerr << "[FAIL] 61: undoEdit did not restore 'name' to Alice" << std::endl;
+            return 1;
+        }
+
+        QTemporaryDir undoSaveDir;
+        const QString undoSavedFile = undoSaveDir.filePath(QStringLiteral("undo_alice_form.pdf"));
+        if (!undoSaveDir.isValid() || !viewer.saveDocument(undoSavedFile)) {
+            std::cerr << "[FAIL] 61d: failed to save document after undo" << std::endl;
+            return 1;
+        }
+        FPDF_DOCUMENT undoRawDoc = FPDF_LoadDocument(undoSavedFile.toStdString().c_str(), nullptr);
+        FPDF_PAGE undoRawPage = undoRawDoc ? FPDF_LoadPage(undoRawDoc, 0) : nullptr;
+        bool undoAppearanceOk = false;
+        if (undoRawPage) {
+            for (int i = 0; i < FPDFPage_GetAnnotCount(undoRawPage); ++i) {
+                FPDF_ANNOTATION annot = FPDFPage_GetAnnot(undoRawPage, i);
+                if (!annot) continue;
+                if (FPDFAnnot_GetSubtype(annot) == FPDF_ANNOT_WIDGET) {
+                    const unsigned long nameLen = FPDFAnnot_GetStringValue(annot, "T", nullptr, 0);
+                    std::vector<unsigned short> nameBuf(nameLen / sizeof(unsigned short) + 1, 0);
+                    const unsigned long actualNameLen = FPDFAnnot_GetStringValue(
+                        annot, "T", reinterpret_cast<FPDF_WCHAR*>(nameBuf.data()), nameLen);
+                    const QString fieldName = actualNameLen > sizeof(FPDF_WCHAR)
+                        ? QString::fromUtf16(reinterpret_cast<const char16_t*>(nameBuf.data()),
+                            static_cast<qsizetype>((actualNameLen - sizeof(FPDF_WCHAR)) / sizeof(FPDF_WCHAR)))
+                        : QString();
+                    if (fieldName == QStringLiteral("name")) {
+                        const unsigned long apLen = FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0);
+                        std::vector<unsigned short> apBuf(apLen / sizeof(unsigned short) + 1, 0);
+                        const unsigned long actualApLen = FPDFAnnot_GetAP(
+                            annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                            reinterpret_cast<FPDF_WCHAR*>(apBuf.data()), apLen);
+                        const QString apText = actualApLen > sizeof(FPDF_WCHAR)
+                            ? QString::fromUtf16(reinterpret_cast<const char16_t*>(apBuf.data()))
+                            : QString();
+                        undoAppearanceOk = apText.contains(QStringLiteral("Alice")) &&
+                                           !apText.contains(QStringLiteral("re W n"));
+                    }
+                }
+                FPDFPage_CloseAnnot(annot);
+            }
+            FPDF_ClosePage(undoRawPage);
+        }
+        if (undoRawDoc) FPDF_CloseDocument(undoRawDoc);
+        if (!undoAppearanceOk) {
+            std::cerr << "[FAIL] 61d: undo did not persist Alice in a non-empty /AP without stale vector clipping" << std::endl;
             return 1;
         }
 
@@ -7632,7 +7679,24 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             const QString badOldValue = QStringLiteral("قدیمی \uE000");
-            rawPage->setFormFieldText(QStringLiteral("name"), 0, badOldValue, {});
+            using Kind = pdf::AnnotationPathElement::Kind;
+            auto element = [](Kind kind, double x, double y) {
+                pdf::AnnotationPathElement pathElement;
+                pathElement.kind = kind;
+                pathElement.x = x;
+                pathElement.y = y;
+                return pathElement;
+            };
+            const std::vector<pdf::AnnotationPathElement> oldAppearance = {
+                element(Kind::MoveTo, 80.0, 486.0),
+                element(Kind::LineTo, 88.0, 486.0),
+                element(Kind::LineTo, 88.0, 498.0),
+                element(Kind::LineTo, 80.0, 498.0)
+            };
+            if (!rawPage->setFormFieldText(QStringLiteral("name"), 0, badOldValue, oldAppearance)) {
+                std::cerr << "[FAIL] 61g: failed to create fixture with unsupported existing value" << std::endl;
+                return 1;
+            }
 #ifdef _WIN32
             int fd = ::_open(oldValPdf.toStdString().c_str(), _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
 #else
@@ -7971,7 +8035,277 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Viewer exportFlattenedPagesPdf and MainWindow::exportFlattenedPdf verified." << std::endl;
     }
 
-    std::cout << " ALL 62 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
+    // --- TEST 63: Viewer edits preserve text appearances for name, notes, and persian_name ---
+    std::cout << "[TEST 63] Testing viewer appearance edits and flattened text for name, notes, and persian_name..." << std::endl;
+    {
+        std::string root = samplePath;
+        const auto slash = root.find_last_of("/\\");
+        root = (slash == std::string::npos) ? std::string(".") : root.substr(0, slash);
+        std::string fixturePath = root + "/tests/fixtures/forms_identity_and_topology.pdf";
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "tests/fixtures/forms_identity_and_topology.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            fixturePath = "../tests/fixtures/forms_identity_and_topology.pdf";
+        }
+        if (!QFile::exists(QString::fromStdString(fixturePath))) {
+            std::cerr << "[FAIL] 63: forms_identity_and_topology.pdf fixture not found" << std::endl;
+            return 1;
+        }
+
+        QTemporaryDir fixtureDir;
+        if (!fixtureDir.isValid()) {
+            std::cerr << "[FAIL] 63: failed to create fixture directory" << std::endl;
+            return 1;
+        }
+        auto fixtureDoc = pdf::createDocument();
+        if (fixtureDoc->loadFromFile(fixturePath) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 63: failed to load appearance fixture for preparation" << std::endl;
+            return 1;
+        }
+        auto fixturePage = fixtureDoc->getPage(0);
+        using Kind = pdf::AnnotationPathElement::Kind;
+        auto element = [](Kind kind, double x, double y) {
+            pdf::AnnotationPathElement pathElement;
+            pathElement.kind = kind;
+            pathElement.x = x;
+            pathElement.y = y;
+            return pathElement;
+        };
+        const std::vector<pdf::AnnotationPathElement> initialAppearance = {
+            element(Kind::MoveTo, 80.0, 486.0),
+            element(Kind::LineTo, 88.0, 486.0),
+            element(Kind::LineTo, 88.0, 498.0),
+            element(Kind::LineTo, 80.0, 498.0)
+        };
+        if (!fixturePage ||
+            !fixturePage->setFormFieldText(QStringLiteral("persian_name"), 0,
+                                           QStringLiteral("ExistingFieldValue"), initialAppearance)) {
+            std::cerr << "[FAIL] 63: failed to prepare editable initial value" << std::endl;
+            return 1;
+        }
+        const QString preparedFixture = fixtureDir.filePath(QStringLiteral("viewer_appearance_fixture.pdf"));
+#ifdef _WIN32
+        int fixtureFd = ::_open(preparedFixture.toStdString().c_str(),
+                                _O_CREAT | _O_WRONLY | _O_BINARY | _O_TRUNC, _S_IREAD | _S_IWRITE);
+#else
+        int fixtureFd = ::open(preparedFixture.toStdString().c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+#endif
+        if (fixtureFd < 0) {
+            std::cerr << "[FAIL] 63: failed to open prepared fixture output" << std::endl;
+            return 1;
+        }
+        uint64_t fixtureBytesWritten = 0;
+        const bool fixtureSaved = fixtureDoc->saveAsCopy(fixtureFd, true, fixtureBytesWritten, nullptr) &&
+                                  fixtureBytesWritten > 0;
+#ifdef _WIN32
+        ::_close(fixtureFd);
+#else
+        ::close(fixtureFd);
+#endif
+        if (!fixtureSaved) {
+            std::cerr << "[FAIL] 63: failed to save prepared fixture" << std::endl;
+            return 1;
+        }
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 600);
+        viewer.show();
+        viewer.openDocument(preparedFixture);
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 8000 && !viewer.isDocumentOpen()) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        if (!viewer.isDocumentOpen()) {
+            std::cerr << "[FAIL] 63: failed to open appearance fixture" << std::endl;
+            return 1;
+        }
+
+        viewer.requestFormFieldsForPage(0);
+        viewer.requestFormFieldsForPage(1);
+        timer.restart();
+        while (timer.elapsed() < 8000 &&
+               (!viewer.cachedFormFields(0) || !viewer.cachedFormFields(1))) {
+            QApplication::processEvents();
+            QThread::msleep(10);
+        }
+        const auto* page0Fields = viewer.cachedFormFields(0);
+        const auto* page1Fields = viewer.cachedFormFields(1);
+        if (!page0Fields || !page1Fields) {
+            std::cerr << "[FAIL] 63: form fields were not loaded for pages 0 and 1" << std::endl;
+            return 1;
+        }
+
+        auto findField = [](const std::vector<pdf::FormFieldItem>* fields, const char* name) {
+            if (!fields) return static_cast<const pdf::FormFieldItem*>(nullptr);
+            for (const auto& field : *fields) {
+                if (field.fieldName == name) return &field;
+            }
+            return static_cast<const pdf::FormFieldItem*>(nullptr);
+        };
+        const auto* nameFieldItem = findField(page0Fields, "form1.name");
+        const auto* persianFieldItem = findField(page0Fields, "persian_name");
+        const auto* notesFieldItem = findField(page1Fields, "notes");
+        if (!nameFieldItem || !persianFieldItem || !notesFieldItem) {
+            std::cerr << "[FAIL] 63: name, notes, or persian_name widget was missing" << std::endl;
+            return 1;
+        }
+        const pdf::FormFieldItem nameField = *nameFieldItem;
+        const pdf::FormFieldItem notesField = *notesFieldItem;
+        auto activeLineEdit = [&viewer]() {
+            for (auto* edit : viewer.findChildren<QLineEdit*>()) {
+                if (edit->isVisible()) return edit;
+            }
+            return static_cast<QLineEdit*>(nullptr);
+        };
+
+        viewer.activateFormFieldEditor(0, nameField);
+        auto* lineEdit = activeLineEdit();
+        if (!viewer.hasActiveFormFieldEditor() || !lineEdit) {
+            std::cerr << "[FAIL] 63: failed to activate the name editor" << std::endl;
+            return 1;
+        }
+        lineEdit->setText(QStringLiteral("ViewerAppearanceName"));
+        viewer.commitActiveFormFieldEditor();
+        if (viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 63: name editor did not commit" << std::endl;
+            return 1;
+        }
+
+        if (!viewer.setFormFieldText(0, QStringLiteral("persian_name"), 0,
+                                     QStringLiteral("ViewerPersianField"))) {
+            std::cerr << "[FAIL] 63: viewer failed to set persian_name" << std::endl;
+            return 1;
+        }
+
+        viewer.activateFormFieldEditor(1, notesField);
+        auto* plainTextEdit = viewer.findChild<QPlainTextEdit*>();
+        if (!viewer.hasActiveFormFieldEditor() || !plainTextEdit) {
+            std::cerr << "[FAIL] 63: failed to activate the multiline notes editor" << std::endl;
+            return 1;
+        }
+        plainTextEdit->setPlainText(QStringLiteral("Viewer first line\nViewer second line"));
+        viewer.commitActiveFormFieldEditor();
+        if (viewer.hasActiveFormFieldEditor()) {
+            std::cerr << "[FAIL] 63: notes editor did not commit" << std::endl;
+            return 1;
+        }
+
+        const auto* committedNameFields = viewer.cachedFormFields(0);
+        const auto* committedNotesFields = viewer.cachedFormFields(1);
+        const auto* committedName = findField(committedNameFields, "form1.name");
+        const auto* committedPersian = findField(committedNameFields, "persian_name");
+        const auto* committedNotes = findField(committedNotesFields, "notes");
+        QString normalizedNotes = committedNotes ? committedNotes->value : QString();
+        normalizedNotes.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        normalizedNotes.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+        if (!committedName || committedName->value != QStringLiteral("ViewerAppearanceName") ||
+            !committedPersian || committedPersian->value != QStringLiteral("ViewerPersianField") ||
+            !committedNotes || normalizedNotes != QStringLiteral("Viewer first line\nViewer second line")) {
+            std::cerr << "[FAIL] 63: viewer field value readback failed" << std::endl;
+            return 1;
+        }
+
+        QTemporaryDir tempDir;
+        const QString savedPath = tempDir.filePath(QStringLiteral("viewer_appearances_saved.pdf"));
+        if (!tempDir.isValid() || !viewer.saveDocument(savedPath)) {
+            std::cerr << "[FAIL] 63: failed to save viewer appearance edits" << std::endl;
+            return 1;
+        }
+
+        FPDF_DOCUMENT rawDoc = FPDF_LoadDocument(savedPath.toStdString().c_str(), nullptr);
+        auto savedAppearanceContains = [&](int pageIndex, const char* widgetName, const QString& expected) {
+            FPDF_PAGE page = rawDoc ? FPDF_LoadPage(rawDoc, pageIndex) : nullptr;
+            bool found = false;
+            if (page) {
+                for (int i = 0; i < FPDFPage_GetAnnotCount(page); ++i) {
+                    FPDF_ANNOTATION annot = FPDFPage_GetAnnot(page, i);
+                    if (!annot) continue;
+                    if (FPDFAnnot_GetSubtype(annot) == FPDF_ANNOT_WIDGET) {
+                        const unsigned long nameLen = FPDFAnnot_GetStringValue(annot, "T", nullptr, 0);
+                        std::vector<unsigned short> nameBuf(nameLen / sizeof(unsigned short) + 1, 0);
+                        const unsigned long actualNameLen = FPDFAnnot_GetStringValue(
+                            annot, "T", reinterpret_cast<FPDF_WCHAR*>(nameBuf.data()), nameLen);
+                        const QString name = actualNameLen > sizeof(FPDF_WCHAR)
+                            ? QString::fromUtf16(reinterpret_cast<const char16_t*>(nameBuf.data()),
+                                static_cast<qsizetype>((actualNameLen - sizeof(FPDF_WCHAR)) / sizeof(FPDF_WCHAR)))
+                            : QString();
+                        if (name == QString::fromLatin1(widgetName)) {
+                            const unsigned long apLen = FPDFAnnot_GetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr, 0);
+                            std::vector<unsigned short> apBuf(apLen / sizeof(unsigned short) + 1, 0);
+                            const unsigned long actualApLen = FPDFAnnot_GetAP(
+                                annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                                reinterpret_cast<FPDF_WCHAR*>(apBuf.data()), apLen);
+                            const QString appearance = actualApLen > sizeof(FPDF_WCHAR)
+                                ? QString::fromUtf16(reinterpret_cast<const char16_t*>(apBuf.data()))
+                                : QString();
+                            found = !appearance.isEmpty() && appearance.contains(expected);
+                        }
+                    }
+                    FPDFPage_CloseAnnot(annot);
+                }
+                FPDF_ClosePage(page);
+            }
+            return found;
+        };
+        const bool nameAppearanceOk = savedAppearanceContains(0, "name", QStringLiteral("ViewerAppearanceName"));
+        const bool persianAppearanceOk = savedAppearanceContains(0, "persian_name", QStringLiteral("ViewerPersianField"));
+        const bool notesFirstAppearanceOk = savedAppearanceContains(1, "notes", QStringLiteral("Viewer first line"));
+        const bool notesSecondAppearanceOk = savedAppearanceContains(1, "notes", QStringLiteral("Viewer second line"));
+        const bool savedAppearancesOk =
+            nameAppearanceOk && persianAppearanceOk && notesFirstAppearanceOk && notesSecondAppearanceOk;
+        if (rawDoc) FPDF_CloseDocument(rawDoc);
+        if (!savedAppearancesOk) {
+            std::cerr << "[FAIL] 63: saved /AP text was missing for name, notes, or persian_name" << std::endl;
+            return 1;
+        }
+
+        const QByteArray flattened = viewer.exportFlattenedPagesPdf(0, 1);
+        const QString flatPath = tempDir.filePath(QStringLiteral("viewer_appearances_flattened.pdf"));
+        QFile flatFile(flatPath);
+        if (flattened.isEmpty() || !flatFile.open(QIODevice::WriteOnly) ||
+            flatFile.write(flattened) != flattened.size()) {
+            std::cerr << "[FAIL] 63: failed to write flattened viewer output" << std::endl;
+            return 1;
+        }
+        flatFile.close();
+
+        FPDF_DOCUMENT flatDoc = FPDF_LoadDocument(flatPath.toStdString().c_str(), nullptr);
+        QString flattenedText;
+        if (flatDoc) {
+            for (int pageIndex = 0; pageIndex < FPDF_GetPageCount(flatDoc); ++pageIndex) {
+                FPDF_PAGE page = FPDF_LoadPage(flatDoc, pageIndex);
+                FPDF_TEXTPAGE textPage = page ? FPDFText_LoadPage(page) : nullptr;
+                if (textPage) {
+                    const int charCount = FPDFText_CountChars(textPage);
+                    if (charCount > 0 && charCount <= 32768) {
+                        std::vector<unsigned short> textBuf(static_cast<size_t>(charCount) + 1, 0);
+                        const int copied = FPDFText_GetText(
+                            textPage, 0, charCount, reinterpret_cast<FPDF_WCHAR*>(textBuf.data()));
+                        if (copied > 0) {
+                            flattenedText += QString::fromUtf16(reinterpret_cast<const char16_t*>(textBuf.data()),
+                                                               static_cast<qsizetype>(copied));
+                        }
+                    }
+                    FPDFText_ClosePage(textPage);
+                }
+                if (page) FPDF_ClosePage(page);
+            }
+            FPDF_CloseDocument(flatDoc);
+        }
+        if (!flattenedText.contains(QStringLiteral("ViewerAppearanceName")) ||
+            !flattenedText.contains(QStringLiteral("ViewerPersianField")) ||
+            !flattenedText.contains(QStringLiteral("Viewer first line")) ||
+            !flattenedText.contains(QStringLiteral("Viewer second line"))) {
+            std::cerr << "[FAIL] 63: flattened text extraction omitted a saved form value" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: Viewer AP text and flattened extraction verified for all three fields." << std::endl;
+    }
+
+    std::cout << " ALL 63 PDF VIEWER WIDGET TESTS PASSED! " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }
