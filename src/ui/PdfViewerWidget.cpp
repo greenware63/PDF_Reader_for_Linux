@@ -4082,6 +4082,7 @@ bool PdfViewerWidget::setFormFieldText(int pageIndex, const QString& fieldName, 
         for (const auto& f : cacheIt->second.fields) {
             if (f.fieldName == fieldName && f.controlIndex == controlIndex) {
                 if (f.isReadOnly()) return false;
+                if (f.isPassword()) return false;
                 oldValue = f.value;
                 targetField = &f;
                 break;

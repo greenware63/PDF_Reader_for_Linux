@@ -37,6 +37,7 @@ deferred, not an undiscovered bug.
 ### Non-Latin and Persian Values
 
 - For Persian, Arabic, and other non-Latin text values where standard PDF built-in fonts lack glyph coverage or HarfBuzz shaping, the viewer lays the text out with Qt and synthesizes custom vector appearance streams (`/AP`) directly on the field widget annotation. The text is shaped and joined (including Persian letters like گ and ی). For single-line fields whose right-to-left text is narrower than the field, the layout is right-aligned.
+- Password text fields (`Ff` bit 14) are not editable through the engine or viewer. They do not receive value glyph outlines or synthesized visible appearance streams; their stored `/V` behavior is unchanged in this release.
 - Vector appearance generation and the field edit are refused if the widget is 4 pt or less in width or height, if the text requires more than 250,000 vector outline elements (`kMaxTextOutlineElements`), or if any character cannot be drawn by any installed system font.
 - The raw Unicode text value is simultaneously stored in the field's `/V` entry.
 - External viewers: third-party readers like Poppler and MuPDF render the synthesized vector appearance identically without requiring embedded fonts. However, if another PDF editor modifies the field value, it may rebuild the appearance from standard PDF fonts (e.g., Helvetica) and drop non-Latin glyphs. Compatibility with Adobe Acrobat, Foxit, and Okular is currently **untested**.

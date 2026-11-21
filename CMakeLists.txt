@@ -467,6 +467,7 @@ add_test(
     NAME HostileFormTestSuite
     COMMAND test_hostile_forms "$<TARGET_FILE:pdf_worker>" "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
 )
+set_tests_properties(HostileFormTestSuite PROPERTIES RUN_SERIAL TRUE)
 
 # Hostile AcroForm fixture determinism drift check (Threat T17)
 find_package(Python3 COMPONENTS Interpreter QUIET)
