@@ -14,11 +14,12 @@ An advanced, security-focused PDF reader and editor for Linux (C++20, Qt 6, PDFi
 | **Saving (Incremental byte-prefix preservation & atomic commit)** | **Supported** | [`test_render.cpp`](test_render.cpp) (Tests 30, 45e), [`test_widget.cpp`](test_widget.cpp) (Test 47), [`test_worker_ipc.cpp`](test_worker_ipc.cpp) (Test 25) |
 | **Encrypted PDFs (Standard security handler password unlock)** | **Supported** | [`test_password_prompt.cpp`](test_password_prompt.cpp) |
 | **Sandboxed worker (Landlock ABI 1–5, Seccomp BPF, rlimits, SCM_RIGHTS)** | **Supported** | [`test_worker_ipc.cpp`](test_worker_ipc.cpp) (Tests 8, 10, 15, 16, 18, 19), [`docs/threat_model.md`](docs/threat_model.md) |
-| **Digital signatures** | **Not supported** | [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) (invalidated on redaction/incremental save) |
+| **Digital signatures** | **Not supported** | [`docs/REDACTION.md`](docs/REDACTION.md) (raster redaction drops existing signatures) |
 | **OCR (Optical Character Recognition)** | **Not supported** | [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) |
 | **Page organization (Insert, delete, reorder, rotate pages on disk)** | **Not supported** | [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) (view rotation only) |
 | **External viewer compatibility (Acrobat, Foxit, Okular)** | **Unverified** | Tracked in [`docs/EXTERNAL_VIEWER_CHECKLIST.md`](docs/EXTERNAL_VIEWER_CHECKLIST.md) |
 
+See the [PDF feature parity matrix](docs/PARITY_MATRIX.md) for evidence and scope notes.
 
 ## Architecture & Principles
 
