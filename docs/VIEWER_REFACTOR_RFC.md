@@ -14,15 +14,17 @@ The architectural invariant is unchanged: **the UI process never links to or cal
 
 Baseline: main tip **`b0a01ea`** (`Fix Latin AcroForm appearance persistence (#59)`), whose full commit is `b0a01ead73c52fb43e2b1092c4f7628b091effa5`. The preceding history includes **`3da1312`** (T19 feature-status and external-engine compatibility test) and **`6414a86`** (hostile AcroForm test coverage).
 
-| File at `b0a01ea` | Bytes | Lines |
+| File at `b0a01ea` | Git blob bytes | Lines |
 |---|---:|---:|
-| `src/ui/PdfViewerWidget.cpp` | 198,052 | 4,658 |
-| `src/ui/PdfViewerWidget.h` | 25,714 | 496 |
-| `src/ui/MainWindow.cpp` | 78,586 | 2,023 |
-| `src/ui/MainWindow.h` | 7,876 | 210 |
-| `test_widget.cpp` | 405,113 | 8,311 |
+| `src/ui/PdfViewerWidget.cpp` | 193,394 | 4,658 |
+| `src/ui/PdfViewerWidget.h` | 25,218 | 496 |
+| `src/ui/MainWindow.cpp` | 76,563 | 2,023 |
+| `src/ui/MainWindow.h` | 7,666 | 210 |
+| `test_widget.cpp` | 396,802 | 8,311 |
 
-Measurement method: byte counts are `len(Path(path).read_bytes())`; line counts are `len(Path(path).read_bytes().splitlines())`, from the checked-out baseline. Responsibility ranges below are inclusive, 1-based source line numbers from `rg -n` on that same checkout. They are source ownership ranges, not non-overlapping allocation: event handlers and paint composition intentionally cross-cut features.
+Measurement method: Git blob byte counts are read from `git ls-tree -l b0a01ea -- <path>` and can be verified with `git cat-file -s b0a01ea:<path>`. Line counts are `len(Path(path).read_bytes().splitlines())` on the checked-out baseline; they describe source line ranges, not blob byte size. Responsibility ranges below are inclusive, 1-based source line numbers from `rg -n` on that same checkout. They are source ownership ranges, not non-overlapping allocation: event handlers and paint composition intentionally cross-cut features.
+
+For a checkout-independent unchanged-file check, take the working-tree bytes, replace each CRLF pair (`b"\r\n"`) with LF (`b"\n"`) without other transformations, and pass those normalized bytes to `git hash-object --no-filters --stdin`. Compare that resulting object ID with the baseline path's object ID (`git rev-parse b0a01ea:<path>` or the object ID from `git ls-tree`). This comparison is independent of CRLF checkout conversion only when the normalized bytes produce the exact same Git object ID; equal line counts alone do not establish byte identity.
 
 The base commit's Linux CI run **44908715725** completed with conclusion `success` for `b0a01ea` (`Linux CI (Release & Sanitizers)`). This establishes the starting baseline only; every refactor PR must run CI again.
 
@@ -126,7 +128,7 @@ Every implementation pass must avoid broad formatting, renaming, or unrelated cl
 ## 7. Acceptance criteria
 
 1. The source split is measurable using the exact byte/line method in section 2. At completion, `PdfViewerWidget.cpp` is at most **1,600 lines** (from 4,658), `PdfViewerWidget.h` at most **250 lines** (from 496), and `MainWindow.cpp` at most **1,200 lines** (from 2,023). Report both final measurements and the same method; do not claim a target from byte size unless it is measured.
-2. The original `test_widget.cpp` remains byte-for-byte identical to `b0a01ea` (405,113 bytes / 8,311 lines) throughout every pass, and the complete `test_widget` CTest executes and passes on each implementation PR. Any additional characterization lives outside that file.
+2. The original root-level `test_widget.cpp` remains byte-for-byte identical to `b0a01ea` throughout every pass: its Git blob is 396,802 bytes and the LF-normalized `git hash-object --no-filters --stdin` object ID for the working file must equal `git rev-parse b0a01ea:test_widget.cpp`. Its measured source count is 8,311 lines, but line-count equality alone is not the identity check. The complete `test_widget` CTest executes and passes on each implementation PR. Any additional characterization lives outside that file.
 3. Linux CI is green for each implementation PR (Release, ASan/UBSan, TSan where configured, and shipping-hooks-off build). The already-green base run **44908715725** is reported only as baseline evidence, not as evidence for later PRs.
 4. Existing public C++/Qt compatibility surfaces, signal/slot delivery, event behavior, and test hooks remain intact. No UI code links PDFium and no engine access bypasses `WorkerClient`.
 5. There are no feature, behavior, UI, IPC, or persisted-format changes. Each extraction is isolated enough to revert without reverting later unrelated work.
