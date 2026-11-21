@@ -8,12 +8,20 @@ deferred, not an undiscovered bug.
 | Capability | Status |
 |---|---|
 | Show stored form-field values and check marks | **Supported** (drawn by PDFium's form-fill environment) |
-| Edit / fill in text fields, checkboxes, radio buttons, combo and list boxes | **Supported** (in-place Qt editors, Tab navigation, undo/redo, crash replay) |
-| Export flattened PDF | **Supported** (burns form widgets into static page graphics, non-destructive to active session) |
+| Edit / fill in text fields, checkboxes, radio buttons, combo and list boxes | **Partial** (in-place Qt editors, Tab navigation, undo/redo; Latin text lacks /AP on save, see below) |
+| Export flattened PDF | **Partial** (burns form widgets into static page graphics, but drops typed Latin text lacking /AP, see below) |
 | PDF JavaScript (calculation, validation, formatting, show/hide) | **Never runs** (no JavaScript engine is built in, by design: threat model T1/T2) |
 | XFA forms ("dynamic" forms, common in some government and bank PDFs) | **Not supported** |
 | Pushbuttons, ResetForm, form submission, URL/launch actions | **Inert / Not supported** (never executed) |
 | Calculated / derived fields | **Not recomputed** (no JavaScript engine) |
+
+### Latin Form Field Appearances and Flattening (Known Issue)
+
+- **Missing Appearance Stream (`/AP`)**: After a user types a Latin value into a text field, the saved file stores the new value in the field's `/V` entry, but no explicit `/AP` appearance stream is generated, and `/NeedAppearances true` is not set in the AcroForm dictionary.
+- **External Viewers Display**: External viewers that do not construct dynamic appearances automatically (such as Adobe Acrobat Reader or Foxit Reader) may initially display the field as blank until clicked or focused.
+- **Flattened Export Omits Typed Text**: Because `FPDFPage_Flatten` requires an existing `/AP` appearance stream to bake widget content into static page graphics (`/Contents`), any typed Latin field values are silently omitted from flattened exports.
+- **Appearance Removal on Prior Values**: Fields that had an existing appearance stream before editing lose it upon committing a Latin value, because the engine explicitly clears the prior stream (in `src/engine/PdfiumPage.cpp` around the `FPDFAnnot_SetAP(..., nullptr)` branch).
+- **Resolution Plan**: A full engine-level fix synthesizing Latin appearance streams matching field font, alignment, and bounding box geometry is planned under Task T20.
 
 ### Form Editing & Navigation
 

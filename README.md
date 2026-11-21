@@ -1,6 +1,24 @@
 # PDF Reader Workstation (Linux)
 
-A high-performance, native PDF workstation for Linux designed with an Adobe Pro-grade feature set (forms, annotations, redaction) built using **C++20** and **Qt 6**, powered by **PDFium**.
+An advanced, security-focused PDF reader and editor for Linux (C++20, Qt 6, PDFium).
+
+## Feature Status
+
+| Feature | Status | Evidence |
+| :--- | :--- | :--- |
+| **Viewing & tile rendering** | **Supported** | [`test_render.cpp`](test_render.cpp), [`test_tile_cache.cpp`](test_tile_cache.cpp) |
+| **Text search (Unicode & Persian/Arabic RTL)** | **Supported** | [`test_render.cpp`](test_render.cpp) (Tests 17–18, 23), [`test_widget.cpp`](test_widget.cpp) (Tests 32, 45) |
+| **Annotations (Markup, Note, Ink, Shapes, FreeText, Stamps, Attachments)** | **Supported** | [`test_render.cpp`](test_render.cpp) (Tests 25–30, 42–43), [`test_worker_ipc.cpp`](test_worker_ipc.cpp) (Tests 22–28, 38), [`test_widget.cpp`](test_widget.cpp) (Tests 46–47, 59) |
+| **AcroForm filling (Text, Checkbox, Radio, Combo, Listbox, Vector /AP)** | **Partial** | typed Latin text is not kept in flattened export, and some viewers show the field empty (see [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md)); [`test_render.cpp`](test_render.cpp) (Tests 44–47), [`test_worker_ipc.cpp`](test_worker_ipc.cpp) (Tests 39–42), [`test_widget.cpp`](test_widget.cpp) (Tests 60–62), [`test_hostile_forms.cpp`](test_hostile_forms.cpp) |
+| **Raster redaction (Burn-in sanitization & overwrite guards)** | **Supported** | [`tests/redaction/test_redaction.cpp`](tests/redaction/test_redaction.cpp), [`test_redaction_rotation.cpp`](test_redaction_rotation.cpp), [`test_redaction_file_safety.cpp`](test_redaction_file_safety.cpp) |
+| **Saving (Incremental byte-prefix preservation & atomic commit)** | **Supported** | [`test_render.cpp`](test_render.cpp) (Tests 30, 45e), [`test_widget.cpp`](test_widget.cpp) (Test 47), [`test_worker_ipc.cpp`](test_worker_ipc.cpp) (Test 25) |
+| **Encrypted PDFs (Standard security handler password unlock)** | **Supported** | [`test_password_prompt.cpp`](test_password_prompt.cpp) |
+| **Sandboxed worker (Landlock ABI 1–5, Seccomp BPF, rlimits, SCM_RIGHTS)** | **Supported** | [`test_worker_ipc.cpp`](test_worker_ipc.cpp) (Tests 8, 10, 15, 16, 18, 19), [`docs/threat_model.md`](docs/threat_model.md) |
+| **Digital signatures** | **Not supported** | [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) (invalidated on redaction/incremental save) |
+| **OCR (Optical Character Recognition)** | **Not supported** | [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) |
+| **Page organization (Insert, delete, reorder, rotate pages on disk)** | **Not supported** | [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) (view rotation only) |
+| **External viewer compatibility (Acrobat, Foxit, Okular)** | **Unverified** | Tracked in [`docs/EXTERNAL_VIEWER_CHECKLIST.md`](docs/EXTERNAL_VIEWER_CHECKLIST.md) |
+
 
 ## Architecture & Principles
 
@@ -118,6 +136,7 @@ The build system configures strict diagnostics and defense-in-depth compile-time
 ├── LICENSE                     # MIT License
 ├── main.cpp                    # Application entry point
 ├── sample.pdf                  # Reference PDF for validation
+├── test_hostile_forms.cpp      # Hostile AcroForm ingestion & resource limits test suite
 ├── test_layout.cpp             # Layout engine test suite
 ├── test_password_prompt.cpp    # Password prompt and encrypted document test suite
 ├── test_render.cpp             # Engine rendering and document loading test suite
@@ -128,8 +147,15 @@ The build system configures strict diagnostics and defense-in-depth compile-time
 
 ## Known Limitations
 
-Form filling, PDF JavaScript and XFA forms are not supported: stored field values are displayed, but nothing is
-computed, validated or editable. See [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md).
+Interactive AcroForm filling (partial) and annotations are supported. However:
+- **Latin Form Field Appearance & Flattening**: Typed Latin text does not produce an appearance stream on save and is dropped during flattened export (see [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md)).
+- **PDF JavaScript and XFA**: Dynamic XFA forms and PDF JavaScript execution (calculation, validation, formatting) are not supported by design (threat model T1/T2).
+- **Digital Signatures & OCR**: Digital signatures are not supported and are invalidated on save/redaction. Optical character recognition (OCR) is not supported.
+- **Page Organization**: Inserting, deleting, or reordering pages on disk is not supported (view rotation only).
+- **External Viewer Compatibility**: Full visual and interactive verification across external viewers (Adobe Acrobat, Foxit, Okular) is pending manual execution; see [`docs/EXTERNAL_VIEWER_CHECKLIST.md`](docs/EXTERNAL_VIEWER_CHECKLIST.md).
+
+For full details and specification disclosures, see [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md).
+
 
 ## Building
 
@@ -288,12 +314,16 @@ ctest --test-dir build --output-on-failure
 - **20a–20b**: Non-Latin text rendering inside the confined worker across embedded glyphs (`unicode_embedded.pdf` - Cyrillic, Greek, Persian) and system CJK CID fonts via fontconfig through Landlock read allowlist (`unicode_system_font.pdf` - Japanese)
 - **21a–21b**: Live font-root probing (`--isolation-selftest --test-probe-read`) verifying the confined worker can read all font roots reported by fontconfig, enforcing Flatpak host font accessibility under `/run/host/fonts`, and reporting skips when host fonts are absent
 
-#### 6. Specialized Test Suites:
+#### 6. Specialized Test Suites & Verification (13 CTest Entries Total):
+- **`HostileFormTestSuite`**: Validates sandboxed worker resilience, ingestion caps, and resource boundaries against adversarially crafted AcroForms (deep inheritance hierarchies, thousands of widgets, long text values, cyclic structures, giant byte buffers) under Threat T17.
+- **`HostileFormFixtureDeterminismTest`**: Verifies zero-drift and byte/structural determinism of committed hostile form fixtures.
+- **`ExternalEngineCompatTest`**: Automated multi-engine compatibility validation verifying documents saved or exported by the application (annotated save, form-filled save, flattened form export, raster redaction) against Poppler (`pdfinfo`, `pdftoppm`, `pdftotext`), `qpdf --check`, and MuPDF (`mutool`).
 - **`PasswordPromptTestSuite`**: Automated headless testing of encrypted PDF handling, wrong password rejection, and correct password unlocking.
 - **`RedactionRotationTestSuite`**: End-to-end pixel-level redaction verification with pdftoppm witness across rotated pages and multi-page fixtures.
 - **`RedactionFileSafetyTestSuite`**: Source file overwrite prevention and atomic all-or-nothing save guards.
 - **`RedactionTestSuite`**: Comprehensive redaction engine tests verifying structural sanitization, complete metadata elimination, and independent parser inspection.
 - **`IpcFuzzTestSuite`**: 1,000+ randomized mutation fuzz tests verifying parser resilience against malformed IPC packets.
+
 
 ### Flatpak Sandbox Verification
 

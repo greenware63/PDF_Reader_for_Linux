@@ -91,9 +91,9 @@ flowchart TD
 
 ---
 
-## 3. Test Verification (12 CTest Suites & Tests, 185+ Unit/Integration Tests & 1,000+ Fuzz Tests, 100% Pass)
+## 3. Test Verification (13 CTest Suites & Tests, 185+ Unit/Integration Tests & 1,000+ Fuzz Tests, 100% Pass)
 
-The project enforces automated test execution through CTest, GitHub Actions CI ([run 44482272613](https://github.com/greenware63/PDF_Reader_for_Linux/actions/runs/44482272613) passed across Release, ASan/UBSan, TSan, and shipping configurations), and local container verification (185+ unit and integration tests across the 7 primary test suites, plus 3 redaction verification suites, HostileFormTestSuite, HostileFormFixtureDeterminismTest, and 1,000+ mutation fuzz tests):
+The project enforces automated test execution through CTest, GitHub Actions CI ([run 44482272613](https://github.com/greenware63/PDF_Reader_for_Linux/actions/runs/44482272613) passed across Release, ASan/UBSan, TSan, and shipping configurations), and local container verification (185+ unit and integration tests across the 7 primary test suites, plus 3 redaction verification suites, HostileFormTestSuite, HostileFormFixtureDeterminismTest, ExternalEngineCompatTest, and 1,000+ mutation fuzz tests):
 
 1. **`EngineRenderTestSuite` (47 Tests)**:
    - Handle lifetimes, render whole page caps, 37px grid-shift tile stitching, sub-pixel edge straddling at 15× zoom.
@@ -134,6 +134,8 @@ The project enforces automated test execution through CTest, GitHub Actions CI (
     - Part 3 (lines 256–341): hostile mutation rejection: rejects text mutations $> 32,768$ code units ($40,000$ chars) and outline mutations $> 250,000$ elements without corrupting document or `EditLog`, with positive control and undo symmetry.
 12. **`HostileFormFixtureDeterminismTest` (`tests/test_fixture_determinism.py`)**:
     - Anti-drift fixture determinism verification: regenerates all 9 AcroForm fixtures via `make_hostile_form_fixtures.py`, normalizes committed and regenerated fixtures via `qpdf --qdf` (stripping the trailer `/ID` line to ignore compressor variation), and verifies byte-identical normalized QDF representations to prevent silent fixture drift. Fails closed in CI if `qpdf` is missing or any fixture differs.
+13. **`ExternalEngineCompatTest` (`tests/test_output_compat.py`)**:
+    - Automated external-engine compatibility verification: produces saved and exported documents via the engine save pipeline (annotated incremental save, form-filled incremental save, flattened form export, and redacted export) and validates them against independent external engines (`qpdf --check`, Poppler's `pdfinfo`, `pdftoppm` non-blank pixel presence, `pdftotext` text leakage assertion, and MuPDF `mutool info`/`mutool draw` when available). Fails closed in CI if required external tools are missing or outputs fail validation.
 
 ### Continuous Integration Matrix
 A GitHub Actions matrix workflow runs on `ubuntu-24.04`:

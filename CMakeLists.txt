@@ -475,7 +475,18 @@ if(Python3_FOUND)
         NAME HostileFormFixtureDeterminismTest
         COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fixture_determinism.py" "${CMAKE_CURRENT_SOURCE_DIR}"
     )
+
+    # Automated external-engine compatibility test (qpdf, poppler, mupdf)
+    add_test(
+        NAME ExternalEngineCompatTest
+        COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_output_compat.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}" "$<TARGET_FILE:test_render>"
+                "${CMAKE_BINARY_DIR}/compat_outputs"
+                "${CMAKE_BINARY_DIR}/compat_work"
+    )
 endif()
+
+
 
 add_test(
     NAME EngineRenderTestSuite

@@ -184,9 +184,10 @@ Automated (CI already installs `qpdf` and `poppler-utils`):
 * Render the saved file with `pdftoppm` and compare the annotation region to our own render (tolerance-based pixel check) — this is the check that catches missing `/AP`.
 * `pdftotext`/`qpdf --json` confirm annotation count, subtype, `/Contents`, `/NM` after a round trip; re-open in our reader and compare the list.
 
-Manual, per release that changes annotations (checklist in the PR):
-* Open our output in Acrobat Reader, Okular, Foxit and a browser PDF viewer; edit/delete an annotation there; re-open in ours. Acrobat and Foxit are **stated as untested / unverified** until external platform verification can be arranged.
-* Render comparison against MuPDF (`mutool draw`) for custom `/AP` form streams (especially Persian/Arabic RTL text without embedded system fonts; CI does not install `mupdf-tools`).
+Manual, per release that changes annotations (tracked in [docs/EXTERNAL_VIEWER_CHECKLIST.md](EXTERNAL_VIEWER_CHECKLIST.md)):
+* Open our output in Acrobat Reader, Okular, Foxit and a browser PDF viewer; edit/delete an annotation there; re-open in ours. All three external viewers are **Unverified** until manual desktop execution can be completed per the checklist.
+* Render comparison against MuPDF (`mutool draw`) for custom `/AP` form streams (especially Persian/Arabic RTL text without embedded system fonts; automated in CI when `mupdf-tools` is installed, manual otherwise).
+
 
 ## 10. Milestones (each a small PR with its own tests)
 

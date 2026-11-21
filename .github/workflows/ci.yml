@@ -34,7 +34,8 @@ jobs:
             libgl1-mesa-dev \
             libxkbcommon-dev \
             qpdf \
-            poppler-utils
+            poppler-utils \
+            mupdf-tools
 
       # The fault-injection hooks (watchdog hang/stall, rlimit failure tests) are compiled out of the shipping
       # configuration, and the tests that need them print "Skipped" without them. The three legs below
@@ -88,6 +89,7 @@ jobs:
             # The multi-process suites are covered by the Release and ASan/UBSan jobs.
             ctest --test-dir build --output-on-failure -R "EngineRenderTestSuite|DocumentLayoutTestSuite|TileCacheTestSuite"
           else
+            ctest --test-dir build --output-on-failure --verbose -R "^ExternalEngineCompatTest$"
             ctest --test-dir build --output-on-failure || {
               rc=$?
               # Job logs are not always retrievable; surface failing tests as annotations too.
@@ -101,6 +103,14 @@ jobs:
               exit $rc
             }
           fi
+
+      - name: Upload Compatibility Test Artifacts
+        if: always() && matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: compat-outputs
+          path: build/compat_outputs/
+          if-no-files-found: ignore
 
   build-shipping:
     name: Shipping config (test hooks OFF)
@@ -121,7 +131,8 @@ jobs:
             libgl1-mesa-dev \
             libxkbcommon-dev \
             qpdf \
-            poppler-utils
+            poppler-utils \
+            mupdf-tools
 
       - name: Configure with shipping defaults
         run: cmake -B build-shipping -G Ninja -DCMAKE_BUILD_TYPE=Release
