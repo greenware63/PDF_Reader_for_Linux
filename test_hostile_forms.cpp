@@ -2,9 +2,7 @@
 #include <string>
 #include <vector>
 #include <chrono>
-#ifdef Q_OS_LINUX
 #include <fcntl.h>
-#endif
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QDir>
