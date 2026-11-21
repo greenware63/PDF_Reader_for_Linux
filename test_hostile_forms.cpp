@@ -373,8 +373,12 @@ int main(int argc, char* argv[]) {
         }
 
         const QString persian = QStringLiteral("\u0633\u0631\u0631\u0627\u0632");
+        std::vector<pdf::AnnotationPathElement> persianOutlines;
+        persianOutlines.push_back({pdf::AnnotationPathElement::Kind::MoveTo, 80.0, 612.0});
+        persianOutlines.push_back({pdf::AnnotationPathElement::Kind::LineTo, 100.0, 612.0});
+        persianOutlines.push_back({pdf::AnnotationPathElement::Kind::LineTo, 100.0, 620.0});
         auto rejected = client.setFormFieldTextSync(docId, 1, secret->fieldName,
-                                                     secret->controlIndex, persian, {});
+                                                     secret->controlIndex, persian, persianOutlines);
         if (rejected.success) {
             std::cerr << "[FAIL] T20-A: engine accepted Persian edit for password field" << std::endl;
             return 1;
