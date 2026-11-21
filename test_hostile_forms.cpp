@@ -2,10 +2,14 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#ifdef Q_OS_LINUX
+#include <fcntl.h>
+#endif
 #include <QCoreApplication>
 #include <QFileInfo>
 #include <QDir>
 #include <QFile>
+#include <QTemporaryDir>
 #include "engine/IDocument.h"
 #include "engine/IPage.h"
 #include "engine/FormFieldTypes.h"
@@ -337,6 +341,116 @@ int main(int argc, char* argv[]) {
 
         client.closeDocumentSync();
     }
+
+    // T20-A: Password-field edits must be rejected and must never produce Persian glyph AP data.
+#ifdef Q_OS_LINUX
+    {
+        QString identityPath = resolveFixture(QString::fromStdString(samplePath),
+                                              QStringLiteral("forms_identity_and_topology.pdf"));
+        if (identityPath.isEmpty() || !QFile::exists(identityPath)) {
+            std::cerr << "[FAIL] T20-A: forms_identity_and_topology.pdf not found" << std::endl;
+            return 1;
+        }
+
+        const int64_t docId = 2002;
+        auto openResp = client.openDocumentSync(docId, identityPath.toStdString());
+        if (openResp.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] T20-A: failed to open secret fixture" << std::endl;
+            return 1;
+        }
+
+        auto secretFields = client.listFormFieldsSync(docId, 1, 5000);
+        const pdf::FormFieldItem* secret = nullptr;
+        pdf::FormFieldItem secretCopy;
+        for (const auto& field : secretFields.fields) {
+            if (field.fieldName == QStringLiteral("secret")) {
+                secretCopy = field;
+                secret = &secretCopy;
+                break;
+            }
+        }
+        if (!secretFields.success || !secret || !secret->isPassword()) {
+            std::cerr << "[FAIL] T20-A: password field 'secret' not found on page 2" << std::endl;
+            return 1;
+        }
+
+        const QString persian = QStringLiteral("\u0633\u0631\u0631\u0627\u0632");
+        auto rejected = client.setFormFieldTextSync(docId, 1, secret->fieldName,
+                                                     secret->controlIndex, persian, {});
+        if (rejected.success) {
+            std::cerr << "[FAIL] T20-A: engine accepted Persian edit for password field" << std::endl;
+            return 1;
+        }
+
+        auto recheck = client.listFormFieldsSync(docId, 1, 5000);
+        bool unchanged = false;
+        for (const auto& field : recheck.fields) {
+            if (field.fieldName == QStringLiteral("secret")) {
+                unchanged = (field.value == secret->value);
+                break;
+            }
+        }
+        if (!unchanged) {
+            std::cerr << "[FAIL] T20-A: password field /V changed after rejected edit" << std::endl;
+            return 1;
+        }
+
+        QTemporaryDir tempDir;
+        if (!tempDir.isValid()) {
+            std::cerr << "[FAIL] T20-A: failed to create temporary output directory" << std::endl;
+            return 1;
+        }
+        const QString savedPath = tempDir.filePath(QStringLiteral("password_saved.pdf"));
+        int writeFd = ::open(savedPath.toLocal8Bit().constData(),
+                             O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+        if (writeFd < 0) {
+            std::cerr << "[FAIL] T20-A: failed to open saved PDF" << std::endl;
+            return 1;
+        }
+        auto saved = client.saveDocumentSync(docId, writeFd, true, "");
+        if (!saved.success || saved.bytesWritten == 0) {
+            std::cerr << "[FAIL] T20-A: incremental save failed" << std::endl;
+            return 1;
+        }
+
+        QFile savedFile(savedPath);
+        if (!savedFile.open(QIODevice::ReadOnly)) {
+            std::cerr << "[FAIL] T20-A: failed to read saved PDF" << std::endl;
+            return 1;
+        }
+        const QByteArray savedBytes = savedFile.readAll();
+        savedFile.close();
+        const QByteArray persianUtf8 = persian.toUtf8();
+        const QByteArray persianUtf16 = QByteArray::fromRawData(
+            reinterpret_cast<const char*>(persian.utf16()),
+            persian.size() * static_cast<int>(sizeof(char16_t)));
+        if (savedBytes.contains(persianUtf8) || savedBytes.contains(persianUtf16)) {
+            std::cerr << "[FAIL] T20-A: plaintext Persian entered in password field leaked into saved PDF" << std::endl;
+            return 1;
+        }
+
+        auto savedDoc = pdf::createDocument();
+        if (savedDoc->loadFromFile(savedPath.toStdString()) != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] T20-A: failed to reopen saved PDF" << std::endl;
+            return 1;
+        }
+        std::vector<uint8_t> flattened;
+        if (!savedDoc->extractPages(1, 1, flattened, true, pdf::FlattenMode::NormalDisplay) ||
+            flattened.empty()) {
+            std::cerr << "[FAIL] T20-A: flattened export failed" << std::endl;
+            return 1;
+        }
+        const QByteArray flatBytes(reinterpret_cast<const char*>(flattened.data()),
+                                   static_cast<qsizetype>(flattened.size()));
+        if (flatBytes.contains(persianUtf8) || flatBytes.contains(persianUtf16)) {
+            std::cerr << "[FAIL] T20-A: plaintext Persian leaked into flattened export" << std::endl;
+            return 1;
+        }
+
+        client.closeDocumentSync();
+    }
+#endif
+
     client.stop();
     std::cout << "  -> Passed: Hostile mutations rejected without corrupting document or EditLog." << std::endl;
 

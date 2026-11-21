@@ -467,6 +467,17 @@ add_test(
     NAME HostileFormTestSuite
     COMMAND test_hostile_forms "$<TARGET_FILE:pdf_worker>" "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
 )
+set_tests_properties(HostileFormTestSuite PROPERTIES RUN_SERIAL TRUE)
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    add_test(
+        NAME PasswordFieldMutationTest
+        COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_password_field_mutation.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_BINARY_DIR}"
+    )
+    set_tests_properties(PasswordFieldMutationTest PROPERTIES RUN_SERIAL TRUE)
+endif()
 
 # Hostile AcroForm fixture determinism drift check (Threat T17)
 find_package(Python3 COMPONENTS Interpreter QUIET)

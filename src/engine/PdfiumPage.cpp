@@ -1033,6 +1033,10 @@ bool PdfiumPage::setFormFieldText(const QString& fieldName, int controlIndex, co
         FPDFPage_CloseAnnot(annot);
         return false;
     }
+    if (flags & FormFieldFlag::Password) {
+        FPDFPage_CloseAnnot(annot);
+        return false;
+    }
 
     int rawType = FPDFAnnot_GetFormFieldType(m_form->handle, annot);
     const bool isTextField = (rawType == FPDF_FORMFIELD_TEXTFIELD);
