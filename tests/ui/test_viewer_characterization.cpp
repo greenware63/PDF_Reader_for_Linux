@@ -1432,23 +1432,34 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
         const int64_t docId = viewer.currentDocumentId();
 
         // 1. S11: In-flight deduplication: ensure page requested twice before reply sends one request
+        int page58ReadyCount = 0;
+        const auto conn58 = QObject::connect(&viewer.renderWorker(), &pdf::ipc::WorkerClient::pageTextReady,
+            [&](int64_t /*dId*/, int pageIdx, std::shared_ptr<pdf::PageText>) {
+                if (pageIdx == 58) {
+                    ++page58ReadyCount;
+                }
+            });
+
         viewer.goToPage(58);
         QImage frame1(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
         QPainter p1(&frame1);
         viewer.viewport()->render(&p1);
         p1.end();
         const size_t inFlightCount1 = viewer.cachedTextPageCount();
+        const bool entryInFlight = (viewer.getPageText(58) == nullptr);
 
         QImage frame2(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
         QPainter p2(&frame2);
         viewer.viewport()->render(&p2);
         p2.end();
         const size_t inFlightCount2 = viewer.cachedTextPageCount();
-        const bool deduplicatedInFlight = (inFlightCount2 == inFlightCount1);
 
         viewer.waitForRendering();
-        waitFor([&]() { return viewer.getPageText(58) != nullptr; }, 3000);
+        waitFor([&]() { return viewer.getPageText(58) != nullptr; }, 4000);
+        QObject::disconnect(conn58);
+
         const bool page58Delivered = (viewer.getPageText(58) != nullptr);
+        const bool deduplicatedInFlight = (inFlightCount2 == inFlightCount1) && entryInFlight && (page58ReadyCount == 1);
 
         // 2. S4: Foreign documentId ignored
         const auto foreignPt = makeDummyPageText(59, "ForeignText");
@@ -1632,17 +1643,22 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
             backwardCrossSel = viewer.selectedText();
             backwardCrossOk = (backwardCrossSel == "BBB CCC\nDDD");
 
-            // 4. S6, S8: Three-page selection with whole middle page and newline joins
+            // 4. S6, S8: Three-page selection with whole middle page and newline joins, including clipboard copy
             sendDrag(charCenter(pl0, pt0->chars[4]), charCenter(pl2, pt2->chars[6]));
             threePageSel = viewer.selectedText();
-            threePageOk = (threePageSel == "BBB CCC\nDDD EEE FFF\nGGG HHH");
+            viewer.copySelection();
+            const QString threePageClipboard = QGuiApplication::clipboard()->text();
+            threePageOk = (threePageSel == "BBB CCC\nDDD EEE FFF\nGGG HHH") &&
+                          (threePageClipboard == "BBB CCC\nDDD EEE FFF\nGGG HHH");
 
-            // 5. S9: Click on same character is NOT a selection
-            const QPointF c0 = charCenter(pl0, pt0->chars[0]);
-            QMouseEvent press0(QEvent::MouseButtonPress, c0, c0, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            // 5. S9: Click on same character is NOT a selection: hasSelection() is false and clearSelection emits nothing
+            viewer.clearSelection();
+            pump(20);
+            const QPointF cChar = charCenter(pl0, pt0->chars[4]);
+            QMouseEvent press0(QEvent::MouseButtonPress, cChar, cChar, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
             QApplication::sendEvent(viewer.viewport(), &press0);
             pump(20);
-            QMouseEvent release0(QEvent::MouseButtonRelease, c0, c0, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QMouseEvent release0(QEvent::MouseButtonRelease, cChar, cChar, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
             QApplication::sendEvent(viewer.viewport(), &release0);
             pump(50);
 
@@ -1778,20 +1794,50 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
         // and the id increments by one per findText or clearSearch call.
         int64_t currentSearchId = 0;
 
-        // 1. Q2, Q9: Circular-nearest match from page 4 (keyword on pages 0 and 3)
+        // 1. Q2, Q9: Circular-nearest match from page 4 (keyword on pages 0 and 3), and start page nearest after k
         viewer.openDocument(circPath); // clearSearch() -> searchId = 1
         currentSearchId = 1;
         viewer.waitForRendering();
         pump(200);
 
-        viewer.goToPage(4);
-        viewer.findText("CircularKey"); // findText -> searchId = 2
-        ++currentSearchId;
-        waitFor([&]() { return viewer.searchMatchCount() == 2; }, 3000);
-        const int activeMatchIdx = viewer.currentSearchMatchIndex();
-        const bool circularMatchOk = (viewer.searchMatchCount() == 2) && (activeMatchIdx == 0);
-
         const int64_t docId = viewer.currentDocumentId();
+
+        pdf::SearchMatch mCircP0;
+        mCircP0.pageIndex = 0;
+        mCircP0.charStartIndex = 10;
+        mCircP0.charCount = 11;
+        mCircP0.rects = { pdf::PageCharBox{100.0, 700.0, 200.0, 720.0} };
+
+        pdf::SearchMatch mCircP3;
+        mCircP3.pageIndex = 3;
+        mCircP3.charStartIndex = 12;
+        mCircP3.charCount = 11;
+        mCircP3.rects = { pdf::PageCharBox{100.0, 700.0, 200.0, 720.0} };
+
+        // Q9: With matches only on pages 0 and 3, searching from page 4 (after all matches)
+        // uses circular distance: dist to page 0 is (0 - 4 + 5) % 5 = 1, dist to page 3 is (3 - 4 + 5) % 5 = 4.
+        // Circular wrap picks the first match (page 0), whereas linear distance would pick page 3.
+        viewer.goToPage(4);
+        viewer.findText("CircWrapTest"); // findText -> searchId = 2
+        ++currentSearchId;
+        const int64_t wrapSearchId = currentSearchId;
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, wrapSearchId, 0, {mCircP0, mCircP3});
+        pump(50);
+        const bool circularMatchOk = (viewer.searchMatchCount() == 2)
+            && (viewer.currentSearchMatchIndex() == 0); // index 0 is page 0
+
+        // Q2: With current page at k = 2, findText picks the match nearest after k (page 3, distance 1),
+        // not the one nearest page 0 (which would be page 0, distance 0).
+        viewer.clearSearch(); // clearSearch -> searchId = 3
+        ++currentSearchId;
+        viewer.goToPage(2);
+        viewer.findText("KStartTest"); // findText -> searchId = 4
+        ++currentSearchId;
+        const int64_t kSearchId = currentSearchId;
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, kSearchId, 0, {mCircP0, mCircP3});
+        pump(50);
+        const bool startPageKOk = (viewer.searchMatchCount() == 2)
+            && (viewer.currentSearchMatchIndex() == 1); // index 1 is page 3
 
         // 2. Q16: findText("   ") behaves as empty (emits (0,0), (0,0), finished(false), starts no worker search)
         SignalRecorder<int, int> spyResEmpty(&viewer, &ui::PdfViewerWidget::searchResultsChanged);
@@ -1929,11 +1975,12 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
         // onSearchProgress, and onSearchCompleted. Thus, cancelSearch() is an IPC load
         // optimization whose observable widget state is equivalent to the searchId filter.
 
-        const bool group3_9Ok = circularMatchOk && emptyQueryOk && progress0Emitted
+        const bool group3_9Ok = circularMatchOk && startPageKOk && emptyQueryOk && progress0Emitted
             && truncatedFinishedOk && batchSortAndActiveOk && wrapNextOk && wrapPrevOk
             && matchCapOk && foreignSearchIgnored && staleAfterClearIgnored && matchCaseOk;
 
         std::string d39 = "circ=" + std::to_string(circularMatchOk)
+            + " startK=" + std::to_string(startPageKOk)
             + " empty=" + std::to_string(emptyQueryOk)
             + " prog0=" + std::to_string(progress0Emitted)
             + " trunc=" + std::to_string(truncatedFinishedOk)
@@ -2020,7 +2067,14 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
         const int inactY = actY;
         const QColor inactCol = renderImg.pixelColor(inactX, inactY);
 
-        const bool colorsDistinct = (actCol != inactCol) && (inactCol.green() > actCol.green());
+        // Blank page pixel outside any match (at page Y = 50 pt):
+        const int blankX = inactX;
+        const int blankY = static_cast<int>(std::round((pl0TopDoc + 50.0 * effScale) / dpr));
+        const QColor blankCol = renderImg.pixelColor(blankX, blankY);
+
+        // S13: Non-active match carries the translucent yellow overlay (lowering blue from blank white 255 to < 210)
+        const bool nonActiveYellowOverlay = (inactCol != blankCol) && (inactCol.blue() < 210) && (blankCol.blue() > 240);
+        const bool colorsDistinct = (actCol != inactCol) && nonActiveYellowOverlay;
         const bool borderDistinct = (borderCol != actCol);
 
         // 2. S15, S16: scrollToMatch / goToSearchMatch scroll geometry calculation
@@ -2042,12 +2096,53 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
         pump(50);
         const bool insideViewportNotScrolled = (viewer.currentDocScrollY() == scrollYBeforeInsideCheck);
 
-        const bool group3_10Ok = colorsDistinct && borderDistinct && offscreenScrolledCorrectly && insideViewportNotScrolled;
+        // 4. S15: scrollToMatch margin 40: inside viewport within 40px of edge scrolls; beyond 40px does not scroll
+        viewer.goToSearchMatch(0);
+        viewer.setDocScrollPosition(0, 100);
+        pump(50);
+        const int64_t scrollBase = viewer.currentDocScrollY();
+
+        const double pyNear = static_cast<double>(scrollBase + 20 - pl0.topPixel) / effScale;
+        const double pyBeyond = static_cast<double>(scrollBase + 120 - pl0.topPixel) / effScale;
+
+        pdf::SearchMatch mNear;
+        mNear.pageIndex = 0;
+        mNear.charStartIndex = 30;
+        mNear.charCount = 5;
+        mNear.rects = { pdf::PageCharBox{100.0, pyNear, 150.0, pyNear + 10.0} };
+
+        pdf::SearchMatch mBeyond;
+        mBeyond.pageIndex = 0;
+        mBeyond.charStartIndex = 40;
+        mBeyond.charCount = 5;
+        mBeyond.rects = { pdf::PageCharBox{100.0, pyBeyond, 150.0, pyBeyond + 10.0} };
+
+        viewer.findText("MarginTestQuery");
+        const int64_t marginSearchId = 3;
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, marginSearchId, 0, {mNear, mBeyond});
+        pump(50);
+
+        viewer.setDocScrollPosition(0, scrollBase);
+        pump(50);
+        viewer.goToSearchMatch(0); // Near-edge match (within 40px margin) -> must scroll
+        pump(50);
+        const bool scrolledNearEdge = (viewer.currentDocScrollY() != scrollBase);
+
+        const int64_t scrollBeforeBeyond = viewer.currentDocScrollY();
+        viewer.goToSearchMatch(1); // Beyond-margin match (at +120px) -> must not scroll
+        pump(50);
+        const bool notScrolledBeyondMargin = (viewer.currentDocScrollY() == scrollBeforeBeyond);
+        const bool s15Margin40Killed = scrolledNearEdge && notScrolledBeyondMargin;
+
+        const bool group3_10Ok = colorsDistinct && borderDistinct && s15Margin40Killed
+            && offscreenScrolledCorrectly && insideViewportNotScrolled;
 
         std::string d310 = "colorsDistinct=" + std::to_string(colorsDistinct)
-            + " (act=" + actCol.name().toStdString() + " inact=" + inactCol.name().toStdString() + ")"
+            + " (act=" + actCol.name().toStdString() + " inact=" + inactCol.name().toStdString() + " yellow=" + std::to_string(nonActiveYellowOverlay) + ")"
             + " borderDistinct=" + std::to_string(borderDistinct)
             + " (border=" + borderCol.name().toStdString() + ")"
+            + " s15Margin40=" + std::to_string(s15Margin40Killed)
+            + " (near=" + std::to_string(scrolledNearEdge) + " beyond=" + std::to_string(notScrolledBeyondMargin) + ")"
             + " offscreenScrolled=" + std::to_string(offscreenScrolledCorrectly)
             + " (scroll=" + std::to_string(scrollYAfterJump) + " exp=" + std::to_string(expectedTargetY) + ")"
             + " insideNotScrolled=" + std::to_string(insideViewportNotScrolled);
