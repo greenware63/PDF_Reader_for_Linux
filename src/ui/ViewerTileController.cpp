@@ -68,7 +68,7 @@ VisibleTileAction ViewerTileController::evaluateVisibleTile(
         if (cache.canRetry(key)) {
             if (m_inFlightKeys.find(key) != m_inFlightKeys.end()) {
                 // Already in flight to worker for retry; avoid re-enqueueing duplicate
-                return VisibleTileAction::DrawPending;
+                return VisibleTileAction::DrawPendingNoFallback;
             }
             // Backoff interval elapsed: allow retry
             cache.clearFailed(key);
@@ -81,7 +81,7 @@ VisibleTileAction ViewerTileController::evaluateVisibleTile(
             pdf::PixelRect pRect{t.tileXOnPage, t.tileYOnPage, t.tileWidth, t.tileHeight};
             outPendingRequests.push_back({currentDocumentId, currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority, rotation});
             m_inFlightKeys.insert(key);
-            return VisibleTileAction::DrawPending;
+            return VisibleTileAction::DrawPendingNoFallback;
         }
         return VisibleTileAction::DrawError;
     }
@@ -97,7 +97,7 @@ VisibleTileAction ViewerTileController::evaluateVisibleTile(
         outPendingRequests.push_back({currentDocumentId, currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority, rotation});
         m_inFlightKeys.insert(key);
     }
-    return VisibleTileAction::DrawPending;
+    return VisibleTileAction::DrawPendingWithFallback;
 }
 
 std::vector<FallbackSlice> ViewerTileController::selectFallbackTiles(

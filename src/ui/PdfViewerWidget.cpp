@@ -1834,8 +1834,10 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
             }
         } else if (action == VisibleTileAction::DrawError) {
             drawErrorPlaceholder(painter, tileRect);
+        } else if (action == VisibleTileAction::DrawPendingNoFallback) {
+            drawPendingPlaceholder(painter, tileRect);
         } else {
-            // DrawPending: draw placeholder (plus a scaled earlier-zoom stand-in if we have one)
+            // DrawPendingWithFallback: draw placeholder (plus a scaled earlier-zoom stand-in if we have one)
             drawPendingPlaceholder(painter, tileRect);
             if (!m_tileController.fallbackScales().empty()) {
                 drawFallbackTile(painter, t, tileRect, qScale, qDpr);

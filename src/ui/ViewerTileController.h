@@ -24,7 +24,8 @@ struct FallbackSlice {
 
 enum class VisibleTileAction {
     DrawCached,
-    DrawPending,
+    DrawPendingNoFallback,
+    DrawPendingWithFallback,
     DrawError
 };
 
