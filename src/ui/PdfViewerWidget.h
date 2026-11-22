@@ -152,7 +152,6 @@ public:
     pdf::ipc::WorkerClient& renderWorker() noexcept { return m_renderWorker; }
     pdf::TileCache& cache() noexcept { return m_cache; }
     const layout::DocumentLayout& layout() const noexcept { return m_layoutController.layout(); }
-    layout::DocumentLayout& layout() noexcept { return m_layoutController.layout(); }
     size_t inFlightCount() const noexcept { return m_inFlightKeys.size(); }
     size_t transformedCacheSize() const noexcept { return m_transformedPixmapCache.size(); }
 
