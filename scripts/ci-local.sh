@@ -92,12 +92,13 @@ cmake --build "${BUILD_DIR_TSAN}"
 export TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1:suppressions=${REPO_ROOT}/ci/tsan_suppressions.txt"
 
 # Modern kernels (Linux 6.6+, e.g. WSL2/Docker kernel 6.18) use high-entropy ASLR
-# which can conflict with ThreadSanitizer's static virtual memory map.
-# Relax ASLR via `setarch $(uname -m) -R` if available to prevent mapping aborts.
-TSAN_PREFIX=""
-if command -v setarch >/dev/null 2>&1; then
-    TSAN_PREFIX="setarch $(uname -m) -R"
+# which conflicts with ThreadSanitizer's static virtual memory map.
+# Relax ASLR via `setarch $(uname -m) -R` to prevent mapping aborts.
+if ! command -v setarch >/dev/null 2>&1; then
+    echo "ERROR: 'setarch' utility is required to relax ASLR for ThreadSanitizer on modern Linux kernels" >&2
+    exit 1
 fi
+TSAN_PREFIX="setarch $(uname -m) -R"
 
 echo "Running CTest for TSan leg (single-process suites)..."
 ${TSAN_PREFIX} ctest --test-dir "${BUILD_DIR_TSAN}" --output-on-failure -R "EngineRenderTestSuite|DocumentLayoutTestSuite|TileCacheTestSuite"

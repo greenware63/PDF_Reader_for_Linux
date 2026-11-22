@@ -1,6 +1,6 @@
 # Linux Development Environment (Dev Container & Local CI)
 
-This document describes how to build, run, and debug the Linux PDF Reader Workstation locally in an environment identical to the `ubuntu-24.04` GitHub Actions CI runners.
+This document describes how to build, run, and debug the Linux PDF Reader Workstation locally in an environment equivalent to the `ubuntu-24.04` GitHub Actions CI runners, with deliberate differences noted below.
 
 ---
 
@@ -12,17 +12,20 @@ The development container is defined in [`.devcontainer/Dockerfile`](../.devcont
 - **Base image**: `ubuntu:24.04` (Noble Numbat).
 - **Core CI dependencies**: `build-essential`, `cmake`, `ninja-build`, `qt6-base-dev`, `libgl1-mesa-dev`, `libxkbcommon-dev`, `qpdf`, `poppler-utils`, `mupdf-tools`.
 - **Developer & testing additions**:
+  - `zlib1g-dev`: required for `test_redaction` (`RedactionTestSuite`) independent inflate verification (pre-installed in GitHub Actions runner VM, but omitted in bare `ubuntu:24.04` images).
   - `git`: repository tracking, hash verification, and CMake FetchContent.
   - `python3`: parity matrix and test verification scripts.
   - `gdb`: native interactive debugging inside CLion and container.
   - `clang` / `llvm`: llvm-symbolizer for AddressSanitizer and ThreadSanitizer stack traces.
   - `sudo`: passwordless administrative access for the non-root `ubuntu` user (`UID 1000`).
 
-### Security & Sandbox Options (`runArgs`)
-The rendering worker (`pdf_worker`) enforces kernel-level security isolation (Landlock ABI 1–5 and Seccomp BPF filters). To ensure sandbox tests run identically to CI runners:
-- `--security-opt seccomp=unconfined`: Docker's default seccomp profile intercepts/blocks syscalls like `landlock_create_ruleset` (syscall 444), `landlock_add_rule`, and `landlock_restrict_self`, causing fail-closed worker initialization errors. Disabling container-level seccomp allows the worker to apply its own fine-grained Seccomp BPF and Landlock filters.
-- `--cap-add=SYS_PTRACE`: Required for AddressSanitizer (ASan), ThreadSanitizer (TSan), and GDB breakpoint inspection.
-- `--shm-size=1g`: Expands shared memory (`/dev/shm`) from Docker's default 64 MiB to 1 GiB to accommodate multi-process concurrent tile rasters during test runs.
+### Deliberate Differences from GitHub Actions CI Runners
+The container environment is equivalent to CI, with these deliberate differences:
+1. **`seccomp=unconfined`**: Docker's default seccomp profile intercepts/blocks syscalls like `landlock_create_ruleset` (syscall 444), `landlock_add_rule`, and `landlock_restrict_self`, causing fail-closed worker initialization errors. Disabling container-level seccomp allows the worker to apply its own fine-grained Seccomp BPF and Landlock filters. GitHub Actions runners execute directly on host VMs without container seccomp filtering.
+2. **`--cap-add=SYS_PTRACE`**: Required for AddressSanitizer (ASan), ThreadSanitizer (TSan), and GDB breakpoint inspection in containerized environments.
+3. **`--shm-size=1g`**: Expands shared memory (`/dev/shm`) from Docker's default 64 MiB to 1 GiB to accommodate multi-process concurrent tile rasters during test runs. GitHub Actions runner VMs allocate 50% of system RAM to `/dev/shm` by default.
+4. **`setarch -R` for TSan**: On modern Linux kernels (Linux 6.6+, such as kernel 6.18 on WSL2 / Docker Desktop), high-entropy 32-bit ASLR pushes mmap allocations into regions conflicting with ThreadSanitizer's static virtual memory map (`FATAL: ThreadSanitizer: unexpected memory mapping`). Running TSan CTest under `setarch $(uname -m) -R` relaxes ASLR for the test process tree.
+5. **Host Kernel & Landlock ABI**: Inside the local Docker/WSL2 container, the host kernel is `6.18.58.1-microsoft-standard-WSL2`, which reports **Landlock ABI 7**. Stock Ubuntu 24.04 GitHub Actions runners typically run Linux kernel 6.8 (which reports Landlock ABI 3 or 4). Both satisfy the application's requirement for Landlock ABI 1–5.
 
 ### Storage & Build Directory Separation
 When running on Windows with Docker Desktop, the source code repository is mounted from the host. Build artifacts must **not** be placed directly on the Windows 9p/virtiofs mount due to high I/O latency and file locking.
@@ -72,6 +75,7 @@ CLion natively supports Dev Containers via Docker:
 3. **Leg 3: ThreadSanitizer (TSan)**:
    - Config: `-DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_TEST_HOOKS=ON -DENABLE_SANITIZERS=tsan`
    - Enforces `TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=ci/tsan_suppressions.txt`.
+   - Relaxes ASLR via `setarch $(uname -m) -R`.
    - Runs single-process suites (`EngineRenderTestSuite`, `DocumentLayoutTestSuite`, `TileCacheTestSuite`).
 4. **Leg 4: Shipping config (hooks OFF)**:
    - Config: `-DCMAKE_BUILD_TYPE=Release -DENABLE_TEST_HOOKS=OFF`
