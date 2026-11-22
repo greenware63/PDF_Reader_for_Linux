@@ -11,6 +11,7 @@
 
 #include "TestIsolation.h"
 #include "ui/PdfViewerWidget.h"
+#include "ui/ViewerTileController.h"
 #include "ui/MainWindow.h"
 #include "ui/ColorMode.h"
 #include "layout/DocumentLayout.h"
@@ -777,6 +778,178 @@ void runGroup2TileScheduling(const QString& samplePdf) {
 
         recordTest(countDisabled == countBefore,
                    "Group 2.6: setPrefetchEnabled(false) suppresses off-screen tile prefetch");
+    }
+
+    // 2.7: Retryable failed tile suppresses fallback rendering on both in-flight and re-enqueue paths
+    {
+        // Direct controller evaluation check:
+        // When a failed tile becomes retryable, both the re-enqueue path (not in flight)
+        // and the in-flight path (already in flight) must yield DrawPendingNoFallback,
+        // strictly avoiding fallback scaling and paint artifacts on retried tiles.
+        ui::ViewerTileController controller;
+        pdf::TileCache localCache(10 * 1024 * 1024);
+        const int64_t docId = viewer.currentDocumentId();
+        const auto key = pdf::TileKey::create(docId, 0, 0, 0, 2.0, 1.0, 0);
+        layout::VisibleTile t{0, 0, 0, 0, 0, 512, 512, 0, 0};
+
+        localCache.markFailed(key);
+        pump(1050); // Elapse default 1000ms backoff interval
+
+        // Re-enqueue path: key is retryable and not yet in flight
+        std::vector<pdf::TileRenderRequest> reenqueueRequests;
+        auto actionReenqueue = controller.evaluateVisibleTile(
+            key, t, 0, 0, 256, 256, docId, 0, 2.0, 1.0, 0,
+            localCache, reenqueueRequests);
+        const bool reenqueueOk = (actionReenqueue == ui::VisibleTileAction::DrawPendingNoFallback)
+            && (reenqueueRequests.size() == 1)
+            && (controller.inFlightCount() == 1);
+
+        // In-flight path: mark failed again while key is still tracked as in-flight
+        localCache.resetFailureHistory();
+        localCache.markFailed(key);
+        pump(1050); // Elapse backoff interval
+        std::vector<pdf::TileRenderRequest> inFlightRequests;
+        auto actionInFlight = controller.evaluateVisibleTile(
+            key, t, 0, 0, 256, 256, docId, 0, 2.0, 1.0, 0,
+            localCache, inFlightRequests);
+        const bool inFlightOk = (actionInFlight == ui::VisibleTileAction::DrawPendingNoFallback)
+            && inFlightRequests.empty(); // duplicate request avoided
+
+        // End-to-end widget verification:
+        // Ensure that during viewport paint of a retried tile, fallbackTilesDrawn does not increment.
+        viewer.waitForRendering();
+        viewer.setZoom(1.0);
+        viewer.waitForRendering();
+        viewer.setZoom(2.0);
+        viewer.waitForRendering();
+
+        const auto viewerKey = pdf::TileKey::create(
+            viewer.currentDocumentId(), 0, 0, 0,
+            pdf::quantizeScale(viewer.currentZoom()),
+            viewer.effectiveDpr(), viewer.rotation());
+        viewer.cache().markFailed(viewerKey);
+        pump(1050);
+
+        const size_t fbBefore = viewer.fallbackTilesDrawn();
+        QImage renderImg(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+        QPainter painter(&renderImg);
+        viewer.viewport()->render(&painter);
+        painter.end();
+        const size_t fbAfter = viewer.fallbackTilesDrawn();
+        viewer.waitForRendering();
+
+        std::string detail;
+        if (!reenqueueOk) detail += "reenqueueOk failed; ";
+        if (!inFlightOk) detail += "inFlightOk failed; ";
+        if (fbAfter != fbBefore) detail += "fbAfter != fbBefore (before=" + std::to_string(fbBefore) + " after=" + std::to_string(fbAfter) + "); ";
+        recordTest(reenqueueOk && inFlightOk && (fbAfter == fbBefore),
+                   "Group 2.7: Retryable failed tile suppresses fallback rendering on both in-flight and re-enqueue paths", detail);
+    }
+
+    // 2.8: Foreign documentId rejection, in-flight key clearance, and generation neutrality
+    {
+        ui::ViewerTileController controller;
+        pdf::TileCache localCache(10 * 1024 * 1024);
+        const int64_t currentDoc = 100;
+        const int64_t foreignDoc = 200;
+        const auto keyReady = pdf::TileKey::create(currentDoc, 0, 0, 0, 1.0, 1.0, 0);
+        const auto keyFailed = pdf::TileKey::create(currentDoc, 0, 1, 0, 1.0, 1.0, 0);
+        const auto keyMatching = pdf::TileKey::create(currentDoc, 0, 2, 0, 1.0, 1.0, 0);
+
+        // Put keys in flight
+        layout::VisibleTile vt0{0, 0, 0, 0, 0, 512, 512, 0, 0};
+        layout::VisibleTile vt1{0, 1, 0, 512, 0, 512, 512, 0, 0};
+        layout::VisibleTile vt2{0, 2, 0, 1024, 0, 512, 512, 0, 0};
+        std::vector<pdf::TileRenderRequest> reqs;
+        controller.evaluateVisibleTile(keyReady, vt0, 0, 0, 0, 0, currentDoc, 0, 1.0, 1.0, 0, localCache, reqs);
+        controller.evaluateVisibleTile(keyFailed, vt1, 0, 0, 0, 0, currentDoc, 0, 1.0, 1.0, 0, localCache, reqs);
+        controller.evaluateVisibleTile(keyMatching, vt2, 0, 0, 0, 0, currentDoc, 0, 1.0, 1.0, 0, localCache, reqs);
+        const bool allInFlightBefore = (controller.inFlightCount() == 3);
+
+        auto dummyBuf = pdf::PixelBuffer::allocate(512, 512);
+
+        // 1. handleTileReady with foreign docId:
+        // Must erase in-flight key, return false, and NOT store buffer in cache
+        const bool readyForeignHandled = controller.handleTileReady(foreignDoc, currentDoc, keyReady, dummyBuf, localCache);
+        const bool readyForeignOk = (!readyForeignHandled)
+            && (!localCache.contains(keyReady))
+            && (controller.inFlightKeys().count(keyReady) == 0);
+
+        // 2. handleTileFailed with foreign docId:
+        // Must erase in-flight key, return false, and NOT mark key as failed in cache
+        const bool failedForeignHandled = controller.handleTileFailed(foreignDoc, currentDoc, keyFailed, localCache);
+        const bool failedForeignOk = (!failedForeignHandled)
+            && (!localCache.isFailed(keyFailed))
+            && (controller.inFlightKeys().count(keyFailed) == 0);
+
+        // 3. handleTileReady with matching docId:
+        // Must erase in-flight key and store buffer in cache
+        localCache.pin(keyMatching);
+        const bool readyMatchingHandled = controller.handleTileReady(currentDoc, currentDoc, keyMatching, dummyBuf, localCache);
+        const bool readyMatchingOk = readyMatchingHandled
+            && localCache.contains(keyMatching)
+            && (controller.inFlightKeys().count(keyMatching) == 0);
+
+        // 4. Widget signal-level verification (including generation neutrality):
+        // Signal tileReady / tileFailed with foreign docId and non-zero generation.
+        // Handlers must ignore foreign events and intentionally ignore generation argument.
+        const int64_t viewerDoc = viewer.currentDocumentId();
+        const auto vKeyForeignReady = pdf::TileKey::create(viewerDoc, 0, 99, 0, 1.0, 1.0, 0);
+        const auto vKeyForeignFailed = pdf::TileKey::create(viewerDoc, 0, 98, 0, 1.0, 1.0, 0);
+        Q_EMIT viewer.renderWorker().tileReady(viewerDoc + 9999, 42, vKeyForeignReady, dummyBuf);
+        Q_EMIT viewer.renderWorker().tileFailed(viewerDoc + 9999, 42, vKeyForeignFailed);
+        pump(20);
+
+        const bool widgetIsolationOk = !viewer.cache().contains(vKeyForeignReady)
+            && !viewer.cache().isFailed(vKeyForeignFailed);
+
+        recordTest(allInFlightBefore && readyForeignOk && failedForeignOk && readyMatchingOk && widgetIsolationOk,
+                   "Group 2.8: Foreign documentId rejected, in-flight keys cleared, and generation ignored");
+    }
+
+    // 2.9: Retry deduplication prevents duplicate enqueue of in-flight failed tiles
+    {
+        ui::ViewerTileController controller;
+        pdf::TileCache localCache(10 * 1024 * 1024);
+        const int64_t docId = 42;
+        const auto key = pdf::TileKey::create(docId, 0, 0, 0, 1.0, 1.0, 0);
+        layout::VisibleTile t{0, 0, 0, 0, 0, 512, 512, 0, 0};
+
+        // Mark failed and elapse backoff so canRetry is true
+        localCache.markFailed(key);
+        pump(1050);
+
+        // First evaluation: tile is failed and retryable -> enqueues retry request and marks in-flight
+        std::vector<pdf::TileRenderRequest> requestsFirst;
+        auto actionFirst = controller.evaluateVisibleTile(
+            key, t, 0, 0, 256, 256, docId, 1, 1.0, 1.0, 0,
+            localCache, requestsFirst);
+
+        const bool firstOk = (actionFirst == ui::VisibleTileAction::DrawPendingNoFallback)
+            && (requestsFirst.size() == 1)
+            && (controller.inFlightCount() == 1);
+
+        // Now simulate the tile remaining failed while still in flight
+        localCache.resetFailureHistory();
+        localCache.markFailed(key);
+        pump(1050); // backoff elapsed again, canRetry is true
+
+        // Second evaluation while still in flight:
+        // Must NOT enqueue duplicate request to worker
+        std::vector<pdf::TileRenderRequest> requestsSecond;
+        auto actionSecond = controller.evaluateVisibleTile(
+            key, t, 0, 0, 256, 256, docId, 1, 1.0, 1.0, 0,
+            localCache, requestsSecond);
+
+        const bool secondOk = (actionSecond == ui::VisibleTileAction::DrawPendingNoFallback)
+            && requestsSecond.empty() // de-duplication: no new request pushed
+            && (controller.inFlightCount() == 1);
+
+        std::string detail;
+        if (!firstOk) detail += "firstOk failed; ";
+        if (!secondOk) detail += "secondOk failed; ";
+        recordTest(firstOk && secondOk,
+                   "Group 2.9: Retry deduplication prevents duplicate enqueue of in-flight failed tiles", detail);
     }
 }
 
