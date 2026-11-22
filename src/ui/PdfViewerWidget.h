@@ -17,6 +17,7 @@
 #include "ColorMode.h"
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
+#include "ViewerLayoutController.h"
 #include "cache/TileCache.h"
 #include "ipc/WorkerClient.h"
 #include "engine/PageText.h"
@@ -72,13 +73,13 @@ public:
     bool isEditInProgress() const noexcept { return m_editInProgress || m_recovering; }
     QString currentFilePath() const noexcept { return m_currentFilePath; }
     int pageCount() const noexcept { return m_pageCount; }
-    int currentPage() const noexcept { return m_currentPage; }
-    double currentZoom() const noexcept { return m_scale; }
+    int currentPage() const noexcept { return m_layoutController.currentPage(); }
+    double currentZoom() const noexcept { return m_layoutController.currentZoom(); }
     int64_t currentDocumentId() const noexcept { return m_currentDocumentId; }
     uint64_t currentGeneration() const noexcept { return m_currentGeneration; }
 
-    int64_t currentDocScrollX() const noexcept { return m_docScrollX; }
-    int64_t currentDocScrollY() const noexcept { return m_docScrollY; }
+    int64_t currentDocScrollX() const noexcept { return m_layoutController.currentDocScrollX(); }
+    int64_t currentDocScrollY() const noexcept { return m_layoutController.currentDocScrollY(); }
 
     void setZoom(double zoom, const QPoint* anchorWidgetPos = nullptr);
     void zoomIn();
@@ -90,10 +91,10 @@ public:
 
     /// Page arrangement: continuous, single page, two-page spreads (optionally with a stand-alone cover).
     void setViewMode(layout::ViewMode mode);
-    layout::ViewMode viewMode() const noexcept { return m_layout.viewMode(); }
+    layout::ViewMode viewMode() const noexcept { return m_layoutController.viewMode(); }
 
     /// Page rotation APIs: 0, 90, 180, 270 degrees clockwise
-    int rotation() const noexcept { return m_rotation; }
+    int rotation() const noexcept { return m_layoutController.rotation(); }
     void setRotation(int degrees);
     void rotateClockwise();
     void rotateCounterClockwise();
@@ -150,7 +151,8 @@ public:
 
     pdf::ipc::WorkerClient& renderWorker() noexcept { return m_renderWorker; }
     pdf::TileCache& cache() noexcept { return m_cache; }
-    const layout::DocumentLayout& layout() const noexcept { return m_layout; }
+    const layout::DocumentLayout& layout() const noexcept { return m_layoutController.layout(); }
+    layout::DocumentLayout& layout() noexcept { return m_layoutController.layout(); }
     size_t inFlightCount() const noexcept { return m_inFlightKeys.size(); }
     size_t transformedCacheSize() const noexcept { return m_transformedPixmapCache.size(); }
 
@@ -349,8 +351,8 @@ private:
     void goToPageImpl(int pageIndex, std::optional<double> targetYFraction);
     /// SinglePage mode: makes `pageIndex` the focus page (relayout) so it is reachable. No-op otherwise.
     void ensurePageShown(int pageIndex);
-    /// Page-flip accumulator for wheel scrolling past the edge in SinglePage mode.
-    int m_pageFlipAccumulator{0};
+    ViewportGeometry currentViewportGeometry() const;
+    void applyLayoutResult(const LayoutChangeResult& result);
 
     void drawErrorPlaceholder(QPainter& painter, const QRectF& rect);
     void drawPendingPlaceholder(QPainter& painter, const QRectF& rect);
@@ -371,8 +373,7 @@ private:
     void startAsyncOpen(const QString& filePath, const QString& password);
     void cancelPendingOpen();
 
-    layout::DocumentLayout m_layout;
-    layout::ScrollMapper m_scrollMapper;
+    ViewerLayoutController m_layoutController;
     pdf::TileCache m_cache;
     pdf::ipc::WorkerClient m_renderWorker;
 
@@ -390,18 +391,11 @@ private:
     int m_pageCount{0};
     int64_t m_currentDocumentId{1};
     uint64_t m_currentGeneration{1};
-    int m_currentPage{0};
-    double m_scale{DESKTOP_100_PERCENT_SCALE};
     double m_dprOverride{0.0};
-    bool m_navigating{false};
     int m_wheelDeltaAccumulator{0};
 
     // Tracks tile requests currently in-flight on the worker to prevent duplicate enqueues
     std::unordered_set<pdf::TileKey, pdf::TileKeyHash> m_inFlightKeys;
-
-    // Primary 64-bit document coordinates, immune to 32-bit slider resize quantization
-    int64_t m_docScrollX{0};
-    int64_t m_docScrollY{0};
 
     // Recently used zoom scales (newest first, quantized); their cached tiles serve as scaled stand-ins
     // while tiles for the current zoom are still rendering.
@@ -412,10 +406,6 @@ private:
     // Off-screen prefetch ring (one viewport height above and below the visible area)
     bool m_prefetchEnabled{true};
     size_t m_prefetchRequestsIssued{0};
-
-    // Cached previous viewport dimensions to anchor precisely during resizes
-    int64_t m_lastVpWidthDevice{0};
-    int64_t m_lastVpHeightDevice{0};
 
     // Text layer and selection
     std::unordered_map<int, std::shared_ptr<pdf::PageText>> m_pageTextCache;
@@ -441,7 +431,6 @@ private:
     // Color mode / dark mode / night inversion state
     ColorMode m_colorMode{ColorMode::Normal};
     bool m_darkMode{false};
-    int m_rotation{0};
     mutable std::unordered_map<pdf::TileKey, QPixmap, pdf::TileKeyHash> m_transformedPixmapCache;
     // Redaction state
     bool m_redactionMode{false};
