@@ -285,6 +285,291 @@ void generateSearchPdf(const std::string& path) {
     out.write(pdf.data(), static_cast<std::streamsize>(pdf.size()));
 }
 
+void generateMultiPageTextPdf(const std::string& path, int count = 60) {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [";
+    for (int i = 0; i < count; ++i) {
+        pdf += std::to_string(3 + i) + " 0 R ";
+    }
+    pdf += "] /Count " + std::to_string(count) + " >>\nendobj\n";
+
+    const int fontObj = 3 + count;
+    const int firstContentObj = fontObj + 1;
+
+    for (int i = 0; i < count; ++i) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(3 + i) + " 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 "
+            + std::to_string(fontObj) + " 0 R >> >> /Contents "
+            + std::to_string(firstContentObj + i) + " 0 R >>\nendobj\n";
+    }
+
+    offsets.push_back(pdf.size());
+    pdf += std::to_string(fontObj) + " 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+
+    for (int i = 0; i < count; ++i) {
+        std::string text = "Page " + std::to_string(i) + " text line content";
+        std::string stream = "BT\n/F1 18 Tf\n100 700 Td\n(" + text + ") Tj\nET\n";
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(firstContentObj + i) + " 0 obj\n<< /Length " + std::to_string(stream.size()) + " >>\nstream\n" + stream + "\nendstream\nendobj\n";
+    }
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size " + std::to_string(offsets.size() + 1) + " /Root 1 0 R >>\n";
+    pdf += "startxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), static_cast<std::streamsize>(pdf.size()));
+}
+
+void generateCircularSearchPdf(const std::string& path) {
+    // 5 pages where "CircularKey" appears only on page 0 and page 3
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R] /Count 5 >>\nendobj\n";
+
+    for (int i = 0; i < 5; ++i) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(3 + i) + " 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 8 0 R >> >> /Contents "
+            + std::to_string(9 + i) + " 0 R >>\nendobj\n";
+    }
+
+    offsets.push_back(pdf.size());
+    pdf += "8 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+
+    const std::string contents[5] = {
+        "BT\n/F1 18 Tf\n100 700 Td\n(Page zero CircularKey match) Tj\nET\n",
+        "BT\n/F1 18 Tf\n100 700 Td\n(Page one plain content) Tj\nET\n",
+        "BT\n/F1 18 Tf\n100 700 Td\n(Page two plain content) Tj\nET\n",
+        "BT\n/F1 18 Tf\n100 700 Td\n(Page three CircularKey match) Tj\nET\n",
+        "BT\n/F1 18 Tf\n100 700 Td\n(Page four plain content) Tj\nET\n"
+    };
+
+    for (int i = 0; i < 5; ++i) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(9 + i) + " 0 obj\n<< /Length " + std::to_string(contents[i].size()) + " >>\nstream\n" + contents[i] + "\nendstream\nendobj\n";
+    }
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 15\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 15 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), static_cast<std::streamsize>(pdf.size()));
+}
+
+void generateMixedCaseSearchPdf(const std::string& path) {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>\nendobj\n";
+
+    for (int i = 0; i < 3; ++i) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(3 + i) + " 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 6 0 R >> >> /Contents "
+            + std::to_string(7 + i) + " 0 R >>\nendobj\n";
+    }
+
+    offsets.push_back(pdf.size());
+    pdf += "6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+
+    const std::string contents[3] = {
+        "BT\n/F1 18 Tf\n100 700 Td\n(MixedCase TargetKeyword upper) Tj\nET\n",
+        "BT\n/F1 18 Tf\n100 700 Td\n(MixedCase targetkeyword lower) Tj\nET\n",
+        "BT\n/F1 18 Tf\n100 700 Td\n(MixedCase TargetKeyword upper) Tj\nET\n"
+    };
+
+    for (int i = 0; i < 3; ++i) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(7 + i) + " 0 obj\n<< /Length " + std::to_string(contents[i].size()) + " >>\nstream\n" + contents[i] + "\nendstream\nendobj\n";
+    }
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 10\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), static_cast<std::streamsize>(pdf.size()));
+}
+
+void generateThreePageTextPdf(const std::string& path, const std::string& t0, const std::string& t1, const std::string& t2) {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>\nendobj\n";
+
+    for (int i = 0; i < 3; ++i) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(3 + i) + " 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 6 0 R >> >> /Contents "
+            + std::to_string(7 + i) + " 0 R >>\nendobj\n";
+    }
+
+    offsets.push_back(pdf.size());
+    pdf += "6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+
+    const std::string contents[3] = {
+        "BT\n/F1 18 Tf\n100 700 Td\n(" + t0 + ") Tj\nET\n",
+        "BT\n/F1 18 Tf\n100 700 Td\n(" + t1 + ") Tj\nET\n",
+        "BT\n/F1 18 Tf\n100 700 Td\n(" + t2 + ") Tj\nET\n"
+    };
+
+    for (int i = 0; i < 3; ++i) {
+        offsets.push_back(pdf.size());
+        pdf += std::to_string(7 + i) + " 0 obj\n<< /Length " + std::to_string(contents[i].size()) + " >>\nstream\n" + contents[i] + "\nendstream\nendobj\n";
+    }
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 10\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), static_cast<std::streamsize>(pdf.size()));
+}
+
+void generatePersianPdfFixture(const std::string& path) {
+    std::string cmap =
+        "/CIDInit /ProcSet findresource begin\n"
+        "12 dict begin\n"
+        "begincmap\n"
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        "/CMapName /Custom-Persian-ToUnicode def\n"
+        "/CMapType 2 def\n"
+        "1 begincodespacerange\n"
+        "<0000> <FFFF>\n"
+        "endcodespacerange\n"
+        "9 beginbfchar\n"
+        "<0001> <0646>\n"
+        "<0002> <0627>\n"
+        "<0003> <0647>\n"
+        "<0004> <062C>\n"
+        "<0005> <0020>\n"
+        "<0006> <0645>\n"
+        "<0007> <0627>\n"
+        "<0008> <0644>\n"
+        "<0009> <0633>\n"
+        "endbfchar\n"
+        "endcmap\n"
+        "CMapName currentdict /CMap defineresource pop\n"
+        "end\n"
+        "end\n";
+
+    std::string contentStream =
+        "BT\n"
+        "/F1 20 Tf\n"
+        "100 700 Td\n"
+        "<000100020003000400050006000700080009> Tj\n"
+        "ET\n";
+
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 8 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Helvetica-Custom /Encoding /Identity-H /DescendantFonts [5 0 R] /ToUnicode 7 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "5 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Helvetica-Custom /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 6 0 R /DW 1000 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "6 0 obj\n<< /Type /FontDescriptor /FontName /Helvetica-Custom /Flags 4 /FontBBox [-500 -500 2000 2000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "7 0 obj\n<< /Length " + std::to_string(cmap.size()) + " >>\nstream\n" + cmap + "\nendstream\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "8 0 obj\n<< /Length " + std::to_string(contentStream.size()) + " >>\nstream\n" + contentStream + "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 9\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), static_cast<std::streamsize>(pdf.size()));
+}
+
+inline std::shared_ptr<pdf::PageText> makeDummyPageText(int pageIndex, const std::string& str) {
+    auto pt = std::make_shared<pdf::PageText>();
+    pt->pageIndex = pageIndex;
+    pt->widthPoints = 595.0;
+    pt->heightPoints = 842.0;
+    pt->text = std::u16string(str.begin(), str.end());
+    double curX = 100.0;
+    double curY = 100.0;
+    for (char c : str) {
+        pdf::PageCharBox b;
+        b.left = curX;
+        b.top = curY;
+        b.right = curX + 10.0;
+        b.bottom = curY + 15.0;
+        b.unicode = static_cast<char32_t>(c);
+        pt->chars.push_back(b);
+        curX += 10.0;
+    }
+    return pt;
+}
+
 } // namespace
 
 // ======================================================================
@@ -1126,6 +1411,745 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
 
         recordTest(matchIgnored && progressIgnored && completedIgnored,
                    "Group 3.6: Stale search replies from superseded query are rejected by searchId filter");
+    }
+
+    // 3.7: Text cache bounds, retention, LRU distance eviction, foreign ID isolation, and deduplication
+    {
+        QTemporaryDir dir37;
+        const QString doc60 = dir37.path() + "/doc60.pdf";
+        generateMultiPageTextPdf(doc60.toStdString(), 60);
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 700);
+        viewer.show();
+        viewer.ensurePolished();
+        pump(100);
+
+        viewer.openDocument(doc60);
+        viewer.waitForRendering();
+        pump(200);
+
+        const int64_t docId = viewer.currentDocumentId();
+
+        // 1. S11: In-flight deduplication: ensure page requested twice before reply sends one request
+        int page58ReadyCount = 0;
+        const auto conn58 = QObject::connect(&viewer.renderWorker(), &pdf::ipc::WorkerClient::pageTextReady,
+            [&](int64_t /*dId*/, int pageIdx, std::shared_ptr<pdf::PageText>) {
+                if (pageIdx == 58) {
+                    ++page58ReadyCount;
+                }
+            });
+
+        viewer.goToPage(58);
+        QImage frame1(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+        QPainter p1(&frame1);
+        viewer.viewport()->render(&p1);
+        p1.end();
+        const size_t inFlightCount1 = viewer.cachedTextPageCount();
+        const bool entryInFlight = (viewer.getPageText(58) == nullptr);
+
+        QImage frame2(viewer.viewport()->width(), viewer.viewport()->height(), QImage::Format_ARGB32);
+        QPainter p2(&frame2);
+        viewer.viewport()->render(&p2);
+        p2.end();
+        const size_t inFlightCount2 = viewer.cachedTextPageCount();
+
+        viewer.waitForRendering();
+        waitFor([&]() { return viewer.getPageText(58) != nullptr; }, 4000);
+        QObject::disconnect(conn58);
+
+        const bool page58Delivered = (viewer.getPageText(58) != nullptr);
+        const bool deduplicatedInFlight = (inFlightCount2 == inFlightCount1) && entryInFlight && (page58ReadyCount == 1);
+
+        // 2. S4: Foreign documentId ignored
+        const auto foreignPt = makeDummyPageText(59, "ForeignText");
+        Q_EMIT viewer.renderWorker().pageTextReady(docId + 9999, 59, foreignPt);
+        pump(50);
+        const bool foreignIgnored = (viewer.getPageText(59) == nullptr);
+
+        // 3. S5: Null PageText becomes empty PageText, never null entry
+        Q_EMIT viewer.renderWorker().pageTextReady(docId, 57, nullptr);
+        pump(50);
+        const auto pt57 = viewer.getPageText(57);
+        const bool nullBecomesEmpty = (pt57 != nullptr) && pt57->empty();
+
+        // Populate exactly 48 pages (pages 0 through 47):
+        viewer.goToPage(0);
+        pump(50);
+        for (int i = 0; i < 48; ++i) {
+            Q_EMIT viewer.renderWorker().pageTextReady(docId, i, makeDummyPageText(i, "Page " + std::to_string(i)));
+        }
+        pump(50);
+        const size_t countAt48 = viewer.cachedTextPageCount();
+        const bool page0RetainedAt48 = (viewer.getPageText(0) != nullptr);
+
+        // Focus on page 48 before adding the 49th page so distance to page 0 is largest (|0 - 48| = 48) and distance to page 47 is smallest (|47 - 48| = 1)
+        viewer.goToPage(48);
+        pump(50);
+
+        // 4. S1: Exact boundary 48 is not trimmed; delivering the 49th page triggers trim back to 48
+        Q_EMIT viewer.renderWorker().pageTextReady(docId, 48, makeDummyPageText(48, "Page 48"));
+        pump(50);
+        const size_t countAt49 = viewer.cachedTextPageCount();
+
+        // 5. S3: Eviction removes farthest from currentPage (48) first
+        // Current page is 48. Farthest is page 0 (|0 - 48| = 48); nearest is page 47 (|47 - 48| = 1).
+        const bool farthestEvicted = (viewer.getPageText(0) == nullptr)
+            && (viewer.getPageText(47) != nullptr)
+            && (viewer.getPageText(48) != nullptr);
+
+        // 6. S2: Cross-page selection keeps its pages' text after trimming
+        // Zoom out to 0.1 so pages 1 and 2 are fully inside the viewport for selection
+        viewer.setZoom(0.1);
+        viewer.goToPage(0);
+        pump(100);
+
+        const auto pt1 = viewer.getPageText(1);
+        const auto pt2 = viewer.getPageText(2);
+        bool selKeptAfterTrim = false;
+        if (pt1 && pt2 && !pt1->chars.empty() && !pt2->chars.empty()) {
+            const auto& pl1 = viewer.layout().getPageLayout(1);
+            const auto& pl2 = viewer.layout().getPageLayout(2);
+            const double dpr = viewer.effectiveDpr();
+            const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+            const auto& b1 = pt1->chars[0];
+            const double vp1X = (static_cast<double>(pl1.leftPixel) + ((b1.left + b1.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+            const double vp1Y = (static_cast<double>(pl1.topPixel) + ((b1.top + b1.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+
+            const auto& b2 = pt2->chars[std::min<size_t>(5, pt2->chars.size() - 1)];
+            const double vp2X = (static_cast<double>(pl2.leftPixel) + ((b2.left + b2.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+            const double vp2Y = (static_cast<double>(pl2.topPixel) + ((b2.top + b2.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+
+            QMouseEvent press(QEvent::MouseButtonPress, QPointF(vp1X, vp1Y), QPointF(vp1X, vp1Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &press);
+            pump(20);
+            QMouseEvent move(QEvent::MouseMove, QPointF(vp2X, vp2Y), QPointF(vp2X, vp2Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &move);
+            pump(20);
+            QMouseEvent release(QEvent::MouseButtonRelease, QPointF(vp2X, vp2Y), QPointF(vp2X, vp2Y), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &release);
+            pump(50);
+
+            const QString selTextBefore = viewer.selectedText();
+
+            // Navigate to page 50 and force evictions
+            viewer.goToPage(50);
+            for (int p = 49; p <= 55; ++p) {
+                Q_EMIT viewer.renderWorker().pageTextReady(docId, p, makeDummyPageText(p, "Page " + std::to_string(p)));
+            }
+            pump(50);
+
+            const bool pages1And2Kept = (viewer.getPageText(1) != nullptr) && (viewer.getPageText(2) != nullptr);
+            const bool textUnchanged = (viewer.selectedText() == selTextBefore) && !selTextBefore.isEmpty();
+            selKeptAfterTrim = pages1And2Kept && textUnchanged;
+        }
+
+        const bool group3_7Ok = (countAt48 == 48) && page0RetainedAt48 && (countAt49 == 48)
+            && selKeptAfterTrim && farthestEvicted && foreignIgnored && nullBecomesEmpty
+            && deduplicatedInFlight && page58Delivered;
+
+        std::string d37 = "count48=" + std::to_string(countAt48)
+            + " p0Ret=" + std::to_string(page0RetainedAt48)
+            + " count49=" + std::to_string(countAt49)
+            + " selKept=" + std::to_string(selKeptAfterTrim)
+            + " farthest=" + std::to_string(farthestEvicted)
+            + " foreign=" + std::to_string(foreignIgnored)
+            + " nullEmpty=" + std::to_string(nullBecomesEmpty)
+            + " dedup=" + std::to_string(deduplicatedInFlight)
+            + " p58Deliv=" + std::to_string(page58Delivered);
+
+        recordTest(group3_7Ok,
+                   "Group 3.7: Text cache bounded at 48, selection protected during trim, LRU distance eviction, and foreign/null isolation",
+                   d37);
+    }
+
+    // 3.8: Selection semantics, forward/backward/cross-page extraction, non-ASCII/Persian, click rejection, and highlight rendering
+    {
+        QTemporaryDir dir38;
+        const QString doc3Path = dir38.path() + "/fixture_3page.pdf";
+        const QString persianPath = dir38.path() + "/fixture_persian.pdf";
+
+        generateThreePageTextPdf(doc3Path.toStdString(), "AAA BBB CCC", "DDD EEE FFF", "GGG HHH III");
+        generatePersianPdfFixture(persianPath.toStdString());
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(900, 700);
+        viewer.show();
+        viewer.ensurePolished();
+        pump(100);
+
+        viewer.openDocument(doc3Path);
+        viewer.waitForRendering();
+        pump(200);
+
+        // Zoom out to 0.2 so all three pages are simultaneously visible in viewport (each ~170px high)
+        viewer.setZoom(0.2);
+        viewer.goToPage(0);
+        viewer.waitForRendering();
+        pump(100);
+
+        waitFor([&]() {
+            return viewer.getPageText(0) && viewer.getPageText(1) && viewer.getPageText(2);
+        }, 5000);
+
+        const auto pt0 = viewer.getPageText(0);
+        const auto pt1 = viewer.getPageText(1);
+        const auto pt2 = viewer.getPageText(2);
+
+        bool selectionsOk = false;
+        QString forwardSel, backwardSel, backwardCrossSel, threePageSel;
+        bool forwardOk = false, backwardOk = false, backwardCrossOk = false, threePageOk = false;
+        bool noSelectionAfterClick = false, noSignalAfterClick = false, clearNoSelEmitsNothing = false;
+        bool insidePixelShifted = false, outsidePixelUnchanged = false;
+
+        if (pt0 && pt1 && pt2 && pt0->charCount() >= 11 && pt1->charCount() >= 11 && pt2->charCount() >= 11) {
+            const auto& pl0 = viewer.layout().getPageLayout(0);
+            const auto& pl1 = viewer.layout().getPageLayout(1);
+            const auto& pl2 = viewer.layout().getPageLayout(2);
+            const double dpr = viewer.effectiveDpr();
+            const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+            auto charCenter = [&](const layout::PageLayout& pl, const pdf::PageCharBox& b) -> QPointF {
+                double x = (static_cast<double>(pl.leftPixel) + ((b.left + b.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+                double y = (static_cast<double>(pl.topPixel) + ((b.top + b.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+                return QPointF(x, y);
+            };
+
+            auto sendDrag = [&](const QPointF& from, const QPointF& to) {
+                QMouseEvent p(QEvent::MouseButtonPress, from, from, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &p);
+                pump(20);
+                QMouseEvent m(QEvent::MouseMove, to, to, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &m);
+                pump(20);
+                QMouseEvent r(QEvent::MouseButtonRelease, to, to, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &r);
+                pump(50);
+            };
+
+            // 1. S6, S7, S8: Forward selection within page: "BBB" (chars 4..6)
+            sendDrag(charCenter(pl0, pt0->chars[4]), charCenter(pl0, pt0->chars[6]));
+            forwardSel = viewer.selectedText();
+            forwardOk = (forwardSel == "BBB");
+
+            // 2. S7: Backward selection within page: drag right-to-left from char 6 to char 4 -> "BBB"
+            sendDrag(charCenter(pl0, pt0->chars[6]), charCenter(pl0, pt0->chars[4]));
+            backwardSel = viewer.selectedText();
+            backwardOk = (backwardSel == "BBB");
+
+            // 3. S7: Backward cross-page selection: drag from page 1 char 2 ("D") to page 0 char 4 ("B")
+            sendDrag(charCenter(pl1, pt1->chars[2]), charCenter(pl0, pt0->chars[4]));
+            backwardCrossSel = viewer.selectedText();
+            backwardCrossOk = (backwardCrossSel == "BBB CCC\nDDD");
+
+            // 4. S6, S8: Three-page selection with whole middle page and newline joins, including clipboard copy
+            sendDrag(charCenter(pl0, pt0->chars[4]), charCenter(pl2, pt2->chars[6]));
+            threePageSel = viewer.selectedText();
+            viewer.copySelection();
+            const QString threePageClipboard = QGuiApplication::clipboard()->text();
+            threePageOk = (threePageSel == "BBB CCC\nDDD EEE FFF\nGGG HHH") &&
+                          (threePageClipboard == "BBB CCC\nDDD EEE FFF\nGGG HHH");
+
+            // 5. S9: Click on same character is NOT a selection: hasSelection() is false and clearSelection emits nothing
+            viewer.clearSelection();
+            pump(20);
+            const QPointF cChar = charCenter(pl0, pt0->chars[4]);
+            QMouseEvent press0(QEvent::MouseButtonPress, cChar, cChar, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &press0);
+            pump(20);
+            QMouseEvent release0(QEvent::MouseButtonRelease, cChar, cChar, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &release0);
+            pump(50);
+
+            noSelectionAfterClick = !viewer.hasSelection() && viewer.selectedText().isEmpty();
+            SignalCounter spySelAfterClick(&viewer, &ui::PdfViewerWidget::selectionChanged);
+            viewer.clearSelection();
+            noSignalAfterClick = (spySelAfterClick.count() == 0);
+
+            // 6. S10: clearSelection with no selection emits nothing
+            SignalCounter spyNoSel(&viewer, &ui::PdfViewerWidget::selectionChanged);
+            viewer.clearSelection();
+            clearNoSelEmitsNothing = (spyNoSel.count() == 0);
+
+            // 7. S12: Grab viewport with and without selection and verify highlight pixel shift
+            viewer.clearSelection();
+            pump(50);
+            QImage imgNoSel(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+            {
+                QPainter p(&imgNoSel);
+                viewer.viewport()->render(&p);
+            }
+
+            // Select char 0 and 1
+            sendDrag(charCenter(pl0, pt0->chars[0]), charCenter(pl0, pt0->chars[1]));
+
+            QImage imgWithSel(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+            {
+                QPainter p(&imgWithSel);
+                viewer.viewport()->render(&p);
+            }
+
+            const QPoint ptInChar = charCenter(pl0, pt0->chars[0]).toPoint();
+            const QColor colNoSel = imgNoSel.pixelColor(ptInChar);
+            const QColor colWithSel = imgWithSel.pixelColor(ptInChar);
+
+            insidePixelShifted = (colWithSel != colNoSel) && (colWithSel.blue() >= colNoSel.blue());
+            outsidePixelUnchanged = (imgNoSel.pixelColor(5, 5) == imgWithSel.pixelColor(5, 5));
+
+            selectionsOk = forwardOk && backwardOk && backwardCrossOk && threePageOk
+                && noSelectionAfterClick && noSignalAfterClick && clearNoSelEmitsNothing
+                && insidePixelShifted && outsidePixelUnchanged;
+        }
+
+        // 8. S7: Persian / Non-ASCII text selection and clipboard copy
+        bool persianOk = false;
+        QString selPersian, clipPersian;
+        viewer.openDocument(persianPath);
+        viewer.waitForRendering();
+        pump(200);
+
+        viewer.setZoom(0.2);
+        viewer.goToPage(0);
+        viewer.waitForRendering();
+        pump(100);
+
+        waitFor([&]() { return viewer.getPageText(0) != nullptr; }, 5000);
+        const auto ptPersian = viewer.getPageText(0);
+        if (ptPersian && !ptPersian->chars.empty()) {
+            const auto& plP = viewer.layout().getPageLayout(0);
+            const double dpr = viewer.effectiveDpr();
+            const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+            const auto& firstChar = ptPersian->chars.front();
+            const auto& lastChar = ptPersian->chars.back();
+
+            double p0X = (static_cast<double>(plP.leftPixel) + ((firstChar.left + firstChar.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+            double p0Y = (static_cast<double>(plP.topPixel) + ((firstChar.top + firstChar.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+            double p1X = (static_cast<double>(plP.leftPixel) + ((lastChar.left + lastChar.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+            double p1Y = (static_cast<double>(plP.topPixel) + ((lastChar.top + lastChar.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+
+            QMouseEvent pressP(QEvent::MouseButtonPress, QPointF(p0X, p0Y), QPointF(p0X, p0Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &pressP);
+            pump(20);
+            QMouseEvent moveP(QEvent::MouseMove, QPointF(p1X, p1Y), QPointF(p1X, p1Y), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &moveP);
+            pump(20);
+            QMouseEvent releaseP(QEvent::MouseButtonRelease, QPointF(p1X, p1Y), QPointF(p1X, p1Y), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &releaseP);
+            pump(50);
+
+            const QString expectedPersian = QString::fromUtf16(u"\u0633\u0644\u0627\u0645 \u062c\u0647\u0627\u0646");
+            selPersian = viewer.selectedText();
+            viewer.copySelection();
+            clipPersian = QGuiApplication::clipboard()->text();
+
+            persianOk = (selPersian == expectedPersian) && (clipPersian == expectedPersian);
+        }
+
+        std::string charsHex;
+        if (ptPersian) {
+            for (const auto& ch : ptPersian->chars) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%04X ", static_cast<unsigned int>(ch.unicode));
+                charsHex += buf;
+            }
+        }
+
+        std::string d38 = "fwd=" + std::to_string(forwardOk) + " (" + forwardSel.toStdString() + ")"
+            + " bwd=" + std::to_string(backwardOk) + " (" + backwardSel.toStdString() + ")"
+            + " bwdCross=" + std::to_string(backwardCrossOk) + " (" + backwardCrossSel.toStdString() + ")"
+            + " three=" + std::to_string(threePageOk) + " (" + threePageSel.toStdString() + ")"
+            + " clickNoSel=" + std::to_string(noSelectionAfterClick)
+            + " clickNoSig=" + std::to_string(noSignalAfterClick)
+            + " clearNoSig=" + std::to_string(clearNoSelEmitsNothing)
+            + " pixShift=" + std::to_string(insidePixelShifted)
+            + " pixUnchanged=" + std::to_string(outsidePixelUnchanged)
+            + " persian=" + std::to_string(persianOk)
+            + " (sel=[" + selPersian.toStdString() + "]"
+            + " clip=[" + clipPersian.toStdString() + "]"
+            + " hasSel=" + std::to_string(viewer.hasSelection())
+            + " charsHex=" + charsHex + ")";
+
+        recordTest(selectionsOk && persianOk,
+                   "Group 3.8: Selection forward/backward/multipage text, non-ASCII/Persian clipboard, click rejection, and pixel highlight",
+                   d38);
+    }
+
+    // 3.9: Search circular distance, batch ordering, match caps, foreign ID isolation, wrap-around, and query trimming
+    {
+        QTemporaryDir dir39;
+        const QString circPath = dir39.path() + "/fixture_circ.pdf";
+        const QString mixedPath = dir39.path() + "/fixture_mixed.pdf";
+        generateCircularSearchPdf(circPath.toStdString());
+        generateMixedCaseSearchPdf(mixedPath.toStdString());
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 700);
+        viewer.show();
+        viewer.ensurePolished();
+        pump(100);
+
+        // Assumption: A fresh PdfViewerWidget has searchId == 1 after openDocument (which calls clearSearch),
+        // and the id increments by one per findText or clearSearch call.
+        int64_t currentSearchId = 0;
+
+        // 1. Q2, Q9: Circular-nearest match from page 4 (keyword on pages 0 and 3), and start page nearest after k
+        viewer.openDocument(circPath); // clearSearch() -> searchId = 1
+        currentSearchId = 1;
+        viewer.waitForRendering();
+        pump(200);
+
+        const int64_t docId = viewer.currentDocumentId();
+
+        pdf::SearchMatch mCircP0;
+        mCircP0.pageIndex = 0;
+        mCircP0.charStartIndex = 10;
+        mCircP0.charCount = 11;
+        mCircP0.rects = { pdf::PageCharBox{100.0, 700.0, 200.0, 720.0} };
+
+        pdf::SearchMatch mCircP3;
+        mCircP3.pageIndex = 3;
+        mCircP3.charStartIndex = 12;
+        mCircP3.charCount = 11;
+        mCircP3.rects = { pdf::PageCharBox{100.0, 700.0, 200.0, 720.0} };
+
+        // Q9: With matches only on pages 0 and 3, searching from page 4 (after all matches)
+        // uses circular distance: dist to page 0 is (0 - 4 + 5) % 5 = 1, dist to page 3 is (3 - 4 + 5) % 5 = 4.
+        // Circular wrap picks the first match (page 0), whereas linear distance would pick page 3.
+        viewer.goToPage(4);
+        viewer.findText("CircWrapTest"); // findText -> searchId = 2
+        ++currentSearchId;
+        const int64_t wrapSearchId = currentSearchId;
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, wrapSearchId, 0, {mCircP0, mCircP3});
+        pump(50);
+        const bool circularMatchOk = (viewer.searchMatchCount() == 2)
+            && (viewer.currentSearchMatchIndex() == 0); // index 0 is page 0
+
+        // Q2: With current page at k = 2, findText picks the match nearest after k (page 3, distance 1),
+        // not the one nearest page 0 (which would be page 0, distance 0).
+        viewer.clearSearch(); // clearSearch -> searchId = 3
+        ++currentSearchId;
+        viewer.goToPage(2);
+        viewer.findText("KStartTest"); // findText -> searchId = 4
+        ++currentSearchId;
+        const int64_t kSearchId = currentSearchId;
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, kSearchId, 0, {mCircP0, mCircP3});
+        pump(50);
+        const bool startPageKOk = (viewer.searchMatchCount() == 2)
+            && (viewer.currentSearchMatchIndex() == 1); // index 1 is page 3
+
+        // 2. Q16: findText("   ") behaves as empty (emits (0,0), (0,0), finished(false), starts no worker search)
+        SignalRecorder<int, int> spyResEmpty(&viewer, &ui::PdfViewerWidget::searchResultsChanged);
+        SignalRecorder<int, int> spyProgEmpty(&viewer, &ui::PdfViewerWidget::searchProgressChanged);
+        SignalRecorder<bool> spyFinEmpty(&viewer, &ui::PdfViewerWidget::searchFinished);
+        viewer.findText("   "); // findText -> searchId = 3
+        ++currentSearchId;
+        pump(50);
+        const bool emptyQueryOk = (viewer.searchMatchCount() == 0)
+            && (spyResEmpty.count() == 1 && std::get<0>(spyResEmpty.at(0)) == 0 && std::get<1>(spyResEmpty.at(0)) == 0)
+            && (spyProgEmpty.count() == 1 && std::get<0>(spyProgEmpty.at(0)) == 0 && std::get<1>(spyProgEmpty.at(0)) == 0)
+            && (spyFinEmpty.count() == 1 && std::get<0>(spyFinEmpty.at(0)) == false);
+
+        // 3. Q18, Q19: findText emits searchProgressChanged(0, pageCount) first, and truncated searchFinished(true)
+        SignalRecorder<int, int> spyProgOrder(&viewer, &ui::PdfViewerWidget::searchProgressChanged);
+        viewer.findText("TruncationCheck"); // findText -> searchId = 4
+        ++currentSearchId;
+        const bool progress0Emitted = (spyProgOrder.count() > 0)
+            && (std::get<0>(spyProgOrder.at(0)) == 0)
+            && (std::get<1>(spyProgOrder.at(0)) == viewer.pageCount());
+
+        viewer.clearSearch(); // clearSearch -> searchId = 5
+        ++currentSearchId;
+        viewer.findText("SyntheticTruncQuery"); // findText -> searchId = 6
+        ++currentSearchId;
+        SignalRecorder<bool> spyFinTrunc(&viewer, &ui::PdfViewerWidget::searchFinished);
+        Q_EMIT viewer.renderWorker().searchCompleted(docId, currentSearchId, 2, /*truncated=*/true);
+        pump(50);
+        const bool truncatedFinishedOk = (spyFinTrunc.count() > 0) && (std::get<0>(spyFinTrunc.at(0)) == true);
+
+        // 4. Q6, Q7, Q8: Out-of-order batches sorted by page then charStartIndex, and active match tracking
+        viewer.clearSearch(); // clearSearch -> searchId = 7
+        ++currentSearchId;
+        viewer.findText("BatchTest"); // findText -> searchId = 8
+        ++currentSearchId;
+        const int64_t batchSearchId = currentSearchId;
+
+        pdf::SearchMatch mP2C50; mP2C50.pageIndex = 2; mP2C50.charStartIndex = 50; mP2C50.charCount = 5;
+        pdf::SearchMatch mP0C20; mP0C20.pageIndex = 0; mP0C20.charStartIndex = 20; mP0C20.charCount = 5;
+        pdf::SearchMatch mP1C10; mP1C10.pageIndex = 1; mP1C10.charStartIndex = 10; mP1C10.charCount = 5;
+        pdf::SearchMatch mP0C5;  mP0C5.pageIndex = 0;  mP0C5.charStartIndex = 5;   mP0C5.charCount = 5;
+
+        // Deliver batch 1: [ (2, 50), (0, 20) ]
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, batchSearchId, 0, {mP2C50, mP0C20});
+        pump(50);
+
+        viewer.goToSearchMatch(1); // Select (2, 50)
+        pump(20);
+        const int activeBeforeBatch2 = viewer.currentSearchMatchIndex();
+
+        // Deliver batch 2: [ (1, 10), (0, 5) ]
+        // After sorting: (0, 5) -> index 0, (0, 20) -> index 1, (1, 10) -> index 2, (2, 50) -> index 3
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, batchSearchId, 0, {mP1C10, mP0C5});
+        pump(50);
+
+        const int activeAfterBatch2 = viewer.currentSearchMatchIndex();
+        const bool batchSortAndActiveOk = (viewer.searchMatchCount() == 4)
+            && (activeBeforeBatch2 == 1)
+            && (activeAfterBatch2 == 3);
+
+        // 5. Q3, Q4: findNext and findPrevious wrap around
+        viewer.goToSearchMatch(3);
+        viewer.findNext();
+        pump(20);
+        const bool wrapNextOk = (viewer.currentSearchMatchIndex() == 0);
+
+        viewer.findPrevious();
+        pump(20);
+        const bool wrapPrevOk = (viewer.currentSearchMatchIndex() == 3);
+
+        // 6. Q5, Q10: Cap at pdf::MAX_SEARCH_MATCHES (10000)
+        viewer.clearSearch(); // clearSearch -> searchId = 9
+        ++currentSearchId;
+        viewer.findText("CapTest"); // findText -> searchId = 10
+        ++currentSearchId;
+        const int64_t capSearchId = currentSearchId;
+        std::vector<pdf::SearchMatch> largeBatch(10005);
+        for (size_t i = 0; i < 10005; ++i) {
+            largeBatch[i].pageIndex = static_cast<int>(i / 1000);
+            largeBatch[i].charStartIndex = static_cast<int>(i % 1000);
+            largeBatch[i].charCount = 3;
+        }
+
+        SignalRecorder<int, int> spyCapResults(&viewer, &ui::PdfViewerWidget::searchResultsChanged);
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, capSearchId, 0, largeBatch);
+        pump(50);
+        Q_EMIT viewer.renderWorker().searchCompleted(docId, capSearchId, 10005, false);
+        pump(50);
+
+        const bool matchCapOk = (viewer.searchMatchCount() == pdf::MAX_SEARCH_MATCHES)
+            && (spyCapResults.count() > 0)
+            && (std::get<1>(spyCapResults.at(spyCapResults.count() - 1)) == pdf::MAX_SEARCH_MATCHES);
+
+        // 7. Q11, Q12, Q13: Foreign documentId replies ignored
+        SignalRecorder<int, int> spyForeignRes(&viewer, &ui::PdfViewerWidget::searchResultsChanged);
+        SignalRecorder<int, int> spyForeignProg(&viewer, &ui::PdfViewerWidget::searchProgressChanged);
+        SignalRecorder<bool> spyForeignFin(&viewer, &ui::PdfViewerWidget::searchFinished);
+        const int matchCountBeforeForeign = viewer.searchMatchCount();
+
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId + 9999, capSearchId, 0, {mP0C5});
+        Q_EMIT viewer.renderWorker().searchProgress(docId + 9999, capSearchId, 1, 5);
+        Q_EMIT viewer.renderWorker().searchCompleted(docId + 9999, capSearchId, 10, false);
+        pump(50);
+
+        const bool foreignSearchIgnored = (viewer.searchMatchCount() == matchCountBeforeForeign)
+            && spyForeignRes.isEmpty() && spyForeignProg.isEmpty() && spyForeignFin.isEmpty();
+
+        // 8. Q14: Stale searchId reply after clearSearch is ignored
+        viewer.clearSearch(); // clearSearch -> searchId = 11
+        ++currentSearchId;
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, capSearchId, 0, {mP0C5});
+        pump(50);
+        const bool staleAfterClearIgnored = (viewer.searchMatchCount() == 0);
+
+        // 9. Q17: Match-case search returns different counts on mixed-case fixture
+        viewer.openDocument(mixedPath); // openDocument calls clearSearch()
+        viewer.waitForRendering();
+        pump(200);
+
+        viewer.findText("TargetKeyword", false); // case-insensitive
+        waitFor([&]() { return viewer.searchMatchCount() == 3; }, 3000);
+        const int insensitiveCount = viewer.searchMatchCount();
+
+        viewer.findText("TargetKeyword", true); // case-sensitive
+        waitFor([&]() { return viewer.searchMatchCount() == 2; }, 3000);
+        const int sensitiveCount = viewer.searchMatchCount();
+
+        const bool matchCaseOk = (insensitiveCount == 3) && (sensitiveCount == 2);
+
+        // 10. Q1 Equivalence reasoning note:
+        // findText() cancels the previous worker search (m_renderWorker.cancelSearch()).
+        // Because findText() unconditionally increments m_currentSearchId, any in-flight
+        // replies from the previous search carry an outdated searchId and are strictly
+        // dropped by the (searchId != m_currentSearchId) guard in onSearchMatchesFound,
+        // onSearchProgress, and onSearchCompleted. Thus, cancelSearch() is an IPC load
+        // optimization whose observable widget state is equivalent to the searchId filter.
+
+        const bool group3_9Ok = circularMatchOk && startPageKOk && emptyQueryOk && progress0Emitted
+            && truncatedFinishedOk && batchSortAndActiveOk && wrapNextOk && wrapPrevOk
+            && matchCapOk && foreignSearchIgnored && staleAfterClearIgnored && matchCaseOk;
+
+        std::string d39 = "circ=" + std::to_string(circularMatchOk)
+            + " startK=" + std::to_string(startPageKOk)
+            + " empty=" + std::to_string(emptyQueryOk)
+            + " prog0=" + std::to_string(progress0Emitted)
+            + " trunc=" + std::to_string(truncatedFinishedOk)
+            + " batch=" + std::to_string(batchSortAndActiveOk)
+            + " wrapN=" + std::to_string(wrapNextOk)
+            + " wrapP=" + std::to_string(wrapPrevOk)
+            + " cap=" + std::to_string(matchCapOk)
+            + " foreign=" + std::to_string(foreignSearchIgnored)
+            + " stale=" + std::to_string(staleAfterClearIgnored)
+            + " matchCase=" + std::to_string(matchCaseOk);
+
+        recordTest(group3_9Ok,
+                   "Group 3.9: Search circular distance, batch ordering, match caps, foreign ID isolation, wrap-around, and query trimming",
+                   d39);
+    }
+
+    // 3.10: Search highlight colors (active orange vs non-active yellow), border, and scrollToMatch geometry
+    {
+        QTemporaryDir dir310;
+        const QString doc3Path = dir310.path() + "/fixture_3page.pdf";
+        generateThreePageTextPdf(doc3Path.toStdString(), "AAA TargetKeyword CCC", "DDD TargetKeyword FFF", "GGG TargetKeyword III");
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(800, 700);
+        viewer.show();
+        viewer.ensurePolished();
+        pump(100);
+
+        viewer.openDocument(doc3Path); // clearSearch() inside openDocument -> searchId = 1
+        viewer.waitForRendering();
+        pump(200);
+
+        const int64_t docId = viewer.currentDocumentId();
+        viewer.findText("CustomMatches"); // findText -> searchId = 2
+        const int64_t customSearchId = 2;
+
+        pdf::SearchMatch m0;
+        m0.pageIndex = 0;
+        m0.charStartIndex = 0;
+        m0.charCount = 3;
+        m0.rects = { pdf::PageCharBox{100.0, 100.0, 150.0, 130.0} };
+
+        pdf::SearchMatch m1;
+        m1.pageIndex = 0;
+        m1.charStartIndex = 10;
+        m1.charCount = 5;
+        m1.rects = { pdf::PageCharBox{200.0, 100.0, 260.0, 130.0} };
+
+        pdf::SearchMatch m2;
+        m2.pageIndex = 2;
+        m2.charStartIndex = 4;
+        m2.charCount = 13;
+        m2.rects = { pdf::PageCharBox{100.0, 200.0, 250.0, 230.0} };
+
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, customSearchId, 0, {m0, m1, m2});
+        pump(50);
+
+        viewer.goToSearchMatch(0);
+        pump(50);
+
+        // 1. S13, S14: Paint verification of active (orange + border) vs inactive (yellow)
+        QImage renderImg(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+        {
+            QPainter p(&renderImg);
+            viewer.viewport()->render(&p);
+        }
+
+        const auto& pl0 = viewer.layout().getPageLayout(0);
+        const double dpr = viewer.effectiveDpr();
+        const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+        const double pl0LeftDoc = static_cast<double>(pl0.leftPixel) - static_cast<double>(viewer.currentDocScrollX());
+        const double pl0TopDoc = static_cast<double>(pl0.topPixel) - static_cast<double>(viewer.currentDocScrollY());
+
+        const int actX = static_cast<int>(std::round((pl0LeftDoc + 125.0 * effScale) / dpr));
+        const int actY = static_cast<int>(std::round((pl0TopDoc + 115.0 * effScale) / dpr));
+        const QColor actCol = renderImg.pixelColor(actX, actY);
+
+        const int borderX = static_cast<int>(std::round((pl0LeftDoc + 100.0 * effScale) / dpr));
+        const int borderY = actY;
+        const QColor borderCol = renderImg.pixelColor(borderX, borderY);
+
+        const int inactX = static_cast<int>(std::round((pl0LeftDoc + 230.0 * effScale) / dpr));
+        const int inactY = actY;
+        const QColor inactCol = renderImg.pixelColor(inactX, inactY);
+
+        // Blank page pixel outside any match (at page Y = 50 pt):
+        const int blankX = inactX;
+        const int blankY = static_cast<int>(std::round((pl0TopDoc + 50.0 * effScale) / dpr));
+        const QColor blankCol = renderImg.pixelColor(blankX, blankY);
+
+        // S13: Non-active match carries the translucent yellow overlay (lowering blue from blank white 255 to < 210)
+        const bool nonActiveYellowOverlay = (inactCol != blankCol) && (inactCol.blue() < 210) && (blankCol.blue() > 240);
+        const bool colorsDistinct = (actCol != inactCol) && nonActiveYellowOverlay;
+        const bool borderDistinct = (borderCol != actCol);
+
+        // 2. S15, S16: scrollToMatch / goToSearchMatch scroll geometry calculation
+        const auto& pl2 = viewer.layout().getPageLayout(2);
+        const int64_t vpH = static_cast<int64_t>(std::round(viewer.viewport()->height() * dpr));
+        const int64_t matchDocY = pl2.topPixel + static_cast<int64_t>(std::round(200.0 * effScale));
+        const int64_t maxScrollY = std::max<int64_t>(0, viewer.layout().totalDocumentHeight() - vpH);
+        const int64_t expectedTargetY = std::clamp<int64_t>(matchDocY - (vpH / 3), 0, maxScrollY);
+
+        viewer.goToSearchMatch(2);
+        pump(50);
+
+        const int64_t scrollYAfterJump = viewer.currentDocScrollY();
+        const bool offscreenScrolledCorrectly = (scrollYAfterJump == expectedTargetY);
+
+        // 3. S16: A match already inside the viewport with a 40px margin does not scroll
+        const int64_t scrollYBeforeInsideCheck = viewer.currentDocScrollY();
+        viewer.goToSearchMatch(2); // Match 2 is now centered/visible
+        pump(50);
+        const bool insideViewportNotScrolled = (viewer.currentDocScrollY() == scrollYBeforeInsideCheck);
+
+        // 4. S15: scrollToMatch margin 40: inside viewport within 40px of edge scrolls; beyond 40px does not scroll
+        viewer.goToSearchMatch(0);
+        viewer.setDocScrollPosition(0, 100);
+        pump(50);
+        const int64_t scrollBase = viewer.currentDocScrollY();
+
+        const double pyNear = static_cast<double>(scrollBase + 20 - pl0.topPixel) / effScale;
+        const double pyBeyond = static_cast<double>(scrollBase + 120 - pl0.topPixel) / effScale;
+
+        pdf::SearchMatch mNear;
+        mNear.pageIndex = 0;
+        mNear.charStartIndex = 30;
+        mNear.charCount = 5;
+        mNear.rects = { pdf::PageCharBox{100.0, pyNear, 150.0, pyNear + 10.0} };
+
+        pdf::SearchMatch mBeyond;
+        mBeyond.pageIndex = 0;
+        mBeyond.charStartIndex = 40;
+        mBeyond.charCount = 5;
+        mBeyond.rects = { pdf::PageCharBox{100.0, pyBeyond, 150.0, pyBeyond + 10.0} };
+
+        viewer.findText("MarginTestQuery");
+        const int64_t marginSearchId = 3;
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, marginSearchId, 0, {mNear, mBeyond});
+        pump(50);
+
+        viewer.setDocScrollPosition(0, scrollBase);
+        pump(50);
+        viewer.goToSearchMatch(0); // Near-edge match (within 40px margin) -> must scroll
+        pump(50);
+        const bool scrolledNearEdge = (viewer.currentDocScrollY() != scrollBase);
+
+        const int64_t scrollBeforeBeyond = viewer.currentDocScrollY();
+        viewer.goToSearchMatch(1); // Beyond-margin match (at +120px) -> must not scroll
+        pump(50);
+        const bool notScrolledBeyondMargin = (viewer.currentDocScrollY() == scrollBeforeBeyond);
+        const bool s15Margin40Killed = scrolledNearEdge && notScrolledBeyondMargin;
+
+        const bool group3_10Ok = colorsDistinct && borderDistinct && s15Margin40Killed
+            && offscreenScrolledCorrectly && insideViewportNotScrolled;
+
+        std::string d310 = "colorsDistinct=" + std::to_string(colorsDistinct)
+            + " (act=" + actCol.name().toStdString() + " inact=" + inactCol.name().toStdString() + " yellow=" + std::to_string(nonActiveYellowOverlay) + ")"
+            + " borderDistinct=" + std::to_string(borderDistinct)
+            + " (border=" + borderCol.name().toStdString() + ")"
+            + " s15Margin40=" + std::to_string(s15Margin40Killed)
+            + " (near=" + std::to_string(scrolledNearEdge) + " beyond=" + std::to_string(notScrolledBeyondMargin) + ")"
+            + " offscreenScrolled=" + std::to_string(offscreenScrolledCorrectly)
+            + " (scroll=" + std::to_string(scrollYAfterJump) + " exp=" + std::to_string(expectedTargetY) + ")"
+            + " insideNotScrolled=" + std::to_string(insideViewportNotScrolled);
+
+        recordTest(group3_10Ok,
+                   "Group 3.10: Search highlight colors (active orange vs non-active yellow), border outline, and scrollToMatch geometry",
+                   d310);
     }
 }
 
