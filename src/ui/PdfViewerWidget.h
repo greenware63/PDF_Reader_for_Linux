@@ -18,6 +18,7 @@
 #include "layout/DocumentLayout.h"
 #include "layout/ScrollMapper.h"
 #include "ViewerLayoutController.h"
+#include "ViewerTileController.h"
 #include "cache/TileCache.h"
 #include "ipc/WorkerClient.h"
 #include "engine/PageText.h"
@@ -152,18 +153,18 @@ public:
     pdf::ipc::WorkerClient& renderWorker() noexcept { return m_renderWorker; }
     pdf::TileCache& cache() noexcept { return m_cache; }
     const layout::DocumentLayout& layout() const noexcept { return m_layoutController.layout(); }
-    size_t inFlightCount() const noexcept { return m_inFlightKeys.size(); }
+    size_t inFlightCount() const noexcept { return m_tileController.inFlightCount(); }
     size_t transformedCacheSize() const noexcept { return m_transformedPixmapCache.size(); }
 
     /// Tiles drawn from a previous zoom level (scaled) because the current-zoom tile was not ready yet.
-    size_t fallbackTilesDrawn() const noexcept { return m_fallbackTilesDrawn; }
+    size_t fallbackTilesDrawn() const noexcept { return m_tileController.fallbackTilesDrawn(); }
     /// Number of pages whose extracted text is currently held in memory (bounded by MAX_CACHED_TEXT_PAGES
     /// plus any pages protected by the current selection).
     size_t cachedTextPageCount() const noexcept { return m_pageTextCache.size(); }
     /// Prefetch (off-screen) tile requests handed to the worker so far.
-    size_t prefetchRequestsIssued() const noexcept { return m_prefetchRequestsIssued; }
+    size_t prefetchRequestsIssued() const noexcept { return m_tileController.prefetchRequestsIssued(); }
     /// Enables/disables the off-screen prefetch ring (enabled by default).
-    void setPrefetchEnabled(bool enabled) noexcept { m_prefetchEnabled = enabled; }
+    void setPrefetchEnabled(bool enabled) noexcept { m_tileController.setPrefetchEnabled(enabled); }
 
     pdf::EditLog& editLog() noexcept { return m_editLog; }
     const pdf::EditLog& editLog() const noexcept { return m_editLog; }
@@ -393,18 +394,7 @@ private:
     double m_dprOverride{0.0};
     int m_wheelDeltaAccumulator{0};
 
-    // Tracks tile requests currently in-flight on the worker to prevent duplicate enqueues
-    std::unordered_set<pdf::TileKey, pdf::TileKeyHash> m_inFlightKeys;
-
-    // Recently used zoom scales (newest first, quantized); their cached tiles serve as scaled stand-ins
-    // while tiles for the current zoom are still rendering.
-    static constexpr size_t MAX_FALLBACK_SCALES = 3;
-    std::vector<double> m_fallbackScales;
-    size_t m_fallbackTilesDrawn{0};
-
-    // Off-screen prefetch ring (one viewport height above and below the visible area)
-    bool m_prefetchEnabled{true};
-    size_t m_prefetchRequestsIssued{0};
+    ViewerTileController m_tileController;
 
     // Text layer and selection
     std::unordered_map<int, std::shared_ptr<pdf::PageText>> m_pageTextCache;

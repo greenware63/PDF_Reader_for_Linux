@@ -68,6 +68,7 @@ void rotateRectPointsForDisplay(const pdf::PageCharBox& r, double pageW, double 
 #include <QComboBox>
 #include <QListWidget>
 #include <algorithm>
+#include <iostream>
 #include <cmath>
 #include <limits>
 #include <unordered_set>
@@ -154,7 +155,7 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
         m_hasDocument = false;
         m_currentFilePath.clear();
         m_pageCount = 0;
-        m_inFlightKeys.clear();
+        m_tileController.clearInFlight();
         Q_EMIT loadError(message);
         viewport()->update();
         if (wantRecovery) {
@@ -169,7 +170,7 @@ PdfViewerWidget::~PdfViewerWidget() {
     // Clean teardown: stop worker and flush memory without touching scrollbars or emitting pageChanged during destruction
     m_renderWorker.stop();
     m_cache.clear();
-    m_inFlightKeys.clear();
+    m_tileController.clearInFlight();
     m_pageTextCache.clear();
 }
 
@@ -183,9 +184,7 @@ double PdfViewerWidget::effectiveDpr() const {
 }
 
 void PdfViewerWidget::retryFailedTiles() {
-    m_cache.resetFailureHistory(); // explicit user retry also lifts the permanent-failure state
-    m_cache.clearAllFailed();
-    m_inFlightKeys.clear();
+    m_tileController.retryFailedTiles(m_cache);
     m_transformedPixmapCache.clear();
     viewport()->update();
 }
@@ -216,7 +215,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     // Success: atomically cancel worker work, flush previous cache, and advance epochs
     m_renderWorker.cancelAll();
     m_cache.invalidateDocument(m_currentDocumentId);
-    m_inFlightKeys.clear();
+    m_tileController.clearInFlight();
     m_pageTextCache.clear();
     m_transformedPixmapCache.clear();
     if (!m_preserveEditLogOnOpen) {
@@ -254,7 +253,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_outline.clear();
     m_outlineRequestPending = true;
 
-    m_fallbackScales.clear(); // tiles of the previous document are gone; nothing to stand in
+    m_tileController.clearFallbackScales(); // tiles of the previous document are gone; nothing to stand in
 
     updateLayoutGeometry();
     verticalScrollBar()->setValue(0);
@@ -387,7 +386,7 @@ void PdfViewerWidget::closeDocument() {
     m_renderWorker.closeDocumentSync();
 
     m_cache.invalidateDocument(m_currentDocumentId);
-    m_inFlightKeys.clear();
+    m_tileController.clearInFlight();
     m_pageTextCache.clear();
     m_transformedPixmapCache.clear();
     clearFormFieldsCache();
@@ -405,7 +404,7 @@ void PdfViewerWidget::closeDocument() {
     m_currentPassword.clear();
     m_sourceFileSize = -1;
     m_sourceFileModified = QDateTime();
-    m_fallbackScales.clear();
+    m_tileController.clearFallbackScales();
     m_pageCount = 0;
     m_outline.clear();
     m_outlineRequestPending = false;
@@ -459,7 +458,7 @@ void PdfViewerWidget::applyLayoutResult(const LayoutChangeResult& result) {
     }
     if (result.generationIncremented) {
         ++m_currentGeneration;
-        m_inFlightKeys.clear();
+        m_tileController.clearInFlight();
         m_renderWorker.setGeneration(m_currentGeneration);
     }
     if (result.scrollBarsChanged) {
@@ -677,24 +676,15 @@ void PdfViewerWidget::onScrollValueChanged() {
 }
 
 void PdfViewerWidget::onTileReady(int64_t documentId, uint64_t /*generation*/, const pdf::TileKey& key, const pdf::PixelBuffer& buffer) {
-    m_inFlightKeys.erase(key);
-    if (documentId != m_currentDocumentId) {
-        return;
-    }
-    m_cache.put(key, buffer);
-    // Prefetched off-screen tiles do not change what is on screen: skip the repaint
-    if (m_cache.isPinned(key)) {
+    if (m_tileController.handleTileReady(documentId, m_currentDocumentId, key, buffer, m_cache)) {
         viewport()->update();
     }
 }
 
 void PdfViewerWidget::onTileFailed(int64_t documentId, uint64_t /*generation*/, const pdf::TileKey& key) {
-    m_inFlightKeys.erase(key);
-    if (documentId != m_currentDocumentId) {
-        return;
+    if (m_tileController.handleTileFailed(documentId, m_currentDocumentId, key, m_cache)) {
+        viewport()->update();
     }
-    m_cache.markFailed(key);
-    viewport()->update();
 }
 
 void PdfViewerWidget::onPageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text) {
@@ -887,83 +877,35 @@ void PdfViewerWidget::drawLoadingOverlay(QPainter& painter) {
 }
 
 void PdfViewerWidget::rememberFallbackScale(double previousScale) {
-    m_fallbackScales.erase(std::remove(m_fallbackScales.begin(), m_fallbackScales.end(), previousScale), m_fallbackScales.end());
-    m_fallbackScales.insert(m_fallbackScales.begin(), previousScale);
-    if (m_fallbackScales.size() > MAX_FALLBACK_SCALES) {
-        m_fallbackScales.resize(MAX_FALLBACK_SCALES);
-    }
+    m_tileController.rememberFallbackScale(previousScale);
 }
 
 bool PdfViewerWidget::drawFallbackTile(QPainter& painter, const layout::VisibleTile& t, const QRectF& tileRect, double qScale, double qDpr) {
-    constexpr int TILE = 512;
-    constexpr int MAX_SOURCE_TILES = 64; // guards against huge zoom jumps touching thousands of old tiles
-    bool drawnAny = false;
+    auto slices = m_tileController.selectFallbackTiles(t, tileRect, qScale, qDpr, rotation(), m_currentDocumentId, m_cache);
+    if (slices.empty()) {
+        return false;
+    }
 
     painter.save();
     painter.setClipRect(tileRect);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-    for (const double oldScale : m_fallbackScales) {
-        if (oldScale == qScale) {
+    for (const auto& slice : slices) {
+        auto buf = m_cache.get(slice.key);
+        if (!buf.has_value()) {
             continue;
         }
-        // Region of this tile expressed in the old zoom's page-pixel grid
-        const double r = oldScale / qScale;
-        const double sx0 = t.tileXOnPage * r;
-        const double sx1 = (t.tileXOnPage + t.tileWidth) * r;
-        const double sy0 = t.tileYOnPage * r;
-        const double sy1 = (t.tileYOnPage + t.tileHeight) * r;
-
-        const int c0 = static_cast<int>(std::floor(sx0 / TILE));
-        const int c1 = static_cast<int>(std::floor((sx1 - 1e-6) / TILE));
-        const int r0 = static_cast<int>(std::floor(sy0 / TILE));
-        const int r1 = static_cast<int>(std::floor((sy1 - 1e-6) / TILE));
-        if (c1 < c0 || r1 < r0 || static_cast<int64_t>(c1 - c0 + 1) * (r1 - r0 + 1) > MAX_SOURCE_TILES) {
-            continue;
-        }
-
-        bool fullyCovered = true;
-        for (int row = r0; row <= r1; ++row) {
-            for (int col = c0; col <= c1; ++col) {
-                auto buf = m_cache.get(pdf::TileKey::create(m_currentDocumentId, t.pageIndex, col, row, oldScale, qDpr, rotation()));
-                if (!buf.has_value()) {
-                    fullyCovered = false;
-                    continue;
-                }
-                const double ox = static_cast<double>(col) * TILE;
-                const double oy = static_cast<double>(row) * TILE;
-                const double ix0 = std::max(sx0, ox);
-                const double iy0 = std::max(sy0, oy);
-                const double ix1 = std::min(sx1, ox + buf->width());
-                const double iy1 = std::min(sy1, oy + buf->height());
-                if (ix1 <= ix0 || iy1 <= iy0) {
-                    fullyCovered = false;
-                    continue;
-                }
-                const QRectF src(ix0 - ox, iy0 - oy, ix1 - ix0, iy1 - iy0);
-                const QRectF dst(tileRect.x() + (ix0 / r - t.tileXOnPage),
-                                 tileRect.y() + (iy0 / r - t.tileYOnPage),
-                                 (ix1 - ix0) / r,
-                                 (iy1 - iy0) / r);
-                if (m_colorMode == ColorMode::Normal) {
-                    painter.drawImage(dst, toQImage(*buf), src);
-                } else {
-                    QImage transformed = applyColorMode(toQImage(*buf), m_colorMode);
-                    painter.drawImage(dst, transformed, src);
-                }
-                drawnAny = true;
-            }
-        }
-        if (fullyCovered) {
-            break; // the most recent zoom level covers the whole tile; older ones would only be overdrawn
+        if (m_colorMode == ColorMode::Normal) {
+            painter.drawImage(slice.dstRect, toQImage(*buf), slice.srcRect);
+        } else {
+            QImage transformed = applyColorMode(toQImage(*buf), m_colorMode);
+            painter.drawImage(slice.dstRect, transformed, slice.srcRect);
         }
     }
 
     painter.restore();
-    if (drawnAny) {
-        ++m_fallbackTilesDrawn;
-    }
-    return drawnAny;
+    m_tileController.recordFallbackTileDrawn();
+    return true;
 }
 
 void PdfViewerWidget::drawSelection(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale) {
@@ -1159,7 +1101,7 @@ void PdfViewerWidget::scrollToMatch(const pdf::SearchMatch& match) {
         m_layoutController.setNavigating(false);
         if (currentDocScrollX() != oldScrollX || currentDocScrollY() != oldScrollY) {
             ++m_currentGeneration;
-            m_inFlightKeys.clear();
+            m_tileController.clearInFlight();
             m_renderWorker.setGeneration(m_currentGeneration);
         }
         if (currentPage() != match.pageIndex) {
@@ -1856,9 +1798,13 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
             static_cast<qreal>(t.tileHeight)
         );
 
-        auto cachedBuf = m_cache.get(key);
-        if (cachedBuf.has_value()) {
-            m_inFlightKeys.erase(key);
+        std::optional<pdf::PixelBuffer> cachedBuf;
+        auto action = m_tileController.evaluateVisibleTile(
+            key, t, tileVpX, tileVpY, vpCenterX, vpCenterY,
+            m_currentDocumentId, m_currentGeneration, qScale, qDpr, rotation(),
+            m_cache, pendingRequests, &cachedBuf);
+
+        if (action == VisibleTileAction::DrawCached && cachedBuf.has_value()) {
             if (m_colorMode == ColorMode::Normal) {
                 QImage img = toQImage(*cachedBuf);
                 painter.drawImage(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), img);
@@ -1886,87 +1832,33 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
                     painter.drawPixmap(QPointF(static_cast<qreal>(tileVpX), static_cast<qreal>(tileVpY)), pixmap);
                 }
             }
-        } else if (m_cache.isFailed(key)) {
-            if (m_cache.canRetry(key)) {
-                if (m_inFlightKeys.find(key) != m_inFlightKeys.end()) {
-                    // Already in flight to worker for retry; avoid re-enqueueing duplicate
-                    drawPendingPlaceholder(painter, tileRect);
-                } else {
-                    // Backoff interval elapsed: allow retry
-                    m_cache.clearFailed(key);
-                    drawPendingPlaceholder(painter, tileRect);
-
-                    int64_t tileMidX = tileVpX + t.tileWidth / 2;
-                    int64_t tileMidY = tileVpY + t.tileHeight / 2;
-                    int64_t distSq = (tileMidX - vpCenterX) * (tileMidX - vpCenterX) + (tileMidY - vpCenterY) * (tileMidY - vpCenterY);
-                    int priority = static_cast<int>(std::max<int64_t>(0, 10000000 - distSq));
-
-                    pdf::PixelRect pRect{t.tileXOnPage, t.tileYOnPage, t.tileWidth, t.tileHeight};
-                    pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority, rotation()});
-                    m_inFlightKeys.insert(key);
-                }
-            } else {
-                drawErrorPlaceholder(painter, tileRect);
-            }
+        } else if (action == VisibleTileAction::DrawError) {
+            drawErrorPlaceholder(painter, tileRect);
         } else {
-            // Pending render miss: draw placeholder (plus a scaled earlier-zoom stand-in if we have one)
-            // on the UI thread and queue request to worker if not already in flight
+            // DrawPending: draw placeholder (plus a scaled earlier-zoom stand-in if we have one)
             drawPendingPlaceholder(painter, tileRect);
-            if (!m_fallbackScales.empty()) {
+            if (!m_tileController.fallbackScales().empty()) {
                 drawFallbackTile(painter, t, tileRect, qScale, qDpr);
-            }
-
-            if (m_inFlightKeys.find(key) == m_inFlightKeys.end()) {
-                int64_t tileMidX = tileVpX + t.tileWidth / 2;
-                int64_t tileMidY = tileVpY + t.tileHeight / 2;
-                int64_t distSq = (tileMidX - vpCenterX) * (tileMidX - vpCenterX) + (tileMidY - vpCenterY) * (tileMidY - vpCenterY);
-                int priority = static_cast<int>(std::max<int64_t>(0, 10000000 - distSq));
-
-                pdf::PixelRect pRect{t.tileXOnPage, t.tileYOnPage, t.tileWidth, t.tileHeight};
-                pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, t.pageIndex, pRect, qScale, qDpr, key, priority, rotation()});
-                m_inFlightKeys.insert(key);
             }
         }
     }
 
     // 5. Prefetch ring: one viewport height above and below the visible area
-    if (m_prefetchEnabled && !tiles.empty()) {
-        constexpr size_t MAX_PREFETCH_PER_PAINT = 16;
+    if (m_tileController.isPrefetchEnabled() && !tiles.empty()) {
         const int64_t ringTop = std::max<int64_t>(0, scrollDocY - vpHeightDevice);
         const int64_t ringBottom = std::min<int64_t>(layout().totalDocumentHeight(), scrollDocY + 2 * vpHeightDevice);
         if (ringBottom > ringTop) {
             std::unordered_set<pdf::TileKey, pdf::TileKeyHash> visibleSet(visibleKeys.begin(), visibleKeys.end());
-            struct Candidate { int64_t distSq; layout::VisibleTile tile; pdf::TileKey key; };
-            std::vector<Candidate> candidates;
-
             const auto ringTiles = layout().getVisibleTiles({scrollDocX, ringTop, vpWidthDevice, ringBottom - ringTop}, 512);
-            for (const auto& t : ringTiles) {
-                const auto key = pdf::TileKey::create(m_currentDocumentId, t.pageIndex, t.col, t.row, qScale, qDpr, rotation());
-                if (visibleSet.count(key) || m_inFlightKeys.count(key) || m_cache.contains(key)) {
-                    continue;
-                }
-                const int64_t dx = (t.docX - scrollDocX) + t.tileWidth / 2 - vpCenterX;
-                const int64_t dy = (t.docY - scrollDocY) + t.tileHeight / 2 - vpCenterY;
-                candidates.push_back({dx * dx + dy * dy, t, key});
-            }
-
-            std::sort(candidates.begin(), candidates.end(),
-                      [](const Candidate& a, const Candidate& b) { return a.distSq < b.distSq; });
-            if (candidates.size() > MAX_PREFETCH_PER_PAINT) {
-                candidates.resize(MAX_PREFETCH_PER_PAINT);
-            }
-            for (const auto& c : candidates) {
-                const int priority = -1 - static_cast<int>(std::min<int64_t>(c.distSq >> 12, 1000000000));
-                pdf::PixelRect pRect{c.tile.tileXOnPage, c.tile.tileYOnPage, c.tile.tileWidth, c.tile.tileHeight};
-                pendingRequests.push_back({m_currentDocumentId, m_currentGeneration, c.tile.pageIndex, pRect, qScale, qDpr, c.key, priority, rotation()});
-                m_inFlightKeys.insert(c.key);
-                ++m_prefetchRequestsIssued;
-            }
+            m_tileController.schedulePrefetch(
+                ringTiles, visibleSet, scrollDocX, scrollDocY, vpCenterX, vpCenterY,
+                m_currentDocumentId, m_currentGeneration, qScale, qDpr, rotation(),
+                m_cache, pendingRequests);
         }
     }
 
     if (!pendingRequests.empty()) {
-        m_renderWorker.enqueueRequests(std::move(pendingRequests));
+        m_tileController.submitRequests(std::move(pendingRequests), m_renderWorker);
     }
     if (m_outlineRequestPending && !tiles.empty()) {
         m_outlineRequestPending = false;
@@ -2319,7 +2211,7 @@ bool PdfViewerWidget::markupSelection(pdf::AnnotationSubtype subtype, uint32_t c
     if (anyAdded) {
         clearSelection();
         m_cache.clear();
-        m_inFlightKeys.clear();
+        m_tileController.clearInFlight();
         ++m_currentGeneration;
         m_renderWorker.setGeneration(m_currentGeneration);
         viewport()->update();
@@ -3120,7 +3012,7 @@ bool PdfViewerWidget::viewportEvent(QEvent* event) {
 
 void PdfViewerWidget::refreshAfterEdit() {
     m_cache.clear();
-    m_inFlightKeys.clear();
+    m_tileController.clearInFlight();
     ++m_currentGeneration;
     m_renderWorker.setGeneration(m_currentGeneration);
     viewport()->update();
