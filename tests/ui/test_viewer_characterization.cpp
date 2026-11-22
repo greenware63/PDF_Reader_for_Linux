@@ -488,7 +488,22 @@ void runGroup1LayoutAndNavigation(const QString& sample5Page) {
         pump(100);
         const bool flippedToPage1 = (viewer.currentPage() == 1);
 
-        recordTest(stayedOnPage0 && flippedToPage1,
+        // Backward flip:
+        // Scroll to the top of page 1
+        vbar->setValue(vbar->minimum());
+        pump(50);
+
+        // Notch 1: dy = +120 (accumulates -120, absolute value 120 < 240, must NOT flip back)
+        sendWheel(viewer.viewport(), center, 120);
+        pump(30);
+        const bool stayedOnPage1 = (viewer.currentPage() == 1);
+
+        // Notch 2: dy = +120 (accumulates -240 <= -240, and currentPage > 0, MUST flip back to page 0)
+        sendWheel(viewer.viewport(), center, 120);
+        pump(100);
+        const bool flippedBackToPage0 = (viewer.currentPage() == 0);
+
+        recordTest(stayedOnPage0 && flippedToPage1 && stayedOnPage1 && flippedBackToPage0,
                    "Group 1.16: Page-flip accumulator honors FLIP_THRESHOLD (240) in SinglePage mode");
     }
 }
@@ -755,15 +770,41 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
         viewer.openDocument(searchPdf);
         pump(200);
 
-        // Fire first search then immediately supersede with second search
-        viewer.findText("TargetKeyword");
+        // Start an active search to assign a known currentSearchId
         viewer.findText("NonExistentTerm");
+        pump(50);
 
-        waitFor([&]() { return viewer.searchMatchCount() >= 0; }, 2000);
-        pump(200);
+        const int64_t docId = viewer.currentDocumentId();
+        constexpr int64_t staleSearchId = 999999;
+        pdf::SearchMatch staleMatch;
+        staleMatch.pageIndex = 0;
+        staleMatch.charStartIndex = 10;
+        staleMatch.charCount = 5;
 
-        // Results must correspond to the active second search ("NonExistentTerm"), NOT the stale first query
-        recordTest(viewer.searchMatchCount() == 0,
+        SignalRecorder<int, int> spyResults(&viewer, &ui::PdfViewerWidget::searchResultsChanged);
+        SignalRecorder<int, int> spyProgress(&viewer, &ui::PdfViewerWidget::searchProgressChanged);
+        SignalRecorder<bool> spyFinished(&viewer, &ui::PdfViewerWidget::searchFinished);
+
+        const int initialMatchCount = viewer.searchMatchCount();
+        const size_t initialProgressCount = spyProgress.count();
+        const size_t initialFinishedCount = spyFinished.count();
+
+        // 1. Deliver stale searchMatchesFound directly carrying old searchId
+        Q_EMIT viewer.renderWorker().searchMatchesFound(docId, staleSearchId, 0, {staleMatch});
+        pump(50);
+        const bool matchIgnored = (viewer.searchMatchCount() == initialMatchCount) && (spyResults.count() == 0);
+
+        // 2. Deliver stale searchProgress
+        Q_EMIT viewer.renderWorker().searchProgress(docId, staleSearchId, 42, 100);
+        pump(50);
+        const bool progressIgnored = (spyProgress.count() == initialProgressCount);
+
+        // 3. Deliver stale searchCompleted
+        Q_EMIT viewer.renderWorker().searchCompleted(docId, staleSearchId, 50, false);
+        pump(50);
+        const bool completedIgnored = (spyFinished.count() == initialFinishedCount);
+
+        recordTest(matchIgnored && progressIgnored && completedIgnored,
                    "Group 3.6: Stale search replies from superseded query are rejected by searchId filter");
     }
 }
@@ -1040,7 +1081,30 @@ void runGroup6MainWindow(const QString& samplePdf, const QString& multiDoc) {
         pump(50);
         const bool switched = (window.currentViewer() == window.viewerAt(0));
 
-        recordTest(v2Redact && !v1Redact && switched,
+        // Background tab isolation: drive page change on background viewer (tab 1)
+        QLabel* pageLabel = nullptr;
+        for (auto* lbl : window.findChildren<QLabel*>()) {
+            if (lbl->text().contains("Page")) {
+                pageLabel = lbl;
+                break;
+            }
+        }
+        const QString activeStatusBefore = pageLabel ? pageLabel->text() : QString();
+        const int activePageBefore = window.viewerAt(0)->currentPage();
+
+        // Drive page change on background tab
+        window.viewerAt(1)->goToPage(3);
+        pump(50);
+
+        const QString activeStatusAfter = pageLabel ? pageLabel->text() : QString();
+        const int activePageAfter = window.viewerAt(0)->currentPage();
+        const bool backgroundIgnored = (pageLabel != nullptr) &&
+                                       (!activeStatusBefore.isEmpty()) &&
+                                       (activeStatusBefore == activeStatusAfter) &&
+                                       (activePageBefore == activePageAfter) &&
+                                       (window.viewerAt(1)->currentPage() == 3);
+
+        recordTest(v2Redact && !v1Redact && switched && backgroundIgnored,
                    "Group 6.2: Action routing targets active tab without mutating inactive tabs");
     }
 
