@@ -19,6 +19,7 @@
 #include "layout/ScrollMapper.h"
 #include "ViewerLayoutController.h"
 #include "ViewerTileController.h"
+#include "ViewerSelectionController.h"
 #include "cache/TileCache.h"
 #include "ipc/WorkerClient.h"
 #include "engine/PageText.h"
@@ -43,7 +44,7 @@ class PdfViewerWidget : public QAbstractScrollArea {
 public:
     static constexpr double DESKTOP_100_PERCENT_SCALE = 96.0 / 72.0; // 1.3333333333333333
     static constexpr double ZOOM_STEP = 1.25;                         // one zoom button click or wheel notch
-    static constexpr size_t MAX_CACHED_TEXT_PAGES = 48;               // extracted-text pages kept in memory
+    static constexpr size_t MAX_CACHED_TEXT_PAGES = ViewerSelectionController::MAX_CACHED_TEXT_PAGES; // extracted-text pages kept in memory
 
     explicit PdfViewerWidget(QWidget* parent = nullptr);
     ~PdfViewerWidget() override;
@@ -160,7 +161,7 @@ public:
     size_t fallbackTilesDrawn() const noexcept { return m_tileController.fallbackTilesDrawn(); }
     /// Number of pages whose extracted text is currently held in memory (bounded by MAX_CACHED_TEXT_PAGES
     /// plus any pages protected by the current selection).
-    size_t cachedTextPageCount() const noexcept { return m_pageTextCache.size(); }
+    size_t cachedTextPageCount() const noexcept { return m_selectionController.cachedTextPageCount(); }
     /// Prefetch (off-screen) tile requests handed to the worker so far.
     size_t prefetchRequestsIssued() const noexcept { return m_tileController.prefetchRequestsIssued(); }
     /// Enables/disables the off-screen prefetch ring (enabled by default).
@@ -333,17 +334,7 @@ private Q_SLOTS:
     void onDocumentOutlineReady(int64_t documentId, const std::vector<pdf::OutlineItem>& outline);
 
 private:
-    struct TextPosition {
-        int pageIndex{-1};
-        int charIndex{-1};
-        bool isValid() const noexcept { return pageIndex >= 0 && charIndex >= 0; }
-        bool operator==(const TextPosition& o) const noexcept {
-            return pageIndex == o.pageIndex && charIndex == o.charIndex;
-        }
-        bool operator!=(const TextPosition& o) const noexcept {
-            return !(*this == o);
-        }
-    };
+    using TextPosition = ui::TextPosition;
 
     void updateLayoutGeometry();
     void updateScrollBars();
@@ -395,12 +386,7 @@ private:
     int m_wheelDeltaAccumulator{0};
 
     ViewerTileController m_tileController;
-
-    // Text layer and selection
-    std::unordered_map<int, std::shared_ptr<pdf::PageText>> m_pageTextCache;
-    TextPosition m_selectionStart;
-    TextPosition m_selectionEnd;
-    bool m_isSelecting{false};
+    ViewerSelectionController m_selectionController;
 
     // Text search state
     int64_t m_currentSearchId{0};
