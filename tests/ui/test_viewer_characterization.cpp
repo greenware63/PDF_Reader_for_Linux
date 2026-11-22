@@ -506,6 +506,153 @@ void runGroup1LayoutAndNavigation(const QString& sample5Page) {
         recordTest(stayedOnPage0 && flippedToPage1 && stayedOnPage1 && flippedBackToPage0,
                    "Group 1.16: Page-flip accumulator honors FLIP_THRESHOLD (240) in SinglePage mode");
     }
+
+    // 1.17: Zoom upper clamp limit (10.0), zoomIn saturation, and spurious signal suppression
+    {
+        SignalRecorder<double> spyZoom(&viewer, &ui::PdfViewerWidget::zoomChanged);
+        viewer.setZoom(100.0);
+        pump(50);
+        bool ok = (std::abs(viewer.currentZoom() - 10.0) < 1e-4) && (spyZoom.count() == 1);
+        if (ok) {
+            const auto [ratio] = spyZoom.takeFirst();
+            const double expectedRatio = 10.0 / ui::PdfViewerWidget::DESKTOP_100_PERCENT_SCALE;
+            ok = (std::abs(ratio - expectedRatio) < 1e-4);
+        }
+
+        // Repeated zoomIn from maximum must not exceed 10.0 and must not emit zoomChanged
+        spyZoom.clear();
+        viewer.zoomIn();
+        pump(50);
+        ok = ok && (std::abs(viewer.currentZoom() - 10.0) < 1e-4) && spyZoom.isEmpty();
+
+        // setZoom with clamped value equal to current zoom must suppress signal
+        viewer.setZoom(50.0);
+        pump(50);
+        ok = ok && (std::abs(viewer.currentZoom() - 10.0) < 1e-4) && spyZoom.isEmpty();
+
+        recordTest(ok, "Group 1.17: Zoom upper clamp limit (10.0), zoomIn saturation, and spurious signal suppression");
+    }
+
+    // 1.18: Zoom lower clamp limit (0.1), zoomOut saturation, and spurious signal suppression
+    {
+        SignalRecorder<double> spyZoom(&viewer, &ui::PdfViewerWidget::zoomChanged);
+        viewer.setZoom(0.0001);
+        pump(50);
+        bool ok = (std::abs(viewer.currentZoom() - 0.1) < 1e-4) && (spyZoom.count() == 1);
+        if (ok) {
+            const auto [ratio] = spyZoom.takeFirst();
+            const double expectedRatio = 0.1 / ui::PdfViewerWidget::DESKTOP_100_PERCENT_SCALE;
+            ok = (std::abs(ratio - expectedRatio) < 1e-4);
+        }
+
+        // Repeated zoomOut from minimum must not drop below 0.1 and must not emit zoomChanged
+        spyZoom.clear();
+        viewer.zoomOut();
+        pump(50);
+        ok = ok && (std::abs(viewer.currentZoom() - 0.1) < 1e-4) && spyZoom.isEmpty();
+
+        // setZoom with clamped value equal to current zoom must suppress signal
+        viewer.setZoom(0.001);
+        pump(50);
+        ok = ok && (std::abs(viewer.currentZoom() - 0.1) < 1e-4) && spyZoom.isEmpty();
+
+        recordTest(ok, "Group 1.18: Zoom lower clamp limit (0.1), zoomOut saturation, and spurious signal suppression");
+
+        // Restore default scale
+        viewer.zoomReset();
+        pump(50);
+    }
+
+    // 1.19: Last-page forward wheel flip past bottom does not overrun and accumulator cleanly resets
+    {
+        viewer.setViewMode(layout::ViewMode::SinglePage);
+        const int lastPage = viewer.pageCount() - 1;
+        viewer.goToPage(lastPage);
+        pump(50);
+
+        auto* vbar = viewer.verticalScrollBar();
+        vbar->setValue(vbar->maximum());
+        pump(50);
+
+        SignalRecorder<int, int> spyPage(&viewer, &ui::PdfViewerWidget::pageChanged);
+        const QPoint center = viewer.viewport()->rect().center();
+
+        // Send wheel forward notches past bottom: must NOT flip past last page
+        sendWheel(viewer.viewport(), center, -120);
+        pump(30);
+        sendWheel(viewer.viewport(), center, -120);
+        pump(30);
+        sendWheel(viewer.viewport(), center, -120);
+        pump(50);
+        const bool stayedOnLastPage = (viewer.currentPage() == lastPage) && spyPage.isEmpty();
+
+        // Scroll back to top of last page and verify accumulator does not leave a pending flip
+        vbar->setValue(vbar->minimum());
+        pump(50);
+
+        // Backward Notch 1: dy = +120 (must not flip; requires full -240 threshold)
+        sendWheel(viewer.viewport(), center, 120);
+        pump(30);
+        const bool stayedBeforeThreshold = (viewer.currentPage() == lastPage) && spyPage.isEmpty();
+
+        // Backward Notch 2: dy = +120 (accumulates -240, flips to previous page)
+        sendWheel(viewer.viewport(), center, 120);
+        pump(100);
+        const bool flippedToPrev = (viewer.currentPage() == lastPage - 1) && (spyPage.count() == 1);
+
+        recordTest(stayedOnLastPage && stayedBeforeThreshold && flippedToPrev,
+                   "Group 1.19: Last-page forward wheel flip past bottom does not overrun and accumulator cleanly resets");
+    }
+
+    // 1.20: Boundary navigation (nextPage on last page, previousPage on first page) across all view modes
+    {
+        SignalRecorder<int, int> spyPage(&viewer, &ui::PdfViewerWidget::pageChanged);
+        const std::vector<layout::ViewMode> modes = {
+            layout::ViewMode::Continuous,
+            layout::ViewMode::SinglePage,
+            layout::ViewMode::TwoPage,
+            layout::ViewMode::TwoPageCover
+        };
+
+        bool ok = true;
+        const int lastPage = viewer.pageCount() - 1;
+
+        for (auto mode : modes) {
+            viewer.setViewMode(mode);
+            viewer.goToPage(0);
+            pump(50);
+            spyPage.clear();
+
+            // previousPage on first page must remain on page 0 without signals
+            viewer.previousPage();
+            pump(50);
+            if (viewer.currentPage() != 0 || !spyPage.isEmpty()) {
+                ok = false;
+                break;
+            }
+
+            // Navigate to last page
+            viewer.goToPage(lastPage);
+            pump(50);
+            const int expectedLast = viewer.currentPage();
+            spyPage.clear();
+
+            // nextPage on last page must not overrun and must not emit signals
+            viewer.nextPage();
+            pump(50);
+            if (viewer.currentPage() != expectedLast || !spyPage.isEmpty()) {
+                ok = false;
+                break;
+            }
+        }
+
+        // Restore continuous mode and first page
+        viewer.setViewMode(layout::ViewMode::Continuous);
+        viewer.goToPage(0);
+        pump(50);
+
+        recordTest(ok, "Group 1.20: Boundary navigation (nextPage on last page, previousPage on first page) across all view modes");
+    }
 }
 
 // ======================================================================
