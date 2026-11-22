@@ -377,6 +377,39 @@ target_include_directories(test_redaction_file_safety PRIVATE
 )
 target_link_libraries(test_redaction_file_safety PRIVATE Qt6::Core)
 
+# RFC Pass 0 Viewer Characterization Suite (BRIEF T24)
+add_executable(test_viewer_characterization
+    tests/ui/test_viewer_characterization.cpp
+    src/ui/ColorMode.h
+    src/ui/ImageUtils.h
+    src/ui/FindBar.h
+    src/ui/FindBar.cpp
+    src/ui/ThumbnailListWidget.h
+    src/ui/ThumbnailListWidget.cpp
+    src/ui/SearchResultsWidget.h
+    src/ui/SearchResultsWidget.cpp
+    src/ui/MainWindow.h
+    src/ui/MainWindow.cpp
+    src/ui/FreeTextLayout.h
+    src/ui/FreeTextLayout.cpp
+    src/ui/PdfViewerWidget.cpp
+)
+target_include_directories(test_viewer_characterization PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/support
+)
+target_link_libraries(test_viewer_characterization PRIVATE
+    Qt6::Widgets
+    Qt6::PrintSupport
+    pdf_engine
+    pdf_ipc
+)
+if(ENABLE_TEST_HOOKS)
+    target_compile_definitions(test_viewer_characterization PRIVATE PDF_WORKER_TEST_HOOKS=1)
+endif()
+add_dependencies(test_viewer_characterization pdf_worker)
+
 # Headless tests for the encrypted-PDF password prompt workflow.
 add_executable(test_password_prompt
     test_password_prompt.cpp
@@ -521,6 +554,11 @@ add_test(
 )
 
 add_test(
+    NAME ViewerCharacterizationTestSuite
+    COMMAND test_viewer_characterization "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
+)
+
+add_test(
     NAME RedactionRotationTestSuite
     COMMAND test_redaction_rotation "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
 )
@@ -565,6 +603,9 @@ if(WIN32)
     set_tests_properties(PasswordPromptTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
     )
+    set_tests_properties(ViewerCharacterizationTestSuite PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
+    )
     set_tests_properties(RedactionRotationTestSuite PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_BIN_DIR};PATH=path_list_prepend:${COMPILER_BIN_DIR};QT_PLUGIN_PATH=set:${QT_PLUGIN_DIR};QT_QPA_PLATFORM=set:offscreen"
     )
@@ -593,6 +634,7 @@ if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION
     target_link_options(test_hostile_forms PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(fuzz_ipc_messages PRIVATE -Wl,--allow-multiple-definition)
     target_link_options(test_redaction_rotation PRIVATE -Wl,--allow-multiple-definition)
+    target_link_options(test_viewer_characterization PRIVATE -Wl,--allow-multiple-definition)
 endif()
 
 # Deployment & RPATH handling
@@ -614,6 +656,12 @@ if(WIN32)
             "${pdfium_binaries_SOURCE_DIR}/bin/pdfium.dll"
             "$<TARGET_FILE_DIR:test_password_prompt>"
         COMMENT "Deploying pdfium.dll next to test_password_prompt"
+    )
+    add_custom_command(TARGET test_viewer_characterization POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${pdfium_binaries_SOURCE_DIR}/bin/pdfium.dll"
+            "$<TARGET_FILE_DIR:test_viewer_characterization>"
+        COMMENT "Deploying pdfium.dll next to test_viewer_characterization"
     )
     add_custom_command(TARGET test_redaction_rotation POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -637,6 +685,10 @@ elseif(UNIX AND NOT APPLE)
         INSTALL_RPATH "$ORIGIN/../lib"
     )
     set_target_properties(test_password_prompt PROPERTIES
+        BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
+        INSTALL_RPATH "$ORIGIN/../lib"
+    )
+    set_target_properties(test_viewer_characterization PROPERTIES
         BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../lib"
     )
