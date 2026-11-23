@@ -76,10 +76,6 @@ public:
     void setIsSelecting(bool selecting) noexcept { m_isSelecting = selecting; }
 
     bool clearSelection() noexcept;
-    void reset() noexcept {
-        clearTextCache();
-        clearSelection();
-    }
 
     QString selectedText() const;
 
