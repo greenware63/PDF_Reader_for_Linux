@@ -3691,6 +3691,224 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         viewer.waitForRendering();
         pump(100);
     }
+
+    // 4.25: beginDrag initializes current doc pos preventing stale click-drag (T1)
+    // Kills mutation: commenting out m_dragCurrentDocPos = docPos in beginDrag()
+    {
+        viewer.setRedactionMode(true);
+        viewer.clearStagedRedactions();
+        pump(50);
+
+        const double dpr = viewer.effectiveDpr();
+        auto pagePtToVp = [&](int page, double px, double py) -> QPointF {
+            int64_t sx = 0, sy = 0;
+            viewer.layout().pagePointsToDocument(page, px, py, sx, sy);
+            return QPointF(static_cast<double>(sx - viewer.currentDocScrollX()) / dpr,
+                           static_cast<double>(sy - viewer.currentDocScrollY()) / dpr);
+        };
+
+        // 1. Drag a rectangle far from origin (100, 100) -> (200, 200) and release, staging 1 mark
+        QPointF p100 = pagePtToVp(0, 100.0, 100.0);
+        QPointF p200 = pagePtToVp(0, 200.0, 200.0);
+        QMouseEvent press1(QEvent::MouseButtonPress, p100, p100, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press1);
+        pump(20);
+        QMouseEvent move1(QEvent::MouseMove, p200, p200, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move1);
+        pump(20);
+        QMouseEvent release1(QEvent::MouseButtonRelease, p200, p200, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release1);
+        pump(50);
+        const bool step1Ok = (viewer.stagedRedactionCount() == 1);
+
+        // 2. Clear staged marks; count is 0
+        viewer.clearStagedRedactions();
+        pump(20);
+        const bool step2Ok = (viewer.stagedRedactionCount() == 0);
+
+        // 3. Press at (20, 20) with no move, release immediately at (20, 20)
+        QPointF p20 = pagePtToVp(0, 20.0, 20.0);
+        QMouseEvent press2(QEvent::MouseButtonPress, p20, p20, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press2);
+        pump(20);
+        QMouseEvent release2(QEvent::MouseButtonRelease, p20, p20, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release2);
+        pump(50);
+
+        // 4. Assert stagedRedactionCount() == 0 (under mutation, delta |200-20|=180 stages a mark)
+        const bool step3Ok = (viewer.stagedRedactionCount() == 0);
+
+        const bool t1Ok = step1Ok && step2Ok && step3Ok;
+        const std::string dT1 = "step1=" + std::to_string(step1Ok) +
+                                " step2=" + std::to_string(step2Ok) +
+                                " countAfterClick=" + std::to_string(viewer.stagedRedactionCount());
+        recordTest(t1Ok, "Group 4.25: beginDrag initializes current doc pos preventing stale click-drag (T1)", dT1);
+
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(false);
+    }
+
+    // 4.26: resetDrag on closeDocument discards in-flight drag across reopen (T2)
+    // Kills mutation: resetDrag() becoming a no-op
+    {
+        viewer.setRedactionMode(true);
+        viewer.clearStagedRedactions();
+        pump(50);
+
+        const double dpr = viewer.effectiveDpr();
+        auto pagePtToVp = [&](int page, double px, double py) -> QPointF {
+            int64_t sx = 0, sy = 0;
+            viewer.layout().pagePointsToDocument(page, px, py, sx, sy);
+            return QPointF(static_cast<double>(sx - viewer.currentDocScrollX()) / dpr,
+                           static_cast<double>(sy - viewer.currentDocScrollY()) / dpr);
+        };
+
+        // 1. Press at (100, 100) and move to (150, 150) without releasing
+        QPointF p100 = pagePtToVp(0, 100.0, 100.0);
+        QPointF p150 = pagePtToVp(0, 150.0, 150.0);
+        QMouseEvent press(QEvent::MouseButtonPress, p100, p100, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        pump(20);
+        QMouseEvent move(QEvent::MouseMove, p150, p150, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move);
+        pump(20);
+
+        // 2. Call closeDocument(), reopen samplePdf, wait for layout
+        viewer.editLog().clear();
+        viewer.closeDocument();
+        pump(50);
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(100);
+
+        // 3. Assert stagedRedactionCount() == 0 after reopen
+        const bool countZeroAfterReopen = (viewer.stagedRedactionCount() == 0);
+
+        // 4. Send only a left-button release (no press) at moved position (150, 150)
+        QPointF releaseVp = pagePtToVp(0, 150.0, 150.0);
+        QMouseEvent loneRelease(QEvent::MouseButtonRelease, releaseVp, releaseVp, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &loneRelease);
+        pump(50);
+
+        // 5. Assert stagedRedactionCount() == 0
+        const bool countZeroAfterRelease = (viewer.stagedRedactionCount() == 0);
+
+        const bool t2Ok = countZeroAfterReopen && countZeroAfterRelease;
+        const std::string dT2 = "reopenCount=" + std::to_string(viewer.stagedRedactionCount()) +
+                                " zeroAfterReopen=" + std::to_string(countZeroAfterReopen) +
+                                " zeroAfterRelease=" + std::to_string(countZeroAfterRelease);
+        recordTest(t2Ok, "Group 4.26: resetDrag on closeDocument discards in-flight drag across reopen (T2)", dT2);
+
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(false);
+    }
+
+    // 4.27: finishDrag clears isDragging allowing subsequent text selection (T3)
+    // Kills mutation: commenting out m_isDragging = false in finishDrag()
+    {
+        // Open twoPageTextPdf so page 0 has known text characters
+        if (!twoPageTextPdf.isEmpty()) {
+            viewer.editLog().clear();
+            viewer.openDocument(twoPageTextPdf);
+            viewer.waitForRendering();
+            viewer.setZoom(1.0);
+            viewer.goToPage(0);
+            viewer.waitForRendering();
+            pump(100);
+
+            waitFor([&]() {
+                return viewer.getPageText(0) != nullptr;
+            }, 5000);
+        }
+
+        viewer.setRedactionMode(true);
+        viewer.clearStagedRedactions();
+        viewer.clearSelection();
+        pump(50);
+
+        const double dpr = viewer.effectiveDpr();
+        auto pagePtToVp = [&](int page, double px, double py) -> QPointF {
+            int64_t sx = 0, sy = 0;
+            viewer.layout().pagePointsToDocument(page, px, py, sx, sy);
+            return QPointF(static_cast<double>(sx - viewer.currentDocScrollX()) / dpr,
+                           static_cast<double>(sy - viewer.currentDocScrollY()) / dpr);
+        };
+
+        // 1. Drag from (100, 100) to (150, 150) in page pt and release, staging 1 mark
+        QPointF p100 = pagePtToVp(0, 100.0, 100.0);
+        QPointF p150 = pagePtToVp(0, 150.0, 150.0);
+        QMouseEvent p1(QEvent::MouseButtonPress, p100, p100, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &p1);
+        pump(20);
+        QMouseEvent m1(QEvent::MouseMove, p150, p150, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &m1);
+        pump(20);
+        QMouseEvent r1(QEvent::MouseButtonRelease, p150, p150, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &r1);
+        pump(50);
+        const bool step1Ok = (viewer.stagedRedactionCount() == 1);
+
+        // 2. Without pressing, send a mouse move to (250, 250) and a mouse release
+        QPointF p250 = pagePtToVp(0, 250.0, 250.0);
+        QMouseEvent bareMove(QEvent::MouseMove, p250, p250, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &bareMove);
+        pump(20);
+        QMouseEvent bareRelease(QEvent::MouseButtonRelease, p250, p250, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &bareRelease);
+        pump(50);
+
+        // 3. Assert stagedRedactionCount() == 1
+        const bool step2Ok = (viewer.stagedRedactionCount() == 1);
+
+        // 4. Turn redaction mode off, select text across chars via mouse drag
+        viewer.setRedactionMode(false);
+        viewer.clearSelection();
+        pump(50);
+
+        const auto pt0 = viewer.getPageText(0);
+        bool selCreated = false;
+        if (pt0 && pt0->charCount() > 5) {
+            const auto& pl0 = viewer.layout().getPageLayout(0);
+            const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+            auto charCenter = [&](const layout::PageLayout& pl, const pdf::PageCharBox& b) -> QPointF {
+                double x = (static_cast<double>(pl.leftPixel) + ((b.left + b.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+                double y = (static_cast<double>(pl.topPixel) + ((b.top + b.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+                return QPointF(x, y);
+            };
+
+            QPointF from = charCenter(pl0, pt0->chars[0]);
+            QPointF to = charCenter(pl0, pt0->chars[4]);
+            QMouseEvent pSel(QEvent::MouseButtonPress, from, from, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &pSel);
+            pump(20);
+            QMouseEvent mSel(QEvent::MouseMove, to, to, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &mSel);
+            pump(20);
+            QMouseEvent rSel(QEvent::MouseButtonRelease, to, to, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &rSel);
+            pump(50);
+
+            // 5. Assert viewer.hasSelection() == true
+            selCreated = viewer.hasSelection();
+        }
+
+        const bool t3Ok = step1Ok && step2Ok && selCreated;
+        const std::string dT3 = "step1=" + std::to_string(step1Ok) +
+                                " step2=" + std::to_string(step2Ok) +
+                                " selCreated=" + std::to_string(selCreated) +
+                                " hasSel=" + std::to_string(viewer.hasSelection());
+        recordTest(t3Ok, "Group 4.27: finishDrag clears isDragging allowing subsequent text selection (T3)", dT3);
+
+        viewer.clearSelection();
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(false);
+
+        // Restore samplePdf for Group 5
+        viewer.editLog().clear();
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(100);
+    }
 }
 
 // ======================================================================
