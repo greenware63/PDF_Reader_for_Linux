@@ -28,14 +28,10 @@ public:
 
     // Mode
     bool isMode() const noexcept { return m_mode; }
-    bool mode() const noexcept { return m_mode; }
     bool setMode(bool enabled) noexcept;
 
     // Drag state
     bool isDragging() const noexcept { return m_isDragging; }
-    int dragStartPage() const noexcept { return m_dragStartPage; }
-    const QPointF& dragStartDocPos() const noexcept { return m_dragStartDocPos; }
-    const QPointF& dragCurrentDocPos() const noexcept { return m_dragCurrentDocPos; }
 
     void beginDrag(int page, const QPointF& docPos) noexcept;
     void updateDrag(const QPointF& docPos) noexcept;
