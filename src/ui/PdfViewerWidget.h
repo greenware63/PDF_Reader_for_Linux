@@ -21,6 +21,7 @@
 #include "ViewerTileController.h"
 #include "ViewerSelectionController.h"
 #include "ViewerSearchController.h"
+#include "ViewerRedactionController.h"
 #include "cache/TileCache.h"
 #include "ipc/WorkerClient.h"
 #include "engine/PageText.h"
@@ -262,13 +263,13 @@ public:
     const std::vector<QString>& pageLabels() const noexcept { return m_pageLabels; }
     void requestThumbnail(int pageIndex, int targetWidth = 140);
     // Redaction APIs
-    bool isRedactionMode() const noexcept { return m_redactionMode; }
+    bool isRedactionMode() const noexcept { return m_redactionController.isMode(); }
     void setRedactionMode(bool enabled);
-    void toggleRedactionMode() { setRedactionMode(!m_redactionMode); }
+    void toggleRedactionMode() { setRedactionMode(!m_redactionController.isMode()); }
     void clearStagedRedactions();
-    bool hasStagedRedactions() const noexcept { return !m_stagedRedactions.empty(); }
-    int stagedRedactionCount() const noexcept;
-    const std::map<int, std::vector<pdf::ipc::RedactRect>>& stagedRedactions() const noexcept { return m_stagedRedactions; }
+    bool hasStagedRedactions() const noexcept { return !m_redactionController.empty(); }
+    int stagedRedactionCount() const noexcept { return m_redactionController.count(); }
+    const std::map<int, std::vector<pdf::ipc::RedactRect>>& stagedRedactions() const noexcept { return m_redactionController.marks(); }
     void addStagedRedaction(int pageIndex, const pdf::ipc::RedactRect& rect);
     /// Stages canonical-page-space marks for the current selection. Returns false (staging nothing)
     /// if the text of any selected page could not be obtained: redaction is never silently partial.
@@ -357,8 +358,6 @@ private:
     void drawSelection(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale);
     void drawSearchHighlights(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale);
     void scrollToMatch(const pdf::SearchMatch& match);
-    void drawRedactionOverlays(QPainter& painter, const layout::ViewportRange& visPages,
-                               int64_t scrollDocX, int64_t scrollDocY, double effScale);
 
     QString openErrorMessage(pdf::DocumentError error, const QString& filePath) const;
     void applyOpenedDocument(int64_t newDocumentId, const QString& filePath, const QString& password, const pdf::OpenResult& result);
@@ -389,6 +388,7 @@ private:
     ViewerTileController m_tileController;
     ViewerSelectionController m_selectionController;
     ViewerSearchController m_searchController;
+    ViewerRedactionController m_redactionController;
 
     std::vector<pdf::OutlineItem> m_outline;
     QString m_workerErrorMessage;
@@ -402,13 +402,6 @@ private:
     ColorMode m_colorMode{ColorMode::Normal};
     bool m_darkMode{false};
     mutable std::unordered_map<pdf::TileKey, QPixmap, pdf::TileKeyHash> m_transformedPixmapCache;
-    // Redaction state
-    bool m_redactionMode{false};
-    std::map<int, std::vector<pdf::ipc::RedactRect>> m_stagedRedactions;
-    bool m_isRedacting{false};
-    int m_redactStartPage{-1};
-    QPointF m_redactStartDocPos;
-    QPointF m_redactCurrentDocPos;
     // Ink drawing state
     bool m_inkDrawingMode{false};
     uint32_t m_inkColorArgb{0xFF000000};

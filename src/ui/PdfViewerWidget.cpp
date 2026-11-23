@@ -378,8 +378,7 @@ void PdfViewerWidget::closeDocument() {
     }
     QScopedValueRollback<bool> closeGuard(m_editInProgress, true);
     clearStagedRedactions();
-    m_isRedacting = false;
-    m_redactStartPage = -1;
+    m_redactionController.resetDrag();
     m_workerErrorMessage.clear();
     cancelPendingOpen();
     // Close document and page cache serially on worker thread
@@ -1124,13 +1123,10 @@ void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
             }
         }
 
-        if (m_redactionMode) {
+        if (m_redactionController.isMode()) {
             int page = layout().getPageAt(docX, docY);
             if (page >= 0) {
-                m_isRedacting = true;
-                m_redactStartPage = page;
-                m_redactStartDocPos = QPointF(static_cast<qreal>(docX), static_cast<qreal>(docY));
-                m_redactCurrentDocPos = m_redactStartDocPos;
+                m_redactionController.beginDrag(page, QPointF(static_cast<qreal>(docX), static_cast<qreal>(docY)));
                 viewport()->update();
                 event->accept();
                 return;
@@ -1220,11 +1216,11 @@ void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
-    if (m_isRedacting && isDocumentOpen()) {
+    if (m_redactionController.isDragging() && isDocumentOpen()) {
         const double dpr = effectiveDpr();
         const int64_t docX = currentDocScrollX() + static_cast<int64_t>(std::round(event->position().x() * dpr));
         const int64_t docY = currentDocScrollY() + static_cast<int64_t>(std::round(event->position().y() * dpr));
-        m_redactCurrentDocPos = QPointF(static_cast<qreal>(docX), static_cast<qreal>(docY));
+        m_redactionController.updateDrag(QPointF(static_cast<qreal>(docX), static_cast<qreal>(docY)));
         viewport()->update();
         event->accept();
         return;
@@ -1328,34 +1324,12 @@ void PdfViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
-    if (event->button() == Qt::LeftButton && m_isRedacting) {
-        m_isRedacting = false;
-        const int page = m_redactStartPage;
-        if (page >= 0 && isDocumentOpen()) {
-            // Marks are stored in canonical page space (unrotated, top-left origin, PDF points), the
-            // space pdf_redact expects. The layout owns the view-rotation transform, so the same
-            // code path is correct at every rotation. Both drag corners are mapped, then normalised.
-            const auto& pl = layout().getPageLayout(page);
-            double ax = 0.0, ay = 0.0, bx = 0.0, by = 0.0;
-            const auto toDoc = [](const QPointF& p, int64_t& dx, int64_t& dy) {
-                dx = static_cast<int64_t>(std::llround(p.x()));
-                dy = static_cast<int64_t>(std::llround(p.y()));
-            };
-            int64_t sx = 0, sy = 0, ex = 0, ey = 0;
-            toDoc(m_redactStartDocPos, sx, sy);
-            toDoc(m_redactCurrentDocPos, ex, ey);
-            if (layout().documentToPagePoints(page, sx, sy, ax, ay) &&
-                layout().documentToPagePoints(page, ex, ey, bx, by)) {
-                const double x0 = std::max(0.0, std::min(pl.widthPoints, std::min(ax, bx)));
-                const double y0 = std::max(0.0, std::min(pl.heightPoints, std::min(ay, by)));
-                const double x1 = std::max(0.0, std::min(pl.widthPoints, std::max(ax, bx)));
-                const double y1 = std::max(0.0, std::min(pl.heightPoints, std::max(ay, by)));
-                if ((x1 - x0) >= 3.0 && (y1 - y0) >= 3.0) {
-                    addStagedRedaction(page, pdf::ipc::RedactRect{x0, y0, x1, y1});
-                }
-            }
+    if (event->button() == Qt::LeftButton && m_redactionController.isDragging()) {
+        int page = -1;
+        pdf::ipc::RedactRect rect;
+        if (m_redactionController.finishDrag(layout(), isDocumentOpen(), page, rect)) {
+            addStagedRedaction(page, rect);
         }
-        m_redactStartPage = -1;
         viewport()->update();
         event->accept();
         return;
@@ -1700,7 +1674,7 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
     // 7. Draw staged redactions and active redaction rubber-band
     if (visPages.isValid()) {
         const double effScale = qScale * qDpr;
-        drawRedactionOverlays(painter, visPages, scrollDocX, scrollDocY, effScale);
+        m_redactionController.drawOverlays(painter, layout(), visPages, scrollDocX, scrollDocY, effScale);
     }
 
     // 8. Draw active ink drawing stroke
@@ -1714,19 +1688,18 @@ void PdfViewerWidget::paintEvent(QPaintEvent* /*event*/) {
 }
 
 void PdfViewerWidget::setRedactionMode(bool enabled) {
-    if (m_redactionMode == enabled) {
+    if (!m_redactionController.setMode(enabled)) {
         return;
     }
-    m_redactionMode = enabled;
-    if (m_redactionMode) {
+    if (m_redactionController.isMode()) {
         if (m_inkDrawingMode) {
             setInkDrawingMode(false);
         }
         clearSelection();
     }
-    viewport()->setCursor(m_redactionMode ? Qt::CrossCursor : Qt::IBeamCursor);
+    viewport()->setCursor(m_redactionController.isMode() ? Qt::CrossCursor : Qt::IBeamCursor);
     viewport()->update();
-    Q_EMIT redactionModeChanged(m_redactionMode);
+    Q_EMIT redactionModeChanged(m_redactionController.isMode());
 }
 
 void PdfViewerWidget::setInkDrawingMode(bool enabled) {
@@ -1735,7 +1708,7 @@ void PdfViewerWidget::setInkDrawingMode(bool enabled) {
     }
     m_inkDrawingMode = enabled;
     if (m_inkDrawingMode) {
-        if (m_redactionMode) {
+        if (m_redactionController.isMode()) {
             setRedactionMode(false);
         }
         clearSelection();
@@ -1779,36 +1752,17 @@ void PdfViewerWidget::drawActiveInkStroke(QPainter& painter, int64_t scrollDocX,
 }
 
 void PdfViewerWidget::clearStagedRedactions() {
-    if (m_stagedRedactions.empty()) {
+    if (!m_redactionController.clear()) {
         return;
     }
-    m_stagedRedactions.clear();
     viewport()->update();
     Q_EMIT redactionMarksChanged();
 }
 
-int PdfViewerWidget::stagedRedactionCount() const noexcept {
-    int count = 0;
-    for (const auto& [_, rects] : m_stagedRedactions) {
-        count += static_cast<int>(rects.size());
-    }
-    return count;
-}
-
 void PdfViewerWidget::addStagedRedaction(int pageIndex, const pdf::ipc::RedactRect& rect) {
-    if (pageIndex < 0 || pageIndex >= m_pageCount) {
+    if (!m_redactionController.addStaged(pageIndex, rect, m_pageCount)) {
         return;
     }
-    pdf::ipc::RedactRect norm{
-        std::min(rect.left, rect.right),
-        std::min(rect.top, rect.bottom),
-        std::max(rect.left, rect.right),
-        std::max(rect.top, rect.bottom)
-    };
-    if (norm.width() <= 0.0 || norm.height() <= 0.0) {
-        return;
-    }
-    m_stagedRedactions[pageIndex].push_back(norm);
     viewport()->update();
     Q_EMIT redactionMarksChanged();
 }
@@ -1845,24 +1799,9 @@ bool PdfViewerWidget::markSelectionForRedaction() {
         const int startChar = (p == p0) ? c0 : 0;
         const int endChar = (p == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
         const auto& pl = layout().getPageLayout(p);
-        // Safety margin (1.5 pt, ~3.1 px at 150 DPI) ensuring font descenders (g, y, p, q),
-        // diacritics/accents, and italic overhang are fully enveloped by the redaction box.
-        constexpr double kSelectionPadPt = 1.5;
         // Selection rectangles are already canonical page points (unrotated, top-left origin).
         for (const auto& r : pt.getSelectionRects(startChar, endChar)) {
-            const double rLeft = std::min(r.left, r.right);
-            const double rTop = std::min(r.top, r.bottom);
-            const double rRight = std::max(r.left, r.right);
-            const double rBottom = std::max(r.top, r.bottom);
-
-            const double padLeft = std::max(0.0, rLeft - kSelectionPadPt);
-            const double padTop = std::max(0.0, rTop - kSelectionPadPt);
-            const double padRight = (pl.widthPoints > 0.0) ? std::min(pl.widthPoints, rRight + kSelectionPadPt) : (rRight + kSelectionPadPt);
-            const double padBottom = (pl.heightPoints > 0.0) ? std::min(pl.heightPoints, rBottom + kSelectionPadPt) : (rBottom + kSelectionPadPt);
-
-            pdf::ipc::RedactRect rr{padLeft, padTop, padRight, padBottom};
-            if (rr.width() > 0.0 && rr.height() > 0.0) {
-                m_stagedRedactions[p].push_back(rr);
+            if (m_redactionController.stageSelectionRect(p, r, pl.widthPoints, pl.heightPoints)) {
                 addedAny = true;
             }
         }
@@ -1873,62 +1812,6 @@ bool PdfViewerWidget::markSelectionForRedaction() {
         Q_EMIT redactionMarksChanged();
     }
     return true;
-}
-
-void PdfViewerWidget::drawRedactionOverlays(QPainter& painter, const layout::ViewportRange& visPages,
-                                           int64_t scrollDocX, int64_t scrollDocY, double effScale) {
-    if (!visPages.isValid() || effScale <= 0.0) {
-        return;
-    }
-
-    // Draw committed staged redactions
-    for (int p = visPages.firstVisiblePage; p <= visPages.lastVisiblePage; ++p) {
-        auto it = m_stagedRedactions.find(p);
-        if (it == m_stagedRedactions.end() || it->second.empty()) {
-            continue;
-        }
-        for (const auto& r : it->second) {
-            // Canonical page points -> document pixels under the current view rotation.
-            int64_t d0x = 0, d0y = 0, d1x = 0, d1y = 0;
-            if (!layout().pagePointsToDocument(p, r.left, r.top, d0x, d0y) ||
-                !layout().pagePointsToDocument(p, r.right, r.bottom, d1x, d1y)) {
-                continue;
-            }
-            const qreal rx = static_cast<qreal>(std::min(d0x, d1x) - scrollDocX);
-            const qreal ry = static_cast<qreal>(std::min(d0y, d1y) - scrollDocY);
-            const qreal rw = static_cast<qreal>(std::max(d0x, d1x) - std::min(d0x, d1x));
-            const qreal rh = static_cast<qreal>(std::max(d0y, d1y) - std::min(d0y, d1y));
-            QRectF box(rx, ry, rw, rh);
-
-            // Semi-opaque dark mask
-            painter.fillRect(box, QColor(0, 0, 0, 190));
-            // Crimson red boundary
-            QPen pen(QColor(220, 20, 60), 2);
-            painter.setPen(pen);
-            painter.drawRect(box);
-
-            // Small badge when box is sufficiently large
-            if (rw >= 40.0 && rh >= 16.0) {
-                painter.setFont(QFont(QStringLiteral("Arial"), 8, QFont::Bold));
-                painter.setPen(QColor(255, 255, 255, 230));
-                painter.drawText(box, Qt::AlignCenter, QStringLiteral("REDACT"));
-            }
-        }
-    }
-
-    // Draw active drag rubber-band
-    if (m_isRedacting && m_redactStartPage >= 0) {
-        const qreal rx = static_cast<qreal>(std::min(m_redactStartDocPos.x(), m_redactCurrentDocPos.x()) - static_cast<double>(scrollDocX));
-        const qreal ry = static_cast<qreal>(std::min(m_redactStartDocPos.y(), m_redactCurrentDocPos.y()) - static_cast<double>(scrollDocY));
-        const qreal rw = static_cast<qreal>(std::abs(m_redactCurrentDocPos.x() - m_redactStartDocPos.x()));
-        const qreal rh = static_cast<qreal>(std::abs(m_redactCurrentDocPos.y() - m_redactStartDocPos.y()));
-        QRectF dragBox(rx, ry, rw, rh);
-
-        painter.fillRect(dragBox, QColor(220, 20, 60, 70));
-        QPen dragPen(QColor(220, 20, 60), 2, Qt::DashLine);
-        painter.setPen(dragPen);
-        painter.drawRect(dragBox);
-    }
 }
 
 bool PdfViewerWidget::markupSelection(pdf::AnnotationSubtype subtype, uint32_t colorArgb) {
