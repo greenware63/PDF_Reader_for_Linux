@@ -20,6 +20,7 @@
 #include "ViewerLayoutController.h"
 #include "ViewerTileController.h"
 #include "ViewerSelectionController.h"
+#include "ViewerSearchController.h"
 #include "cache/TileCache.h"
 #include "ipc/WorkerClient.h"
 #include "engine/PageText.h"
@@ -251,9 +252,9 @@ public:
     /// Makes hit `index` (into searchMatches()) the current hit and scrolls to it. Out-of-range is ignored.
     void goToSearchMatch(int index);
     void clearSearch();
-    int searchMatchCount() const noexcept { return static_cast<int>(m_searchMatches.size()); }
-    int currentSearchMatchIndex() const noexcept { return m_currentMatchIndex; }
-    const std::vector<pdf::SearchMatch>& searchMatches() const noexcept { return m_searchMatches; }
+    int searchMatchCount() const noexcept { return static_cast<int>(m_searchController.matches().size()); }
+    int currentSearchMatchIndex() const noexcept { return m_searchController.currentIndex(); }
+    const std::vector<pdf::SearchMatch>& searchMatches() const noexcept { return m_searchController.matches(); }
     const std::vector<pdf::OutlineItem>& outline() const noexcept { return m_outline; }
     bool hasWorkerError() const noexcept { return !m_workerErrorMessage.isEmpty(); }
     QString workerErrorMessage() const noexcept { return m_workerErrorMessage; }
@@ -387,14 +388,8 @@ private:
 
     ViewerTileController m_tileController;
     ViewerSelectionController m_selectionController;
+    ViewerSearchController m_searchController;
 
-    // Text search state
-    int64_t m_currentSearchId{0};
-    QString m_searchQuery;
-    bool m_searchMatchCase{false};
-    int m_searchStartPage{0};
-    std::vector<pdf::SearchMatch> m_searchMatches;
-    int m_currentMatchIndex{-1};
     std::vector<pdf::OutlineItem> m_outline;
     QString m_workerErrorMessage;
     std::vector<QString> m_pageLabels;
