@@ -158,7 +158,7 @@ Every implementation pass must avoid broad formatting, renaming, or unrelated cl
   - Coordinate transforms under rotation.
   - Drag threshold and clamping.
   - Pointer precedence over ink and selection.
-  - Staged marks surviving `openDocument`.
+  - Staged marks surviving `closeDocument`.
 - **Rollback:** revert the extraction PR. No IPC or file format changes.
 
 **One behavior to pin, not fix:** `setRedactionMode(false)` does not cancel an in-progress drag, and the release handler checks `m_isRedacting`, not the mode. A drag that outlives the mode toggle still stages a mark on release. Characterize this as-is. Do not change it during the refactor.
