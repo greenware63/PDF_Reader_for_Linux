@@ -116,6 +116,55 @@ Each numbered pass is a separate, behavior-preserving PR based on the previous g
 
 Every implementation pass must avoid broad formatting, renaming, or unrelated cleanup so a revert remains local and reviewable. If a pass cannot keep the full suite green, revert that pass rather than weakening a characterization or acceptance test.
 
+### 5.1 Pass 4 detail: Annotation and redaction interaction
+
+**Measured baseline (`dded49b`)**
+- `PdfViewerWidget.cpp` is 4,027 lines. The header is 455 lines.
+- **Redaction:**
+  - State: `m_redactionMode`, `m_stagedRedactions`, `m_isRedacting`, `m_redactStartPage`, `m_redactStartDocPos` and `m_redactCurrentDocPos`.
+  - Code: press at about line 1127, move at 1223, release at 1331, mode toggle at 1716, staging at 1781–1813, `markSelectionForRedaction` at 1816, overlays at 1878. That is about 250 lines in total.
+- **Annotation:**
+  - Add commands (`markupSelection`, text, square, circle, ink, free text, stamp, file attachment) run from 1934 to about 2440.
+  - Delete, modify and tooltip code runs from 2485 to 2830, and ink-mode state sits at 1740.
+  - That is about 900 lines.
+- **Out of scope for Pass 4:**
+  - Undo and redo dispatch (2840–2980) and crash-replay (3070–3110) belong to Pass 5's `ViewerEditController`.
+  - Pass 4 therefore keeps `m_editLog` in the facade and borrows it by reference.
+
+**Decision: split Pass 4 into three separately revertible PRs**
+
+| Step | Work | Why this order |
+|---|---|---|
+| 4a | `ViewerRedactionController` | Smallest, and the highest safety stakes ("redaction is never silently partial"). |
+| 4b | `ViewerAnnotationController` (placement, add commands, hit-test and tooltip policy, ink state) | Large. It needs the redaction extraction done first so the mode mutual-exclusion between ink and redaction is already pinned. |
+| 4c | Unify `rotateRectPointsForDisplay` | There are two identical copies, one in `PdfViewerWidget.cpp:14` and one in `ViewerSelectionController.cpp:11`. Move it to one shared private header, for example `src/ui/ViewerGeometry.h`. |
+
+**4a design**
+- **Plain class, not a QObject:** no PDFium and no `WorkerClient`.
+- **Owns:** mode flag, staged marks (`std::map<int, std::vector<RedactRect>>`) and drag state.
+- **Methods:**
+  - `setMode(bool)` returns whether the mode changed.
+  - `beginDrag(page, docPos)`, `updateDrag(docPos)` and `endDrag(layout)`, which returns an optional rect to stage.
+  - `addStaged(page, rect, pageCount)` returns whether it added, and `clear()` returns whether it cleared.
+  - `stagedCount()`, a pure `padSelectionRect(rect, pageW, pageH)`, and `drawOverlays(...)`.
+- **Facade keeps:**
+  - Every `Q_EMIT` (`redactionModeChanged`, `redactionMarksChanged`).
+  - `viewport()->update()` and `setCursor`.
+  - The ink-mode mutual exclusion and `clearSelection()`.
+  - The page-text lookup and `getPageTextSync` fallback inside `markSelectionForRedaction`.
+  - Event dispatch, pointer precedence and the public API.
+- **The controller borrows `const layout::DocumentLayout&` per call.** It never owns it.
+- **Risks:**
+  - Coordinate transforms under rotation.
+  - Drag threshold and clamping.
+  - Pointer precedence over ink and selection.
+  - Staged marks surviving `openDocument`.
+- **Rollback:** revert the extraction PR. No IPC or file format changes.
+
+**One behavior to pin, not fix:** `setRedactionMode(false)` does not cancel an in-progress drag, and the release handler checks `m_isRedacting`, not the mode. A drag that outlives the mode toggle still stages a mark on release. Characterize this as-is. Do not change it during the refactor.
+
+**Acceptance:** the frozen `test_widget.cpp` hash is unchanged, all four CI legs are green, there is no public API diff, and the line counts are reported.
+
 ## 6. Compatibility and safety constraints
 
 * **`PdfViewerWidget` API:** retain the header path, class name/base class, constructor/destructor, every public method/signature, test-observation accessor, protected Qt override, signal, and `private Q_SLOTS` entry. Preserve QObject lifetime, thread affinity, signal order, and event acceptance/propagation.
