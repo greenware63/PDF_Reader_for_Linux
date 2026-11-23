@@ -11,7 +11,7 @@ int64_t ViewerSearchController::beginSearch(const QString& query, bool matchCase
     m_searchMatchCase = matchCase;
     m_searchStartPage = startPage;
     m_searchMatches.clear();
-    // m_currentMatchIndex = -1;
+    m_currentMatchIndex = -1;
     return searchId;
 }
 
@@ -72,7 +72,7 @@ ViewerSearchController::BatchResult ViewerSearchController::addMatches(const std
         m_currentMatchIndex = selectedIt == m_searchMatches.end()
             ? -1
             : static_cast<int>(std::distance(m_searchMatches.begin(), selectedIt));
-    } else if (!m_searchMatches.empty() && pageCount > 0) {
+    } else if (!m_searchMatches.empty()) {
         const auto circularDistance = [this, pageCount](int pageIndex) {
             return (pageIndex - m_searchStartPage + pageCount) % pageCount;
         };
