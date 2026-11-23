@@ -13,6 +13,7 @@
 #include "ui/PdfViewerWidget.h"
 #include "ui/ViewerTileController.h"
 #include "ui/ViewerSelectionController.h"
+#include "ui/ViewerSearchController.h"
 #include "ui/MainWindow.h"
 #include "ui/ColorMode.h"
 #include "layout/DocumentLayout.h"
@@ -2472,6 +2473,187 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
         recordTest(group3_12Ok,
                    "Group 3.12: Text cache trim protects in-flight entries (C7), and drag between lines picks nearest line (C8)",
                    d312);
+    }
+
+    // 3.13: Search-side characterization gaps (M8, M1, M4, M5, S13b)
+    {
+        // 1. M8: Remove m_currentMatchIndex = -1; from beginSearch
+        // Adding matches, navigating to match index 2, then beginSearch("zzz") must reset
+        // currentIndex() to -1, completedDisplayIndex() to 0, and clear matches().
+        {
+            ui::ViewerSearchController ctrl;
+            pdf::SearchMatch m0{0, 10, 4, {}};
+            pdf::SearchMatch m1{1, 10, 4, {}};
+            pdf::SearchMatch m2{2, 10, 4, {}};
+            ctrl.addMatches({m0, m1, m2}, 5);
+            ctrl.goTo(2);
+            const bool preOk = (ctrl.currentIndex() == 2) && (ctrl.completedDisplayIndex() == 3) && (ctrl.matches().size() == 3);
+
+            ctrl.beginSearch("zzz", false, 0);
+            const bool m8Ok = preOk && (ctrl.currentIndex() == -1) && (ctrl.completedDisplayIndex() == 0) && ctrl.matches().empty();
+            const std::string dM8 = "pre=" + std::to_string(preOk) + " cur=" + std::to_string(ctrl.currentIndex()) +
+                                    " disp=" + std::to_string(ctrl.completedDisplayIndex()) + " empty=" + std::to_string(ctrl.matches().empty());
+            recordTest(m8Ok, "Group 3.13: New search resets active match index and display index (M8)", dM8);
+        }
+
+        // 2. M1: goTo accepts index == size
+        // With 3 matches, goTo(3) is out-of-range: must return nullptr and leave index unchanged.
+        // Also check goTo(-1) (rejected) and goTo(2) (accepted).
+        {
+            ui::ViewerSearchController ctrl;
+            pdf::SearchMatch m0{0, 10, 4, {}};
+            pdf::SearchMatch m1{1, 10, 4, {}};
+            pdf::SearchMatch m2{2, 10, 4, {}};
+            ctrl.addMatches({m0, m1, m2}, 5);
+            ctrl.goTo(1);
+            const bool preOk = (ctrl.currentIndex() == 1);
+
+            const auto* resSize = ctrl.goTo(3);
+            const bool sizeRejected = (resSize == nullptr) && (ctrl.currentIndex() == 1);
+
+            const auto* resNeg = ctrl.goTo(-1);
+            const bool negRejected = (resNeg == nullptr) && (ctrl.currentIndex() == 1);
+
+            const auto* resValid = ctrl.goTo(2);
+            const bool validAccepted = (resValid != nullptr) && (resValid->pageIndex == 2) && (ctrl.currentIndex() == 2);
+
+            const bool m1Ok = preOk && sizeRejected && negRejected && validAccepted;
+            const std::string dM1 = "sizeRej=" + std::to_string(sizeRejected) + " negRej=" + std::to_string(negRejected) +
+                                    " valAcc=" + std::to_string(validAccepted);
+            recordTest(m1Ok, "Group 3.13: goTo rejects out-of-range index equal to match count (M1)", dM1);
+        }
+
+        // 3. M4: Nearest-match selection and tie-break in addMatches
+        // Tests two aspects:
+        // A) Equidistant-looking linear pages from startPage 5 with pageCount 10:
+        //    Match on page 3 (linear distance 2 behind) vs page 7 (linear distance 2 ahead).
+        //    Under circular distance, page 7 has (7 - 5 + 10)%10 = 2, while page 3 has (3 - 5 + 10)%10 = 8.
+        //    Circular search selects page 7 (dist 2 < 8).
+        // B) Tie-break on the same page between charStartIndex 10 and 50:
+        //    Matches on the same page have identical circular distance, so charStartIndex determines
+        //    the nearest hit (charStartIndex 10 chosen over 50).
+        // Note on equivalent mutation: In ViewerSearchController::addMatches, m_searchMatches is already
+        // pre-sorted by (pageIndex, charStartIndex). Because std::min_element preserves the first element
+        // encountered when elements compare equivalent under a strict weak ordering (return false;),
+        // mutating the tie-break to `return false;` is mathematically equivalent. Mutating the comparator
+        // to `<=` or reversing the tie-break chooses the later match, which this test catches.
+        {
+            ui::ViewerSearchController ctrl;
+            ctrl.beginSearch("tiebreak", false, 5);
+
+            pdf::SearchMatch mA{3, 10, 4, {}}; // Page 3: circular dist = 8
+            pdf::SearchMatch mB{7, 10, 4, {}}; // Page 7: circular dist = 2, char 10
+            pdf::SearchMatch mC{7, 50, 4, {}}; // Page 7: circular dist = 2, char 50
+
+            auto res = ctrl.addMatches({mA, mC, mB}, 10);
+            const bool circularAheadChosen = (ctrl.currentIndex() == 1) && (res.scrollTarget != nullptr) && (res.scrollTarget->pageIndex == 7);
+            const bool charTieBreakChosen = (res.scrollTarget != nullptr) && (res.scrollTarget->charStartIndex == 10);
+
+            const bool m4Ok = circularAheadChosen && charTieBreakChosen;
+            const std::string dM4 = "circPage7=" + std::to_string(circularAheadChosen) + " (cur=" + std::to_string(ctrl.currentIndex()) +
+                                    ") char10=" + std::to_string(charTieBreakChosen) +
+                                    " (char=" + std::to_string(res.scrollTarget ? res.scrollTarget->charStartIndex : -1) + ")";
+            recordTest(m4Ok, "Group 3.13: Nearest search match tie-breaks by character start index (M4)", dM4);
+        }
+
+        // 4. M5: Subsequent match batch does not trigger scroll target
+        // The first batch of matches has no prior selection and must return a non-null scrollTarget.
+        // A subsequent batch arriving while an active selection exists must preserve the selection and return scrollTarget == nullptr.
+        {
+            ui::ViewerSearchController ctrl;
+            ctrl.beginSearch("test", false, 0);
+
+            pdf::SearchMatch m0{0, 10, 4, {}};
+            auto res1 = ctrl.addMatches({m0}, 5);
+            const bool firstBatchHasScroll = (res1.scrollTarget != nullptr) && (res1.scrollTarget->pageIndex == 0);
+
+            pdf::SearchMatch m1{1, 20, 4, {}};
+            auto res2 = ctrl.addMatches({m1}, 5);
+            const bool secondBatchNoScroll = (res2.scrollTarget == nullptr);
+
+            const bool m5Ok = firstBatchHasScroll && secondBatchNoScroll;
+            const std::string dM5 = "firstScroll=" + std::to_string(firstBatchHasScroll) +
+                                    " secondScroll=" + std::to_string(!secondBatchNoScroll);
+            recordTest(m5Ok, "Group 3.13: Subsequent match batch does not trigger scroll target (M5)", dM5);
+        }
+
+        // 5. S13b: Active search highlight fill renders distinct color from document background
+        // Renders PdfViewerWidget viewport to a QImage with active and non-active matches.
+        // Confirms that the interior of the active match rectangle is filled with the active highlight
+        // color (vivid orange, blue < 120), distinctly different from the blank document background
+        // (white, blue > 240) and from the non-active match highlight (yellow, blue > 130).
+        {
+            ui::PdfViewerWidget viewer;
+            viewer.resize(800, 700);
+            viewer.show();
+            viewer.ensurePolished();
+            pump(100);
+
+            viewer.openDocument(twoPageTextPdf);
+            viewer.waitForRendering();
+            pump(200);
+
+            const int64_t docId = viewer.currentDocumentId();
+
+            pdf::SearchMatch mActive;
+            mActive.pageIndex = 0;
+            mActive.charStartIndex = 0;
+            mActive.charCount = 3;
+            mActive.rects = { pdf::PageCharBox{100.0, 100.0, 150.0, 130.0} };
+
+            pdf::SearchMatch mInactive;
+            mInactive.pageIndex = 0;
+            mInactive.charStartIndex = 10;
+            mInactive.charCount = 5;
+            mInactive.rects = { pdf::PageCharBox{200.0, 100.0, 260.0, 130.0} };
+
+            viewer.findText("PaintTestQuery", false);
+            const int64_t paintSearchId = 2;
+            Q_EMIT viewer.renderWorker().searchMatchesFound(docId, paintSearchId, 0, {mActive, mInactive});
+            pump(50);
+
+            viewer.goToSearchMatch(0); // mActive is active match
+            pump(50);
+
+            QImage renderImg(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+            {
+                QPainter p(&renderImg);
+                viewer.viewport()->render(&p);
+                p.end();
+            }
+
+            const auto& pl0 = viewer.layout().getPageLayout(0);
+            const double dpr = viewer.effectiveDpr();
+            const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+            const double pl0LeftDoc = static_cast<double>(pl0.leftPixel) - static_cast<double>(viewer.currentDocScrollX());
+            const double pl0TopDoc = static_cast<double>(pl0.topPixel) - static_cast<double>(viewer.currentDocScrollY());
+
+            const int actX = static_cast<int>(std::round((pl0LeftDoc + 125.0 * effScale) / dpr));
+            const int actY = static_cast<int>(std::round((pl0TopDoc + 115.0 * effScale) / dpr));
+            const QColor actCol = renderImg.pixelColor(actX, actY);
+
+            const int inactX = static_cast<int>(std::round((pl0LeftDoc + 230.0 * effScale) / dpr));
+            const int inactY = actY;
+            const QColor inactCol = renderImg.pixelColor(inactX, inactY);
+
+            const int blankX = inactX;
+            const int blankY = static_cast<int>(std::round((pl0TopDoc + 50.0 * effScale) / dpr));
+            const QColor blankCol = renderImg.pixelColor(blankX, blankY);
+
+            // Active match fill must be painted (vivid orange, blue < 120), distinctly different
+            // from unpainted blank white background (blue > 240) and inactive yellow (blue > 130).
+            const bool actDiffFromBlank = (actCol != blankCol) && (actCol.blue() < 120) && (blankCol.blue() > 240);
+            const bool actDiffFromInact = (actCol != inactCol);
+            const bool s13bOk = actDiffFromBlank && actDiffFromInact;
+
+            const std::string dS13b = "act=" + actCol.name().toStdString() + " (b=" + std::to_string(actCol.blue()) +
+                                      ") inact=" + inactCol.name().toStdString() + " (b=" + std::to_string(inactCol.blue()) +
+                                      ") blank=" + blankCol.name().toStdString() + " (b=" + std::to_string(blankCol.blue()) +
+                                      ") diffBlank=" + std::to_string(actDiffFromBlank) +
+                                      " diffInact=" + std::to_string(actDiffFromInact);
+            recordTest(s13bOk, "Group 3.13: Active search highlight fill renders distinct color from document background (S13b)", dS13b);
+        }
     }
 }
 
