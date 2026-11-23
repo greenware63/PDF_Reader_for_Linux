@@ -246,6 +246,42 @@ void generateTwoPageTextPdf(const std::string& path, const std::string& text1, c
     out.write(pdf.data(), static_cast<std::streamsize>(pdf.size()));
 }
 
+void generateCornerTextPdf(const std::string& path) {
+    std::string pdf;
+    pdf += "%PDF-1.4\n";
+    std::vector<size_t> offsets;
+
+    offsets.push_back(pdf.size());
+    pdf += "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n";
+
+    offsets.push_back(pdf.size());
+    pdf += "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n";
+
+    // Text spans from x=10 across the entire 300 pt width and reaches the right edge
+    std::string stream = "BT\n/F1 18 Tf\n10 40 Td\n(Wide Text Line Reaching Right Margin) Tj\nET\n";
+    offsets.push_back(pdf.size());
+    pdf += "5 0 obj\n<< /Length " + std::to_string(stream.size()) + " >>\nstream\n" + stream + "\nendstream\nendobj\n";
+
+    size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 6\n";
+    pdf += "0000000000 65535 f \n";
+    for (size_t off : offsets) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", off);
+        pdf += buf;
+    }
+    pdf += "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+
+    std::ofstream out(path, std::ios::binary);
+    out.write(pdf.data(), static_cast<std::streamsize>(pdf.size()));
+}
+
 void generateSearchPdf(const std::string& path) {
     // 3 pages each containing word "TargetKeyword"
     std::string pdf;
@@ -2661,7 +2697,7 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
 // GROUP 4: Annotation and Redaction Interaction Characterization
 // ======================================================================
 
-void runGroup4AnnotationAndRedaction(const QString& samplePdf) {
+void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& twoPageTextPdf) {
     std::cout << "\n--- [Group 4: Annotation and Redaction Interaction] ---\n";
     ui::PdfViewerWidget viewer;
     viewer.resize(800, 700);
@@ -2780,6 +2816,570 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf) {
                    "Group 4.9: Pointer precedence: Ink drawing gesture overrides text selection and redaction");
 
         viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+    }
+
+    // 4.10: Drag threshold requires at least 3.0 pt on both axes (R1)
+    {
+        viewer.setRedactionMode(true);
+        viewer.clearStagedRedactions();
+        pump(50);
+
+        const double dpr = viewer.effectiveDpr();
+
+        auto sendRedactDrag = [&](double startXpt, double startYpt, double endXpt, double endYpt) {
+            int64_t sx = 0, sy = 0, ex = 0, ey = 0;
+            viewer.layout().pagePointsToDocument(0, startXpt, startYpt, sx, sy);
+            viewer.layout().pagePointsToDocument(0, endXpt, endYpt, ex, ey);
+            const QPointF startVp((sx - viewer.currentDocScrollX()) / dpr, (sy - viewer.currentDocScrollY()) / dpr);
+            const QPointF endVp((ex - viewer.currentDocScrollX()) / dpr, (ey - viewer.currentDocScrollY()) / dpr);
+
+            QMouseEvent press(QEvent::MouseButtonPress, startVp, startVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &press);
+            pump(20);
+            QMouseEvent move(QEvent::MouseMove, endVp, endVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &move);
+            pump(20);
+            QMouseEvent release(QEvent::MouseButtonRelease, endVp, endVp, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &release);
+            pump(50);
+        };
+
+        // 1. dx = 2.0 (< 3.0), dy = 15.0 (>= 3.0) -> rejected by &&
+        sendRedactDrag(100.0, 100.0, 102.0, 115.0);
+        const bool dxRejected = (viewer.stagedRedactionCount() == 0);
+
+        // 2. dx = 15.0 (>= 3.0), dy = 2.0 (< 3.0) -> rejected by &&
+        sendRedactDrag(100.0, 100.0, 115.0, 102.0);
+        const bool dyRejected = (viewer.stagedRedactionCount() == 0);
+
+        // 3. dx = 4.0 (>= 3.0), dy = 4.0 (>= 3.0) -> accepted
+        sendRedactDrag(100.0, 100.0, 104.0, 104.0);
+        const bool bothAccepted = (viewer.stagedRedactionCount() == 1);
+
+        const bool r1Ok = dxRejected && dyRejected && bothAccepted;
+        const std::string dR1 = "dxRej=" + std::to_string(dxRejected) + " dyRej=" + std::to_string(dyRejected) +
+                                " bothAcc=" + std::to_string(bothAccepted);
+        recordTest(r1Ok, "Group 4.10: Drag threshold requires at least 3.0 pt on both axes (R1)", dR1);
+
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(false);
+    }
+
+    // 4.11: Bottom-right to top-left drag normalizes canonical bounds (R2)
+    {
+        viewer.setRedactionMode(true);
+        viewer.clearStagedRedactions();
+        pump(50);
+
+        const double dpr = viewer.effectiveDpr();
+        int64_t sx = 0, sy = 0, ex = 0, ey = 0;
+        viewer.layout().pagePointsToDocument(0, 200.0, 250.0, sx, sy);
+        viewer.layout().pagePointsToDocument(0, 100.0, 120.0, ex, ey);
+        const QPointF startVp((sx - viewer.currentDocScrollX()) / dpr, (sy - viewer.currentDocScrollY()) / dpr);
+        const QPointF endVp((ex - viewer.currentDocScrollX()) / dpr, (ey - viewer.currentDocScrollY()) / dpr);
+
+        QMouseEvent press(QEvent::MouseButtonPress, startVp, startVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        pump(20);
+        QMouseEvent move(QEvent::MouseMove, endVp, endVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move);
+        pump(20);
+        QMouseEvent release(QEvent::MouseButtonRelease, endVp, endVp, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release);
+        pump(50);
+
+        bool r2Ok = false;
+        if (viewer.stagedRedactionCount() == 1 && viewer.stagedRedactions().count(0) == 1) {
+            const auto& r = viewer.stagedRedactions().at(0)[0];
+            r2Ok = (std::abs(r.left - 100.0) < 1.0) && (std::abs(r.top - 120.0) < 1.0) &&
+                   (std::abs(r.right - 200.0) < 1.0) && (std::abs(r.bottom - 250.0) < 1.0) &&
+                   (r.left < r.right) && (r.top < r.bottom);
+        }
+        recordTest(r2Ok, "Group 4.11: Dragging bottom-right to top-left normalizes canonical rect bounds (R2)");
+
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(false);
+    }
+
+    // 4.12: Drag extending past page edges is clamped to page dimensions (R3)
+    {
+        viewer.setRedactionMode(true);
+        viewer.clearStagedRedactions();
+        pump(50);
+
+        const auto& pl0 = viewer.layout().getPageLayout(0);
+        const double dpr = viewer.effectiveDpr();
+        int64_t sx = 0, sy = 0, ex = 0, ey = 0;
+        viewer.layout().pagePointsToDocument(0, 500.0, 700.0, sx, sy);
+        // Exceeding page bounds: 700.0 > pl0.widthPoints (595), 1000.0 > pl0.heightPoints (842)
+        viewer.layout().pagePointsToDocument(0, 700.0, 1000.0, ex, ey);
+        const QPointF startVp((sx - viewer.currentDocScrollX()) / dpr, (sy - viewer.currentDocScrollY()) / dpr);
+        const QPointF endVp((ex - viewer.currentDocScrollX()) / dpr, (ey - viewer.currentDocScrollY()) / dpr);
+
+        QMouseEvent press(QEvent::MouseButtonPress, startVp, startVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        pump(20);
+        QMouseEvent move(QEvent::MouseMove, endVp, endVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move);
+        pump(20);
+        QMouseEvent release(QEvent::MouseButtonRelease, endVp, endVp, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release);
+        pump(50);
+
+        bool r3Ok = false;
+        std::string dR3;
+        if (viewer.stagedRedactionCount() == 1 && viewer.stagedRedactions().count(0) == 1) {
+            const auto& r = viewer.stagedRedactions().at(0)[0];
+            const bool clampedX = (std::abs(r.right - pl0.widthPoints) < 1e-2);
+            const bool clampedY = (std::abs(r.bottom - pl0.heightPoints) < 1e-2);
+            r3Ok = clampedX && clampedY;
+            dR3 = "r=" + std::to_string(r.right) + " (max=" + std::to_string(pl0.widthPoints) +
+                  ") b=" + std::to_string(r.bottom) + " (max=" + std::to_string(pl0.heightPoints) + ")";
+        }
+        recordTest(r3Ok, "Group 4.12: Drag extending past page edges is clamped to page dimensions (R3)", dR3);
+
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(false);
+    }
+
+    // 4.13: addStagedRedaction validates page bounds, normalizes rects, rejects zero-dimensions, and accumulates counts (R5)
+    {
+        viewer.clearStagedRedactions();
+        SignalCounter spyMarks(&viewer, &ui::PdfViewerWidget::redactionMarksChanged);
+
+        // 1. RM15: Page < 0 or >= pageCount rejected
+        viewer.addStagedRedaction(-1, {10.0, 10.0, 50.0, 50.0});
+        viewer.addStagedRedaction(viewer.pageCount(), {10.0, 10.0, 50.0, 50.0});
+        const bool outOfBoundsIgnored = (viewer.stagedRedactionCount() == 0) && (spyMarks.count() == 0);
+
+        // 2. RM4: Reversed rect normalized
+        viewer.addStagedRedaction(0, {80.0, 90.0, 20.0, 30.0});
+        bool normOk = false;
+        if (viewer.stagedRedactionCount() == 1 && viewer.stagedRedactions().count(0) == 1) {
+            const auto& r = viewer.stagedRedactions().at(0)[0];
+            normOk = (r.left == 20.0) && (r.top == 30.0) && (r.right == 80.0) && (r.bottom == 90.0);
+        }
+        const bool firstAdded = normOk && (spyMarks.count() == 1);
+
+        // 3. RM5: Zero width or zero height rejected (testing each with non-zero on the other axis)
+        viewer.addStagedRedaction(0, {50.0, 50.0, 50.0, 80.0}); // zero width
+        viewer.addStagedRedaction(0, {50.0, 50.0, 80.0, 50.0}); // zero height
+        const bool zeroDimRejected = (viewer.stagedRedactionCount() == 1) && (spyMarks.count() == 1);
+
+        // 4. RM12: Multiple rects on the same page correctly increment stagedRedactionCount (counts rects, not pages)
+        viewer.addStagedRedaction(0, {100.0, 100.0, 150.0, 150.0});
+        const bool countTracksRects = (viewer.stagedRedactionCount() == 2) && (spyMarks.count() == 2);
+
+        const bool r5Ok = outOfBoundsIgnored && firstAdded && zeroDimRejected && countTracksRects;
+        const std::string dR5 = "oob=" + std::to_string(outOfBoundsIgnored) + " norm=" + std::to_string(firstAdded) +
+                                " zeroRej=" + std::to_string(zeroDimRejected) + " count=" + std::to_string(countTracksRects);
+        recordTest(r5Ok, "Group 4.13: addStagedRedaction validates page bounds, normalizes, rejects zero-dim, and counts rects (R5)", dR5);
+
+        viewer.clearStagedRedactions();
+    }
+
+    // 4.14: clearStagedRedactions emits only when non-empty (R6)
+    {
+        viewer.clearStagedRedactions();
+        SignalCounter spyMarks(&viewer, &ui::PdfViewerWidget::redactionMarksChanged);
+
+        // Clear when already empty -> early return, emits nothing
+        viewer.clearStagedRedactions();
+        const bool emptyNoEmit = (spyMarks.count() == 0);
+
+        // Add a mark -> emits 1
+        viewer.addStagedRedaction(0, {10.0, 10.0, 50.0, 50.0});
+        const bool addEmits = (spyMarks.count() == 1);
+
+        // Clear when not empty -> clears and emits 1
+        viewer.clearStagedRedactions();
+        const bool clearEmits = (spyMarks.count() == 2) && (viewer.stagedRedactionCount() == 0);
+
+        const bool r6Ok = emptyNoEmit && addEmits && clearEmits;
+        recordTest(r6Ok, "Group 4.14: clearStagedRedactions emits only when non-empty (R6)");
+    }
+
+    // 4.15: Redaction mode and ink mode mutual exclusion, selection clearing, and cursor shape (R9)
+    {
+        SignalCounter spyRedact(&viewer, &ui::PdfViewerWidget::redactionModeChanged);
+        SignalCounter spyInk(&viewer, &ui::PdfViewerWidget::inkDrawingModeChanged);
+
+        // 1. Ink mode on -> setRedactionMode(true) turns ink mode off
+        viewer.setInkDrawingMode(true);
+        pump(20);
+        const bool inkPre = viewer.isInkDrawingMode();
+
+        viewer.setRedactionMode(true);
+        pump(20);
+        const bool inkDisabledByRedact = inkPre && !viewer.isInkDrawingMode() && viewer.isRedactionMode();
+        const bool crossCursorOn = (viewer.viewport()->cursor().shape() == Qt::CrossCursor);
+
+        // 2. Redaction on -> setInkDrawingMode(true) turns redaction off
+        viewer.setInkDrawingMode(true);
+        pump(20);
+        const bool redactDisabledByInk = !viewer.isRedactionMode() && viewer.isInkDrawingMode();
+
+        // 3. Same-value calls emit nothing
+        viewer.setRedactionMode(false);
+        pump(20);
+        const int redactCountBefore = spyRedact.count();
+        viewer.setRedactionMode(false); // same-value call
+        pump(20);
+        const bool sameValSuppressed = (spyRedact.count() == redactCountBefore);
+
+        // 4. Cursor returns to I-beam when both modes are off
+        viewer.setInkDrawingMode(false);
+        pump(20);
+        const bool ibeamCursorOff = (viewer.viewport()->cursor().shape() == Qt::IBeamCursor);
+
+        const bool r9Ok = inkDisabledByRedact && crossCursorOn && redactDisabledByInk && sameValSuppressed && ibeamCursorOff;
+        const std::string dR9 = "inkDis=" + std::to_string(inkDisabledByRedact) + " cross=" + std::to_string(crossCursorOn) +
+                                " redactDis=" + std::to_string(redactDisabledByInk) + " sameVal=" + std::to_string(sameValSuppressed) +
+                                " ibeam=" + std::to_string(ibeamCursorOff);
+        recordTest(r9Ok, "Group 4.15: Mode mutual exclusion, selection clearing, and cursor shape (R9)", dR9);
+    }
+
+    // 4.16: Mouse press outside any page starts no redaction drag (R11)
+    {
+        viewer.setRedactionMode(true);
+        viewer.clearStagedRedactions();
+        pump(50);
+
+        // Send mouse press in viewport at (2, 2) which is in the margin outside any page
+        QMouseEvent press(QEvent::MouseButtonPress, QPointF(2, 2), QPointF(2, 2), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        pump(20);
+        QMouseEvent move(QEvent::MouseMove, QPointF(100, 100), QPointF(100, 100), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move);
+        pump(20);
+        QMouseEvent release(QEvent::MouseButtonRelease, QPointF(100, 100), QPointF(100, 100), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release);
+        pump(50);
+
+        const bool r11Ok = (viewer.stagedRedactionCount() == 0);
+        recordTest(r11Ok, "Group 4.16: Mouse press outside any page starts no redaction drag (R11)");
+
+        viewer.setRedactionMode(false);
+    }
+
+    // 4.17: Mode switched off mid-drag still stages mark on mouse release (R12)
+    // Characterizes current behavior: setRedactionMode(false) does not cancel in-progress drag; release checks m_isRedacting.
+    {
+        viewer.setRedactionMode(true);
+        viewer.clearStagedRedactions();
+        pump(50);
+
+        const double dpr = viewer.effectiveDpr();
+        int64_t sx = 0, sy = 0, ex = 0, ey = 0;
+        viewer.layout().pagePointsToDocument(0, 100.0, 100.0, sx, sy);
+        viewer.layout().pagePointsToDocument(0, 200.0, 200.0, ex, ey);
+        const QPointF startVp((sx - viewer.currentDocScrollX()) / dpr, (sy - viewer.currentDocScrollY()) / dpr);
+        const QPointF endVp((ex - viewer.currentDocScrollX()) / dpr, (ey - viewer.currentDocScrollY()) / dpr);
+
+        QMouseEvent press(QEvent::MouseButtonPress, startVp, startVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        pump(20);
+
+        // Turn mode off while mouse is held down
+        viewer.setRedactionMode(false);
+        pump(20);
+
+        QMouseEvent move(QEvent::MouseMove, endVp, endVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move);
+        pump(20);
+        QMouseEvent release(QEvent::MouseButtonRelease, endVp, endVp, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release);
+        pump(50);
+
+        const bool r12Ok = (viewer.stagedRedactionCount() == 1);
+        recordTest(r12Ok, "Group 4.17: Mode disabled mid-drag still stages mark on mouse release (R12)");
+
+        viewer.clearStagedRedactions();
+    }
+
+    // 4.18: closeDocument with staged marks clears them and resets drag state (R8)
+    {
+        viewer.setRedactionMode(true);
+        viewer.addStagedRedaction(0, {10.0, 10.0, 50.0, 50.0});
+        const double dpr = viewer.effectiveDpr();
+        int64_t sx = 0, sy = 0;
+        viewer.layout().pagePointsToDocument(0, 100.0, 100.0, sx, sy);
+        const QPointF startVp((sx - viewer.currentDocScrollX()) / dpr, (sy - viewer.currentDocScrollY()) / dpr);
+
+        // Begin drag
+        QMouseEvent press(QEvent::MouseButtonPress, startVp, startVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        pump(20);
+
+        SignalCounter spyMarks(&viewer, &ui::PdfViewerWidget::redactionMarksChanged);
+        viewer.editLog().clear();
+        viewer.closeDocument();
+        pump(50);
+
+        const bool marksCleared = (viewer.stagedRedactionCount() == 0) && !viewer.hasStagedRedactions();
+        const bool signalEmitted = (spyMarks.count() >= 1);
+
+        // Now release mouse: since closeDocument reset m_isRedacting = false, release must not stage anything
+        QMouseEvent release(QEvent::MouseButtonRelease, startVp, startVp, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release);
+        pump(50);
+        const bool dragReset = (viewer.stagedRedactionCount() == 0);
+
+        // Reopen samplePdf
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(100);
+
+        const bool r8Ok = marksCleared && signalEmitted && dragReset;
+        const std::string dR8 = "cleared=" + std::to_string(marksCleared) + " sig=" + std::to_string(signalEmitted) +
+                                " dragReset=" + std::to_string(dragReset) + " count=" + std::to_string(viewer.stagedRedactionCount());
+        recordTest(r8Ok, "Group 4.18: closeDocument clears staged marks and resets drag state (R8)", dR8);
+
+        viewer.setRedactionMode(false);
+    }
+
+    // 4.19: markSelectionForRedaction padding, page clamp, multi-page staging, and selection clearing (R7)
+    {
+        // 1. Without selection: returns false
+        viewer.clearSelection();
+        const bool noSelFalse = !viewer.markSelectionForRedaction();
+
+        bool multiPageOk = false;
+        bool padOk = false;
+        bool clampOk = false;
+        bool clearSelOk = false;
+        bool emitOnce = false;
+
+        // 2. Open twoPageTextPdf to test multi-page selection and 1.5 pt padding
+        if (!twoPageTextPdf.isEmpty()) {
+            viewer.editLog().clear();
+            viewer.openDocument(twoPageTextPdf);
+            viewer.waitForRendering();
+            viewer.setZoom(0.2);
+            viewer.goToPage(0);
+            viewer.waitForRendering();
+            pump(100);
+
+            waitFor([&]() {
+                return viewer.getPageText(0) != nullptr && viewer.getPageText(1) != nullptr;
+            }, 5000);
+
+            const auto pt0 = viewer.getPageText(0);
+            const auto pt1 = viewer.getPageText(1);
+            if (pt0 && pt1 && pt0->charCount() > 5 && pt1->charCount() > 5) {
+                const auto& pl0 = viewer.layout().getPageLayout(0);
+                const auto& pl1 = viewer.layout().getPageLayout(1);
+                const double dpr = viewer.effectiveDpr();
+                const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+                auto charCenter = [&](const layout::PageLayout& pl, const pdf::PageCharBox& b) -> QPointF {
+                    double x = (static_cast<double>(pl.leftPixel) + ((b.left + b.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+                    double y = (static_cast<double>(pl.topPixel) + ((b.top + b.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+                    return QPointF(x, y);
+                };
+
+                // Select from page 0 char 0 to page 1 char 4
+                QMouseEvent p(QEvent::MouseButtonPress, charCenter(pl0, pt0->chars[0]), charCenter(pl0, pt0->chars[0]), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &p);
+                pump(20);
+                QMouseEvent m(QEvent::MouseMove, charCenter(pl1, pt1->chars[4]), charCenter(pl1, pt1->chars[4]), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &m);
+                pump(20);
+                QMouseEvent r(QEvent::MouseButtonRelease, charCenter(pl1, pt1->chars[4]), charCenter(pl1, pt1->chars[4]), Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &r);
+                pump(50);
+
+                if (viewer.hasSelection()) {
+                    const auto selRects0 = pt0->getSelectionRects(0, static_cast<int>(pt0->charCount()) - 1);
+                    SignalCounter spyMarks(&viewer, &ui::PdfViewerWidget::redactionMarksChanged);
+
+                    const bool markRet = viewer.markSelectionForRedaction();
+                    pump(50);
+
+                    // RM8: Selection must be cleared
+                    clearSelOk = markRet && !viewer.hasSelection();
+                    // Emits redactionMarksChanged once
+                    emitOnce = (spyMarks.count() == 1);
+                    // Multi-page: marks present on both page 0 and page 1
+                    multiPageOk = (viewer.stagedRedactions().count(0) > 0) && (viewer.stagedRedactions().count(1) > 0);
+
+                    // RM6: Check 1.5 pt padding
+                    if (!selRects0.empty() && viewer.stagedRedactions().count(0) > 0) {
+                        const auto& staged0 = viewer.stagedRedactions().at(0)[0];
+                        const auto& raw0 = selRects0[0];
+                        // rLeft - padLeft == 1.5 pt
+                        padOk = (std::abs((raw0.left - staged0.left) - 1.5) < 1e-2);
+                    }
+                }
+            }
+        }
+
+        std::string dClamp;
+        // 3. RM7: Corner text clamping at page boundaries
+        viewer.clearStagedRedactions();
+        QTemporaryDir cornerDir;
+        if (cornerDir.isValid()) {
+            const QString cornerPdf = cornerDir.path() + "/corner_text.pdf";
+            generateCornerTextPdf(cornerPdf.toStdString());
+            viewer.editLog().clear();
+            viewer.openDocument(cornerPdf);
+            viewer.waitForRendering();
+            viewer.setZoom(0.5);
+            viewer.goToPage(0);
+            viewer.waitForRendering();
+            pump(100);
+
+            waitFor([&]() {
+                return viewer.getPageText(0) != nullptr;
+            }, 5000);
+
+            const auto pt = viewer.getPageText(0);
+            dClamp += "pt=" + std::to_string(pt != nullptr);
+            if (pt) {
+                dClamp += " chars=" + std::to_string(pt->charCount());
+            }
+            if (pt && pt->charCount() > 5) {
+                const auto& pl = viewer.layout().getPageLayout(0);
+                const double dpr = viewer.effectiveDpr();
+                const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+                auto charCenter = [&](const pdf::PageCharBox& b) -> QPointF {
+                    double x = (static_cast<double>(pl.leftPixel) + ((b.left + b.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+                    double y = (static_cast<double>(pl.topPixel) + ((b.top + b.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+                    return QPointF(x, y);
+                };
+                const int lastChar = static_cast<int>(pt->charCount()) - 1;
+                QPointF from = charCenter(pt->chars[0]);
+                QPointF to = charCenter(pt->chars[static_cast<size_t>(lastChar)]);
+                QMouseEvent p(QEvent::MouseButtonPress, from, from, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &p);
+                pump(20);
+                QMouseEvent m(QEvent::MouseMove, to, to, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &m);
+                pump(20);
+                QMouseEvent r(QEvent::MouseButtonRelease, to, to, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &r);
+                pump(50);
+
+                dClamp += " sel=" + std::to_string(viewer.hasSelection());
+                if (viewer.hasSelection()) {
+                    viewer.markSelectionForRedaction();
+                    pump(50);
+                    dClamp += " staged=" + std::to_string(viewer.stagedRedactions().count(0));
+                    if (viewer.stagedRedactions().count(0) > 0) {
+                        const auto& staged = viewer.stagedRedactions().at(0)[0];
+                        dClamp += " r=" + std::to_string(staged.right) + " max=" + std::to_string(pl.widthPoints);
+                        // The text reaches past the right margin so raw.right + 1.5 > pl.widthPoints (300.0), clamped to pl.widthPoints
+                        clampOk = (std::abs(staged.right - pl.widthPoints) < 1e-2) && (staged.right <= pl.widthPoints);
+                    }
+                }
+            }
+        }
+
+        // Restore viewer with samplePdf
+        viewer.editLog().clear();
+        viewer.openDocument(samplePdf);
+        viewer.setZoom(1.0);
+        viewer.goToPage(0);
+        viewer.waitForRendering();
+        pump(100);
+
+        const bool r7Ok = noSelFalse && multiPageOk && padOk && clampOk && clearSelOk && emitOnce;
+        const std::string dR7 = "noSel=" + std::to_string(noSelFalse) + " multi=" + std::to_string(multiPageOk) +
+                                " pad=" + std::to_string(padOk) + " clamp=" + std::to_string(clampOk) +
+                                " clearSel=" + std::to_string(clearSelOk) + " emit1=" + std::to_string(emitOnce) +
+                                " [" + dClamp + "]";
+        recordTest(r7Ok, "Group 4.19: markSelectionForRedaction pads, clamps, stages multi-page, and clears selection (R7)", dR7);
+    }
+
+    // 4.20: Overlay paint renders dark mask for staged mark and rubber-band tint during drag (R10)
+    {
+        if (!twoPageTextPdf.isEmpty()) {
+            viewer.editLog().clear();
+            viewer.openDocument(twoPageTextPdf);
+            viewer.waitForRendering();
+            pump(100);
+        }
+
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(true);
+        pump(50);
+
+        // 1. RM13: Staged mark mask is dark (alpha 190) over white background
+        pdf::ipc::RedactRect r{50.0, 50.0, 150.0, 150.0};
+        viewer.addStagedRedaction(0, r);
+        pump(50);
+
+        QImage maskImg(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+        {
+            QPainter p(&maskImg);
+            viewer.viewport()->render(&p);
+            p.end();
+        }
+
+        // Sample at (70.0, 70.0) away from centered 8pt "REDACT" badge text
+        int64_t markCx = 0, markCy = 0;
+        viewer.layout().pagePointsToDocument(0, 70.0, 70.0, markCx, markCy);
+        const double dpr = viewer.effectiveDpr();
+        const int markVpX = static_cast<int>(std::round((markCx - viewer.currentDocScrollX()) / dpr));
+        const int markVpY = static_cast<int>(std::round((markCy - viewer.currentDocScrollY()) / dpr));
+        const QColor markCol = maskImg.pixelColor(markVpX, markVpY);
+
+        // Over white background (255, 255, 255), alpha 190 yields rgb ~ 65. Without fill (alpha 0), it is 255.
+        const bool markMaskDark = (markCol.red() < 120) && (markCol.green() < 120) && (markCol.blue() < 120);
+
+        viewer.clearStagedRedactions();
+        pump(50);
+
+        // 2. RM14: Drag rubber-band renders semi-transparent crimson tint
+        int64_t dragSx = 0, dragSy = 0, dragEx = 0, dragEy = 0;
+        viewer.layout().pagePointsToDocument(0, 20.0, 20.0, dragSx, dragSy);
+        viewer.layout().pagePointsToDocument(0, 80.0, 80.0, dragEx, dragEy);
+        const QPointF dragStartVp((dragSx - viewer.currentDocScrollX()) / dpr, (dragSy - viewer.currentDocScrollY()) / dpr);
+        const QPointF dragEndVp((dragEx - viewer.currentDocScrollX()) / dpr, (dragEy - viewer.currentDocScrollY()) / dpr);
+
+        QMouseEvent press(QEvent::MouseButtonPress, dragStartVp, dragStartVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        pump(20);
+        QMouseEvent move(QEvent::MouseMove, dragEndVp, dragEndVp, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move);
+        pump(20);
+
+        // While drag is in progress (mouse held), render viewport
+        QImage dragImg(viewer.viewport()->size(), QImage::Format_ARGB32_Premultiplied);
+        {
+            QPainter p(&dragImg);
+            viewer.viewport()->render(&p);
+            p.end();
+        }
+
+        // Release mouse to end drag
+        QMouseEvent release(QEvent::MouseButtonRelease, dragEndVp, dragEndVp, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &release);
+        pump(50);
+
+        int64_t bandCx = 0, bandCy = 0;
+        viewer.layout().pagePointsToDocument(0, 50.0, 50.0, bandCx, bandCy);
+        const int bandVpX = static_cast<int>(std::round((bandCx - viewer.currentDocScrollX()) / dpr));
+        const int bandVpY = static_cast<int>(std::round((bandCy - viewer.currentDocScrollY()) / dpr));
+        const QColor bandCol = dragImg.pixelColor(bandVpX, bandVpY);
+
+        // Tinted QColor(220, 20, 60, 70) over white has blue < 230 and green < 230. Unpainted white has 255.
+        const bool bandTinted = (bandCol != QColor(255, 255, 255)) && (bandCol.green() < 230) && (bandCol.blue() < 230);
+
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(false);
+
+        // Restore samplePdf for subsequent groups
+        viewer.editLog().clear();
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(100);
+
+        const bool r10Ok = markMaskDark && bandTinted;
+        const std::string dR10 = "maskCol=" + markCol.name().toStdString() + " (dark=" + std::to_string(markMaskDark) +
+                                 ") bandCol=" + bandCol.name().toStdString() + " (tint=" + std::to_string(bandTinted) + ")";
+        recordTest(r10Ok, "Group 4.20: Overlay paint renders dark mask and rubber-band tint (R10)", dR10);
     }
 }
 
@@ -3036,7 +3636,7 @@ int main(int argc, char* argv[]) {
     runGroup1LayoutAndNavigation(sample5Page);
     runGroup2TileScheduling(samplePdf);
     runGroup3SelectionAndSearch(twoPageTextPdf, searchPdf);
-    runGroup4AnnotationAndRedaction(samplePdf);
+    runGroup4AnnotationAndRedaction(samplePdf, twoPageTextPdf);
     runGroup5FormsEditLogAndSave(samplePdf);
     runGroup6MainWindow(samplePdf, sample5Page);
 
