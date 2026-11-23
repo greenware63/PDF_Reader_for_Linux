@@ -12,6 +12,7 @@
 #include "TestIsolation.h"
 #include "ui/PdfViewerWidget.h"
 #include "ui/ViewerTileController.h"
+#include "ui/ViewerSelectionController.h"
 #include "ui/MainWindow.h"
 #include "ui/ColorMode.h"
 #include "layout/DocumentLayout.h"
@@ -2150,6 +2151,327 @@ void runGroup3SelectionAndSearch(const QString& twoPageTextPdf, const QString& s
         recordTest(group3_10Ok,
                    "Group 3.10: Search highlight colors (active orange vs non-active yellow), border outline, and scrollToMatch geometry",
                    d310);
+    }
+
+    // 3.11: Interactive selection invariants: release ends drag (C9), clearSelection during drag ends drag (C1), repeat position emits nothing (C4)
+    {
+        QTemporaryDir dir311;
+        const QString docPath = dir311.path() + "/fixture_311.pdf";
+        generateThreePageTextPdf(docPath.toStdString(), "AAA BBB CCC", "DDD EEE FFF", "GGG HHH III");
+
+        ui::PdfViewerWidget viewer;
+        viewer.resize(900, 700);
+        viewer.show();
+        viewer.ensurePolished();
+        pump(100);
+
+        viewer.openDocument(docPath);
+        viewer.waitForRendering();
+        pump(200);
+
+        viewer.setZoom(0.2);
+        viewer.goToPage(0);
+        viewer.waitForRendering();
+        pump(100);
+
+        waitFor([&]() {
+            return viewer.getPageText(0) && viewer.getPageText(1) && viewer.getPageText(2);
+        }, 5000);
+
+        const auto pt0 = viewer.getPageText(0);
+        bool c9WidgetOk = false;
+        bool c9ControllerOk = false;
+        bool c9ClickOk = false;
+        bool c1WidgetOk = false;
+        bool c1ControllerOk = false;
+        bool c4WidgetOk = false;
+        bool c4ControllerOk = false;
+
+        if (pt0 && pt0->charCount() >= 11) {
+            const auto& pl0 = viewer.layout().getPageLayout(0);
+            const double dpr = viewer.effectiveDpr();
+            const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+
+            auto charCenter = [&](const layout::PageLayout& pl, const pdf::PageCharBox& b) -> QPointF {
+                double x = (static_cast<double>(pl.leftPixel) + ((b.left + b.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+                double y = (static_cast<double>(pl.topPixel) + ((b.top + b.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+                return QPointF(x, y);
+            };
+
+            const QPointF posA = charCenter(pl0, pt0->chars[4]);
+            const QPointF posB = charCenter(pl0, pt0->chars[6]);
+            const QPointF posC = charCenter(pl0, pt0->chars[8]);
+
+            // ---- C9: Release must end the drag ----
+            SignalCounter spySelChange(&viewer, &ui::PdfViewerWidget::selectionChanged);
+
+            QMouseEvent p1(QEvent::MouseButtonPress, posA, posA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &p1);
+            pump(20);
+
+            QMouseEvent m1(QEvent::MouseMove, posB, posB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &m1);
+            pump(20);
+
+            QMouseEvent r1(QEvent::MouseButtonRelease, posB, posB, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &r1);
+            pump(50);
+
+            const QString selAfterRelease = viewer.selectedText();
+            const size_t changeCountAfterRelease = spySelChange.count();
+
+            // Send MouseMove with no buttons over character C
+            QMouseEvent mNoBtn(QEvent::MouseMove, posC, posC, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &mNoBtn);
+            pump(50);
+
+            const QString selAfterNoBtnMove = viewer.selectedText();
+            const size_t changeCountAfterNoBtnMove = spySelChange.count();
+
+            c9WidgetOk = (selAfterRelease == "BBB") &&
+                         (selAfterNoBtnMove == "BBB") &&
+                         (changeCountAfterRelease >= 1) &&
+                         (changeCountAfterNoBtnMove == changeCountAfterRelease);
+
+            // Controller-level check for C9: drag A->B, release, assert !isSelecting()
+            const auto ptCtrl = makeDummyPageText(0, "AAA BBB CCC");
+            ui::ViewerSelectionController ctrlC9;
+            ctrlC9.handlePageTextReady(1, 1, 0, ptCtrl, 0);
+            ctrlC9.startSelection(0, ptCtrl->chars[4].left + 1.0, ptCtrl->chars[4].top + 1.0);
+            bool outCh = false;
+            ctrlC9.updateSelectionEnd(0, ptCtrl->chars[6].left + 1.0, ptCtrl->chars[6].top + 1.0, outCh);
+            bool outCleared = false;
+            ctrlC9.finishSelection(outCleared);
+            c9ControllerOk = !ctrlC9.isSelecting() && !outCleared && ctrlC9.hasSelection();
+
+            // Also pin: after same-character click, controller's isSelecting() is false
+            ui::ViewerSelectionController ctrlClick;
+            ctrlClick.handlePageTextReady(1, 1, 0, ptCtrl, 0);
+            ctrlClick.startSelection(0, ptCtrl->chars[4].left + 1.0, ptCtrl->chars[4].top + 1.0);
+            ctrlClick.finishSelection(outCleared);
+            c9ClickOk = !ctrlClick.isSelecting() && outCleared && !ctrlClick.hasSelection();
+
+            // ---- C1: clearSelection during a drag ends the drag ----
+            viewer.clearSelection();
+            pump(20);
+
+            // Press on character A (selecting is on)
+            QMouseEvent pC1(QEvent::MouseButtonPress, posA, posA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &pC1);
+            pump(20);
+
+            // Call viewer.clearSelection() during active drag
+            SignalCounter spySelC1(&viewer, &ui::PdfViewerWidget::selectionChanged);
+            viewer.clearSelection();
+            pump(20);
+            const size_t countAfterClear = spySelC1.count();
+
+            // Send mouse move over character B with LeftButton (simulating drag continuation)
+            QMouseEvent mC1(QEvent::MouseMove, posB, posB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &mC1);
+            pump(20);
+
+            const size_t countAfterMove = spySelC1.count();
+            const bool noSelectionAfterMove = !viewer.hasSelection();
+
+            // A later clearSelection also emits nothing
+            viewer.clearSelection();
+            pump(20);
+            const size_t countAfterSecondClear = spySelC1.count();
+
+            // Finish gesture
+            QMouseEvent rC1(QEvent::MouseButtonRelease, posB, posB, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &rC1);
+            pump(20);
+
+            c1WidgetOk = (countAfterMove == countAfterClear) &&
+                         (countAfterSecondClear == countAfterClear) &&
+                         noSelectionAfterMove;
+
+            // Controller-level check for C1
+            ui::ViewerSelectionController ctrlC1;
+            ctrlC1.handlePageTextReady(1, 1, 0, ptCtrl, 0);
+            ctrlC1.startSelection(0, ptCtrl->chars[4].left + 1.0, ptCtrl->chars[4].top + 1.0);
+            ctrlC1.clearSelection();
+            c1ControllerOk = !ctrlC1.isSelecting() && !ctrlC1.hasSelection();
+
+            // ---- C4: A move that doesn't change the end emits nothing ----
+            viewer.clearSelection();
+            pump(20);
+
+            // Press on char A
+            QMouseEvent pC4(QEvent::MouseButtonPress, posA, posA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &pC4);
+            pump(20);
+
+            // Move to char B
+            SignalCounter spySelC4(&viewer, &ui::PdfViewerWidget::selectionChanged);
+            QMouseEvent mC4_1(QEvent::MouseMove, posB, posB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &mC4_1);
+            pump(20);
+
+            const size_t countAfterFirstMove = spySelC4.count();
+
+            // Move again to a slightly offset pixel still inside char B
+            const QPointF posB_offset = posB + QPointF(1.0, 0.0);
+            QMouseEvent mC4_2(QEvent::MouseMove, posB_offset, posB_offset, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &mC4_2);
+            pump(20);
+
+            const size_t countAfterRepeatMove = spySelC4.count();
+
+            // Release
+            QMouseEvent rC4(QEvent::MouseButtonRelease, posB_offset, posB_offset, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &rC4);
+            pump(20);
+
+            c4WidgetOk = (countAfterFirstMove == 1) && (countAfterRepeatMove == countAfterFirstMove);
+
+            // Controller level: updateSelectionEnd returns true with outChanged == false for repeat position,
+            // and true with outChanged == true for a new one.
+            ui::ViewerSelectionController ctrlC4;
+            ctrlC4.handlePageTextReady(1, 1, 0, ptCtrl, 0);
+            ctrlC4.startSelection(0, ptCtrl->chars[4].left + 1.0, ptCtrl->chars[4].top + 1.0);
+
+            bool changedFirst = false;
+            const bool retFirst = ctrlC4.updateSelectionEnd(0, ptCtrl->chars[6].left + 1.0, ptCtrl->chars[6].top + 1.0, changedFirst);
+
+            bool changedRepeat = true;
+            const bool retRepeat = ctrlC4.updateSelectionEnd(0, ptCtrl->chars[6].left + 2.0, ptCtrl->chars[6].top + 1.0, changedRepeat);
+
+            bool changedNew = false;
+            const bool retNew = ctrlC4.updateSelectionEnd(0, ptCtrl->chars[8].left + 1.0, ptCtrl->chars[8].top + 1.0, changedNew);
+
+            c4ControllerOk = retFirst && changedFirst && retRepeat && !changedRepeat && retNew && changedNew;
+        }
+
+        const bool group3_11Ok = c9WidgetOk && c9ControllerOk && c9ClickOk &&
+                                 c1WidgetOk && c1ControllerOk &&
+                                 c4WidgetOk && c4ControllerOk;
+        std::string d311 = "c9W=" + std::to_string(c9WidgetOk)
+            + " c9C=" + std::to_string(c9ControllerOk)
+            + " c9Click=" + std::to_string(c9ClickOk)
+            + " c1W=" + std::to_string(c1WidgetOk)
+            + " c1C=" + std::to_string(c1ControllerOk)
+            + " c4W=" + std::to_string(c4WidgetOk)
+            + " c4C=" + std::to_string(c4ControllerOk);
+
+        recordTest(group3_11Ok,
+                   "Group 3.11: Interactive selection invariants: release ends drag (C9), clearSelection ends drag (C1), repeat position emits nothing (C4)",
+                   d311);
+    }
+
+    // 3.12: Text cache trim protects in-flight entries (C7), and drag between lines picks nearest line (C8)
+    {
+        ui::PdfViewerWidget viewer;
+
+        // ---- C7: in-flight entries are never evicted by trim ----
+        ui::ViewerSelectionController ctrlC7;
+        const int64_t dummyDocId = 888888;
+        const int inFlightPage = 100;
+
+        // Create in-flight (nullptr) entry for page 100
+        ctrlC7.ensurePageTextRequested(inFlightPage, true, dummyDocId, viewer.renderWorker());
+        const bool inFlightInitiallyPresent = (ctrlC7.pageTextCache().find(inFlightPage) != ctrlC7.pageTextCache().end()) &&
+                                               (ctrlC7.pageTextCache().at(inFlightPage) == nullptr);
+
+        // Fill controller to 49 pages with real text via handlePageTextReady (pages 0..47 plus inFlightPage = 49 total)
+        for (int i = 0; i < 48; ++i) {
+            ctrlC7.handlePageTextReady(dummyDocId, dummyDocId, i, makeDummyPageText(i, "P" + std::to_string(i)), 0);
+        }
+
+        const size_t countAfterFirstTrim = ctrlC7.cachedTextPageCount();
+        const bool inFlightKeptAfterFirstTrim = (ctrlC7.pageTextCache().find(inFlightPage) != ctrlC7.pageTextCache().end()) &&
+                                                (ctrlC7.pageTextCache().at(inFlightPage) == nullptr);
+
+        // Second trim: add another real page (page 48)
+        ctrlC7.handlePageTextReady(dummyDocId, dummyDocId, 48, makeDummyPageText(48, "P48"), 0);
+
+        const size_t countAfterSecondTrim = ctrlC7.cachedTextPageCount();
+        const bool inFlightKeptAfterSecondTrim = (ctrlC7.pageTextCache().find(inFlightPage) != ctrlC7.pageTextCache().end()) &&
+                                                 (ctrlC7.pageTextCache().at(inFlightPage) == nullptr);
+
+        const bool c7Ok = inFlightInitiallyPresent && (countAfterFirstTrim == 48) && inFlightKeptAfterFirstTrim &&
+                          (countAfterSecondTrim == 48) && inFlightKeptAfterSecondTrim;
+
+        // ---- C8: drag between lines picks nearest line ----
+        // Build 3 lines of characters with vertical gaps
+        // Line 1: chars 0, 1, 2 (top 100, bottom 120, cy 110)
+        // Line 2: chars 3, 4, 5 (top 250, bottom 270, cy 260)
+        // Line 3: chars 6, 7, 8 (top 400, bottom 420, cy 410)
+        auto pt3Lines = std::make_shared<pdf::PageText>();
+        pt3Lines->pageIndex = 0;
+        pt3Lines->widthPoints = 600.0;
+        pt3Lines->heightPoints = 800.0;
+        pt3Lines->text = u"ABCDEFGHI";
+
+        auto addChar = [&](double left, double top, double right, double bottom, char32_t uc) {
+            pdf::PageCharBox b;
+            b.left = left;
+            b.top = top;
+            b.right = right;
+            b.bottom = bottom;
+            b.unicode = uc;
+            pt3Lines->chars.push_back(b);
+        };
+
+        // Line 1
+        addChar(50.0, 100.0, 70.0, 120.0, U'A');
+        addChar(70.0, 100.0, 90.0, 120.0, U'B');
+        addChar(90.0, 100.0, 110.0, 120.0, U'C');
+        // Line 2
+        addChar(50.0, 250.0, 70.0, 270.0, U'D');
+        addChar(70.0, 250.0, 90.0, 270.0, U'E');
+        addChar(90.0, 250.0, 110.0, 270.0, U'F');
+        // Line 3
+        addChar(50.0, 400.0, 70.0, 420.0, U'G');
+        addChar(70.0, 400.0, 90.0, 420.0, U'H');
+        addChar(90.0, 400.0, 110.0, 420.0, U'I');
+
+        ui::ViewerSelectionController ctrlC8;
+        ctrlC8.handlePageTextReady(1, 1, 0, pt3Lines, 0);
+        ctrlC8.startSelection(0, 60.0, 110.0); // start at char 0
+
+        // Use px = 500.0 so hitTest returns negative, exercising the geometric fallbacks:
+        const double pxOff = 500.0;
+        bool chDummy = false;
+
+        // 1. Between line 1 and 2, closer to line 2 (py = 200.0, closer to cy=260 than cy=110): expects line 2 (nearest=3)
+        ctrlC8.updateSelectionEnd(0, pxOff, 200.0, chDummy);
+        const int endBetween1and2 = ctrlC8.selectionEnd().charIndex;
+        const bool c8a_1_Ok = (endBetween1and2 == 3);
+
+        // 2. Between line 2 and 3, closer to line 2 (py = 300.0, closer to cy=260 than cy=410): expects line 2 (nearest=3)
+        ctrlC8.updateSelectionEnd(0, pxOff, 300.0, chDummy);
+        const int endBetween2and3 = ctrlC8.selectionEnd().charIndex;
+        const bool c8a_2_Ok = (endBetween2and3 == 3);
+
+        // 3. Above first line (py = 50.0 < 100.0): expects 0
+        ctrlC8.updateSelectionEnd(0, pxOff, 50.0, chDummy);
+        const int endAboveFirst = ctrlC8.selectionEnd().charIndex;
+        const bool c8b_Ok = (endAboveFirst == 0);
+
+        // 4. Below last line (py = 500.0 > 420.0): expects charCount() - 1 = 8
+        ctrlC8.updateSelectionEnd(0, pxOff, 500.0, chDummy);
+        const int endBelowLast = ctrlC8.selectionEnd().charIndex;
+        const bool c8c_Ok = (endBelowLast == 8);
+
+        const bool c8Ok = c8a_1_Ok && c8a_2_Ok && c8b_Ok && c8c_Ok;
+        const bool group3_12Ok = c7Ok && c8Ok;
+
+        std::string d312 = "c7=" + std::to_string(c7Ok)
+            + " (init=" + std::to_string(inFlightInitiallyPresent)
+            + " cnt1=" + std::to_string(countAfterFirstTrim) + " kept1=" + std::to_string(inFlightKeptAfterFirstTrim)
+            + " cnt2=" + std::to_string(countAfterSecondTrim) + " kept2=" + std::to_string(inFlightKeptAfterSecondTrim) + ")"
+            + " c8=" + std::to_string(c8Ok)
+            + " (b12=" + std::to_string(endBetween1and2) + " exp 3)"
+            + " (b23=" + std::to_string(endBetween2and3) + " exp 3)"
+            + " (above=" + std::to_string(endAboveFirst) + " exp 0)"
+            + " (below=" + std::to_string(endBelowLast) + " exp 8)";
+
+        recordTest(group3_12Ok,
+                   "Group 3.12: Text cache trim protects in-flight entries (C7), and drag between lines picks nearest line (C8)",
+                   d312);
     }
 }
 
