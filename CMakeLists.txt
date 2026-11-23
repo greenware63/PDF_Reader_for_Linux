@@ -259,6 +259,8 @@ add_executable(pdf-reader
     src/ui/ViewerLayoutController.cpp
     src/ui/ViewerTileController.h
     src/ui/ViewerTileController.cpp
+    src/ui/ViewerSelectionController.h
+    src/ui/ViewerSelectionController.cpp
     src/ui/PdfViewerWidget.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
@@ -328,6 +330,8 @@ add_executable(test_widget
     src/ui/ViewerLayoutController.cpp
     src/ui/ViewerTileController.h
     src/ui/ViewerTileController.cpp
+    src/ui/ViewerSelectionController.h
+    src/ui/ViewerSelectionController.cpp
     src/ui/PdfViewerWidget.cpp
 )
 
@@ -365,6 +369,8 @@ add_executable(test_redaction_rotation
     src/ui/ViewerLayoutController.cpp
     src/ui/ViewerTileController.h
     src/ui/ViewerTileController.cpp
+    src/ui/ViewerSelectionController.h
+    src/ui/ViewerSelectionController.cpp
     src/ui/PdfViewerWidget.cpp
 )
 target_include_directories(test_redaction_rotation PRIVATE
@@ -408,6 +414,8 @@ add_executable(test_viewer_characterization
     src/ui/ViewerLayoutController.cpp
     src/ui/ViewerTileController.h
     src/ui/ViewerTileController.cpp
+    src/ui/ViewerSelectionController.h
+    src/ui/ViewerSelectionController.cpp
     src/ui/PdfViewerWidget.cpp
 )
 target_include_directories(test_viewer_characterization PRIVATE
@@ -443,6 +451,8 @@ add_executable(test_password_prompt
     src/ui/ViewerLayoutController.cpp
     src/ui/ViewerTileController.h
     src/ui/ViewerTileController.cpp
+    src/ui/ViewerSelectionController.h
+    src/ui/ViewerSelectionController.cpp
     src/ui/PdfViewerWidget.cpp
 )
 

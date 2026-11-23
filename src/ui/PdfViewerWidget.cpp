@@ -171,7 +171,7 @@ PdfViewerWidget::~PdfViewerWidget() {
     m_renderWorker.stop();
     m_cache.clear();
     m_tileController.clearInFlight();
-    m_pageTextCache.clear();
+    m_selectionController.clearTextCache();
 }
 
 void PdfViewerWidget::setDevicePixelRatioOverride(double dpr) {
@@ -216,7 +216,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_renderWorker.cancelAll();
     m_cache.invalidateDocument(m_currentDocumentId);
     m_tileController.clearInFlight();
-    m_pageTextCache.clear();
+    m_selectionController.clearTextCache();
     m_transformedPixmapCache.clear();
     if (!m_preserveEditLogOnOpen) {
         clearFormFieldsCache();
@@ -387,7 +387,7 @@ void PdfViewerWidget::closeDocument() {
 
     m_cache.invalidateDocument(m_currentDocumentId);
     m_tileController.clearInFlight();
-    m_pageTextCache.clear();
+    m_selectionController.clearTextCache();
     m_transformedPixmapCache.clear();
     clearFormFieldsCache();
     clearSelection();
@@ -688,51 +688,20 @@ void PdfViewerWidget::onTileFailed(int64_t documentId, uint64_t /*generation*/, 
 }
 
 void PdfViewerWidget::onPageTextReady(int64_t documentId, int pageIndex, std::shared_ptr<pdf::PageText> text) {
-    if (documentId != m_currentDocumentId) {
-        return;
+    if (m_selectionController.handlePageTextReady(documentId, m_currentDocumentId, pageIndex, std::move(text), currentPage())) {
+        viewport()->update();
     }
-    m_pageTextCache[pageIndex] = text ? std::move(text) : std::make_shared<pdf::PageText>();
-    trimPageTextCache();
-    viewport()->update();
 }
 
 void PdfViewerWidget::trimPageTextCache() {
-    if (m_pageTextCache.size() <= MAX_CACHED_TEXT_PAGES) {
-        return;
-    }
-    // Pages that must stay: the selection range (its text is needed for copy) ...
-    int keepFirst = 1 << 30, keepLast = -1;
-    if (m_selectionStart.isValid() && m_selectionEnd.isValid()) {
-        keepFirst = std::min(m_selectionStart.pageIndex, m_selectionEnd.pageIndex);
-        keepLast = std::max(m_selectionStart.pageIndex, m_selectionEnd.pageIndex);
-    }
-    // ... and, of the rest, the pages nearest to the one being viewed. Requests still in flight are kept.
-    std::vector<int> evictable;
-    evictable.reserve(m_pageTextCache.size());
-    for (const auto& [page, text] : m_pageTextCache) {
-        if (text && (page < keepFirst || page > keepLast)) {
-            evictable.push_back(page);
-        }
-    }
-    std::sort(evictable.begin(), evictable.end(), [this](int a, int b) {
-        return std::abs(a - currentPage()) > std::abs(b - currentPage()); // farthest first
-    });
-    for (int page : evictable) {
-        if (m_pageTextCache.size() <= MAX_CACHED_TEXT_PAGES) {
-            break;
-        }
-        m_pageTextCache.erase(page);
-    }
+    m_selectionController.trimPageTextCache(currentPage());
 }
 
 void PdfViewerWidget::ensurePageTextRequested(int pageIndex) {
     if (!isDocumentOpen() || pageIndex < 0 || pageIndex >= m_pageCount) {
         return;
     }
-    if (m_pageTextCache.find(pageIndex) == m_pageTextCache.end()) {
-        m_pageTextCache[pageIndex] = nullptr; // marked in-flight
-        m_renderWorker.requestPageText(m_currentDocumentId, pageIndex);
-    }
+    m_selectionController.ensurePageTextRequested(pageIndex, isDocumentOpen(), m_currentDocumentId, m_renderWorker);
 }
 
 void PdfViewerWidget::resizeEvent(QResizeEvent* event) {
@@ -909,96 +878,19 @@ bool PdfViewerWidget::drawFallbackTile(QPainter& painter, const layout::VisibleT
 }
 
 void PdfViewerWidget::drawSelection(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale) {
-    if (!hasSelection() || effScale <= 0.0) {
-        return;
-    }
-
-    bool forward = (m_selectionStart.pageIndex < m_selectionEnd.pageIndex) ||
-                   (m_selectionStart.pageIndex == m_selectionEnd.pageIndex && m_selectionStart.charIndex <= m_selectionEnd.charIndex);
-    int p0 = forward ? m_selectionStart.pageIndex : m_selectionEnd.pageIndex;
-    int p1 = forward ? m_selectionEnd.pageIndex : m_selectionStart.pageIndex;
-    int c0 = forward ? m_selectionStart.charIndex : m_selectionEnd.charIndex;
-    int c1 = forward ? m_selectionEnd.charIndex : m_selectionStart.charIndex;
-
-    if (pageIndex < p0 || pageIndex > p1) {
-        return;
-    }
-
-    auto it = m_pageTextCache.find(pageIndex);
-    if (it == m_pageTextCache.end() || !it->second) {
-        return;
-    }
-    const auto& pt = *it->second;
-
-    int startChar = (pageIndex == p0) ? c0 : 0;
-    int endChar = (pageIndex == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
-
-    auto rects = pt.getSelectionRects(startChar, endChar);
-    QColor highlightColor;
-    switch (m_colorMode) {
-        case ColorMode::Inverted:     highlightColor = QColor(0, 140, 255, 120); break;
-        case ColorMode::HighContrast: highlightColor = QColor(255, 215, 0, 130); break;
-        case ColorMode::Sepia:        highlightColor = QColor(180, 130, 60, 110); break;
-        case ColorMode::Normal:
-        default:                      highlightColor = QColor(0, 120, 215, 90); break;
-    }
-
-    for (const auto& r : rects) {
-        double px = 0.0, py = 0.0, pw = 0.0, ph = 0.0;
-        rotateRectPointsForDisplay(r, pl.widthPoints, pl.heightPoints, rotation(), px, py, pw, ph);
-        QRectF selRect(
-            static_cast<qreal>(static_cast<double>(pl.leftPixel - scrollDocX) + px * effScale),
-            static_cast<qreal>(static_cast<double>(pl.topPixel - scrollDocY) + py * effScale),
-            static_cast<qreal>(pw * effScale),
-            static_cast<qreal>(ph * effScale)
-        );
-        painter.fillRect(selRect, highlightColor);
-    }
+    m_selectionController.drawSelection(painter, pageIndex, pl, scrollDocX, scrollDocY, effScale, m_colorMode, rotation());
 }
 
 bool PdfViewerWidget::hasSelection() const noexcept {
-    return m_selectionStart.isValid() && m_selectionEnd.isValid() &&
-           (m_selectionStart.pageIndex != m_selectionEnd.pageIndex ||
-            m_selectionStart.charIndex != m_selectionEnd.charIndex);
+    return m_selectionController.hasSelection();
 }
 
 QString PdfViewerWidget::selectedText() const {
-    if (!hasSelection()) {
-        return QString();
-    }
-
-    bool forward = (m_selectionStart.pageIndex < m_selectionEnd.pageIndex) ||
-                   (m_selectionStart.pageIndex == m_selectionEnd.pageIndex && m_selectionStart.charIndex <= m_selectionEnd.charIndex);
-    int p0 = forward ? m_selectionStart.pageIndex : m_selectionEnd.pageIndex;
-    int p1 = forward ? m_selectionEnd.pageIndex : m_selectionStart.pageIndex;
-    int c0 = forward ? m_selectionStart.charIndex : m_selectionEnd.charIndex;
-    int c1 = forward ? m_selectionEnd.charIndex : m_selectionStart.charIndex;
-
-    QString result;
-    for (int p = p0; p <= p1; ++p) {
-        auto it = m_pageTextCache.find(p);
-        if (it == m_pageTextCache.end() || !it->second) {
-            continue;
-        }
-        const auto& pt = *it->second;
-        int startChar = (p == p0) ? c0 : 0;
-        int endChar = (p == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
-        auto selU16 = pt.getSelectedText(startChar, endChar);
-        if (!selU16.empty()) {
-            if (!result.isEmpty()) {
-                result.append(QChar::LineFeed);
-            }
-            result.append(QString::fromStdU16String(selU16));
-        }
-    }
-    return result;
+    return m_selectionController.selectedText();
 }
 
 void PdfViewerWidget::clearSelection() {
-    if (m_selectionStart.isValid() || m_selectionEnd.isValid()) {
-        m_selectionStart = {};
-        m_selectionEnd = {};
-        m_isSelecting = false;
+    if (m_selectionController.clearSelection()) {
         viewport()->update();
         Q_EMIT selectionChanged();
     }
@@ -1012,8 +904,7 @@ void PdfViewerWidget::copySelection() {
 }
 
 std::shared_ptr<const pdf::PageText> PdfViewerWidget::getPageText(int pageIndex) const {
-    auto it = m_pageTextCache.find(pageIndex);
-    return (it != m_pageTextCache.end()) ? it->second : nullptr;
+    return m_selectionController.getPageText(pageIndex);
 }
 
 void PdfViewerWidget::drawSearchHighlights(QPainter& painter, int pageIndex, const layout::PageLayout& pl, int64_t scrollDocX, int64_t scrollDocY, double effScale) {
@@ -1329,18 +1220,11 @@ void PdfViewerWidget::mousePressEvent(QMouseEvent* event) {
         if (page >= 0) {
             double px = 0.0, py = 0.0;
             if (layout().documentToPagePoints(page, docX, docY, px, py)) {
-                auto it = m_pageTextCache.find(page);
-                if (it != m_pageTextCache.end() && it->second) {
-                    int ch = it->second->hitTest(px, py);
-                    if (ch >= 0) {
-                        m_selectionStart = {page, ch};
-                        m_selectionEnd = {page, ch};
-                        m_isSelecting = true;
-                        viewport()->update();
-                        Q_EMIT selectionChanged();
-                        event->accept();
-                        return;
-                    }
+                if (m_selectionController.startSelection(page, px, py)) {
+                    viewport()->update();
+                    Q_EMIT selectionChanged();
+                    event->accept();
+                    return;
                 }
             }
         }
@@ -1383,7 +1267,7 @@ void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
-    if (m_isSelecting && isDocumentOpen()) {
+    if (m_selectionController.isSelecting() && isDocumentOpen()) {
         const double dpr = effectiveDpr();
         const int64_t docX = currentDocScrollX() + static_cast<int64_t>(std::round(event->position().x() * dpr));
         const int64_t docY = currentDocScrollY() + static_cast<int64_t>(std::round(event->position().y() * dpr));
@@ -1407,7 +1291,7 @@ void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
                     for (int p = 0; p + 1 < m_pageCount; ++p) {
                         if (docY > layout().getPageLayout(p).bottomPixel() &&
                             docY < layout().getPageLayout(p + 1).topPixel) {
-                            page = (p >= m_selectionStart.pageIndex) ? (p + 1) : p;
+                            page = (p >= m_selectionController.selectionStart().pageIndex) ? (p + 1) : p;
                             break;
                         }
                     }
@@ -1418,39 +1302,14 @@ void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
         if (page >= 0 && page < m_pageCount) {
             double px = 0.0, py = 0.0;
             if (layout().documentToPagePoints(page, docX, docY, px, py)) {
-                auto it = m_pageTextCache.find(page);
-                if (it != m_pageTextCache.end() && it->second && !it->second->empty()) {
-                    int ch = it->second->hitTest(px, py);
-                    if (ch < 0) {
-                        if (py < it->second->chars.front().top) {
-                            ch = 0;
-                        } else if (py > it->second->chars.back().bottom) {
-                            ch = static_cast<int>(it->second->charCount()) - 1;
-                        } else {
-                            double minDist = 1e9;
-                            int nearest = 0;
-                            for (size_t i = 0; i < it->second->charCount(); ++i) {
-                                const auto& b = it->second->chars[i];
-                                double cy = (b.top + b.bottom) * 0.5;
-                                double d = std::abs(cy - py);
-                                if (d < minDist) {
-                                    minDist = d;
-                                    nearest = static_cast<int>(i);
-                                }
-                            }
-                            ch = nearest;
-                        }
+                bool changed = false;
+                if (m_selectionController.updateSelectionEnd(page, px, py, changed)) {
+                    if (changed) {
+                        viewport()->update();
+                        Q_EMIT selectionChanged();
                     }
-                    if (ch >= 0) {
-                        TextPosition newEnd{page, ch};
-                        if (newEnd != m_selectionEnd) {
-                            m_selectionEnd = newEnd;
-                            viewport()->update();
-                            Q_EMIT selectionChanged();
-                        }
-                        event->accept();
-                        return;
-                    }
+                    event->accept();
+                    return;
                 }
             }
         }
@@ -1484,10 +1343,7 @@ void PdfViewerWidget::mouseMoveEvent(QMouseEvent* event) {
         if (page >= 0) {
             double px = 0.0, py = 0.0;
             if (layout().documentToPagePoints(page, docX, docY, px, py)) {
-                auto it = m_pageTextCache.find(page);
-                if (it != m_pageTextCache.end() && it->second) {
-                    overText = (it->second->hitTest(px, py) >= 0);
-                }
+                overText = m_selectionController.isOverText(page, px, py);
             }
         }
         viewport()->setCursor(overText ? Qt::IBeamCursor : Qt::ArrowCursor);
@@ -1542,9 +1398,9 @@ void PdfViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
-    if (event->button() == Qt::LeftButton && m_isSelecting) {
-        m_isSelecting = false;
-        if (m_selectionStart == m_selectionEnd) {
+    bool cleared = false;
+    if (event->button() == Qt::LeftButton && m_selectionController.finishSelection(cleared)) {
+        if (cleared) {
             clearSelection();
         }
         event->accept();
@@ -1999,23 +1855,20 @@ bool PdfViewerWidget::markSelectionForRedaction() {
     if (!hasSelection() || !isDocumentOpen()) {
         return false;
     }
-    bool forward = (m_selectionStart.pageIndex < m_selectionEnd.pageIndex) ||
-                   (m_selectionStart.pageIndex == m_selectionEnd.pageIndex && m_selectionStart.charIndex <= m_selectionEnd.charIndex);
-    int p0 = forward ? m_selectionStart.pageIndex : m_selectionEnd.pageIndex;
-    int p1 = forward ? m_selectionEnd.pageIndex : m_selectionStart.pageIndex;
-    int c0 = forward ? m_selectionStart.charIndex : m_selectionEnd.charIndex;
-    int c1 = forward ? m_selectionEnd.charIndex : m_selectionStart.charIndex;
+    bool forward = (m_selectionController.selectionStart().pageIndex < m_selectionController.selectionEnd().pageIndex) ||
+                   (m_selectionController.selectionStart().pageIndex == m_selectionController.selectionEnd().pageIndex && m_selectionController.selectionStart().charIndex <= m_selectionController.selectionEnd().charIndex);
+    int p0 = forward ? m_selectionController.selectionStart().pageIndex : m_selectionController.selectionEnd().pageIndex;
+    int p1 = forward ? m_selectionController.selectionEnd().pageIndex : m_selectionController.selectionStart().pageIndex;
+    int c0 = forward ? m_selectionController.selectionStart().charIndex : m_selectionController.selectionEnd().charIndex;
+    int c1 = forward ? m_selectionController.selectionEnd().charIndex : m_selectionController.selectionStart().charIndex;
 
     // Redaction must never be silently partial: every page in the range needs its text. Pages the
     // LRU text cache evicted (or that are still in flight) are fetched synchronously; if any page
     // still cannot be obtained, nothing is staged and the caller is told.
     std::vector<std::pair<int, std::shared_ptr<const pdf::PageText>>> texts;
     for (int p = p0; p <= p1; ++p) {
-        auto it = m_pageTextCache.find(p);
-        std::shared_ptr<const pdf::PageText> pt;
-        if (it != m_pageTextCache.end() && it->second) {
-            pt = it->second;
-        } else {
+        std::shared_ptr<const pdf::PageText> pt = m_selectionController.getPageText(p);
+        if (!pt) {
             pt = m_renderWorker.getPageTextSync(m_currentDocumentId, p);
             if (!pt) {
                 return false;
@@ -2132,21 +1985,21 @@ bool PdfViewerWidget::markupSelection(pdf::AnnotationSubtype subtype, uint32_t c
         }
     }
 
-    bool forward = (m_selectionStart.pageIndex < m_selectionEnd.pageIndex) ||
-                   (m_selectionStart.pageIndex == m_selectionEnd.pageIndex && m_selectionStart.charIndex <= m_selectionEnd.charIndex);
-    int p0 = forward ? m_selectionStart.pageIndex : m_selectionEnd.pageIndex;
-    int p1 = forward ? m_selectionEnd.pageIndex : m_selectionStart.pageIndex;
-    int c0 = forward ? m_selectionStart.charIndex : m_selectionEnd.charIndex;
-    int c1 = forward ? m_selectionEnd.charIndex : m_selectionStart.charIndex;
+    bool forward = (m_selectionController.selectionStart().pageIndex < m_selectionController.selectionEnd().pageIndex) ||
+                   (m_selectionController.selectionStart().pageIndex == m_selectionController.selectionEnd().pageIndex && m_selectionController.selectionStart().charIndex <= m_selectionController.selectionEnd().charIndex);
+    int p0 = forward ? m_selectionController.selectionStart().pageIndex : m_selectionController.selectionEnd().pageIndex;
+    int p1 = forward ? m_selectionController.selectionEnd().pageIndex : m_selectionController.selectionStart().pageIndex;
+    int c0 = forward ? m_selectionController.selectionStart().charIndex : m_selectionController.selectionEnd().charIndex;
+    int c1 = forward ? m_selectionController.selectionEnd().charIndex : m_selectionController.selectionStart().charIndex;
 
     bool anyAdded = false;
 
     for (int p = p0; p <= p1; ++p) {
-        auto it = m_pageTextCache.find(p);
-        if (it == m_pageTextCache.end() || !it->second) {
+        auto textPtr = m_selectionController.getPageText(p);
+        if (!textPtr) {
             continue;
         }
-        const auto& pt = *it->second;
+        const auto& pt = *textPtr;
         int startChar = (p == p0) ? c0 : 0;
         int endChar = (p == p1) ? c1 : static_cast<int>(pt.charCount()) - 1;
         auto rects = pt.getSelectionRects(startChar, endChar);
