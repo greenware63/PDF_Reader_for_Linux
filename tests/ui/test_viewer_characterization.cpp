@@ -4822,31 +4822,36 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         }
 
         // 2. 12 pt fallback at fit level: deleting a non-log free-text item with fontSize == 0
-        // and undoing the deletion recreates the item laid out with the 12 pt fallback.
+        // must fit using the 12 pt fallback, matching an item added explicitly at 12 pt.
         bool fallback12Ok = false;
         viewer.editLog().clear();
         const QString fbText = QStringLiteral("Fallback Test String");
-        const bool addDummy = viewer.addFreeTextAnnotation(0, QRectF(100.0, 200.0, 150.0, 40.0), fbText, 0xFF112233, 16.0);
-        const auto cmdsDummy = viewer.editLog().activeCommands();
-        if (addDummy && (cmdsDummy.size() == 1)) {
-            const pdf::AnnotationItem originalItem = cmdsDummy[0].after;
+        const QRectF fbBox(100.0, 200.0, 150.0, 10.0);
+        // Add reference item explicitly at 12.0 pt
+        const bool addRef = viewer.addFreeTextAnnotation(0, fbBox, fbText, 0xFF112233, 12.0);
+        const auto cmdsRef = viewer.editLog().activeCommands();
+        if (addRef && (cmdsRef.size() == 1)) {
+            const pdf::AnnotationItem refItem = cmdsRef[0].after;
             viewer.editLog().clear();
 
-            // Prepare item to delete: empty outline and fontSize == 0.0
-            pdf::AnnotationItem unloggedItem = originalItem;
+            // Prepare item to delete with empty outline and fontSize == 0.0 (non-log delete)
+            pdf::AnnotationItem unloggedItem = refItem;
             unloggedItem.textOutline.clear();
             unloggedItem.fontSize = 0.0;
+            unloggedItem.bottom = fbBox.top(); // Reset to unexpanded box bottom (200.0)
 
             const bool delOk = viewer.deleteAnnotation(0, unloggedItem);
             const auto cmdsDel = viewer.editLog().activeCommands();
             if (delOk && (cmdsDel.size() == 1)) {
-                // The recorded item in the Delete command was fitted with 12 pt fallback
+                // The recorded item in the Delete command was fitted with fitTextBoxOutline
                 const auto& rec = cmdsDel[0].before;
-                const bool outlineRestored = !rec.textOutline.empty();
-                const bool geometryLaidOut = (rec.bottom < rec.top) && outlineRestored;
+                const bool outlineMatches = (rec.textOutline.size() == refItem.textOutline.size()) && !rec.textOutline.empty() &&
+                                            (std::abs(rec.textOutline[0].y - refItem.textOutline[0].y) < 1e-4);
+                const bool bottomMatches = (std::abs(rec.bottom - refItem.bottom) < 1e-4);
+                const bool topMatches = (std::abs(rec.top - refItem.top) < 1e-4);
 
                 const bool undoOk = viewer.undoEdit();
-                fallback12Ok = geometryLaidOut && undoOk;
+                fallback12Ok = outlineMatches && bottomMatches && topMatches && undoOk;
             }
         }
 
