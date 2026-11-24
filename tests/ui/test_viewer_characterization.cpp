@@ -4883,6 +4883,694 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
 
         recordTest(g41Ok, "Group 4.41: fitTextBoxOutline boundary at 144 pt, 12 pt fallback, and free-text default slack", failDetail);
         viewer.editLog().clear();
+        viewer.setZoom(1.0);
+        viewer.goToPage(0);
+        viewer.waitForRendering();
+        pump(50);
+    }
+
+    // 4.42: Ink drawing mode toggle, duplicate signal suppression, and cursor shape
+    {
+        viewer.setInkDrawingMode(false);
+        pump(20);
+        const bool defaultModeOff = !viewer.isInkDrawingMode();
+
+        SignalRecorder<bool> spyInkMode(&viewer, &ui::PdfViewerWidget::inkDrawingModeChanged);
+
+        // Turn on ink drawing mode
+        viewer.setInkDrawingMode(true);
+        pump(20);
+        const bool modeOn = viewer.isInkDrawingMode();
+        const bool cursorCross = (viewer.viewport()->cursor().shape() == Qt::CrossCursor);
+        const bool emitOn = (spyInkMode.count() == 1) && std::get<0>(spyInkMode.at(0));
+
+        // Duplicate setInkDrawingMode(true) -> no-op, no signal
+        viewer.setInkDrawingMode(true);
+        pump(20);
+        const bool dupOnSuppressed = (spyInkMode.count() == 1);
+
+        // Turn off ink drawing mode
+        viewer.setInkDrawingMode(false);
+        pump(20);
+        const bool modeOff = !viewer.isInkDrawingMode();
+        const bool cursorIBeam = (viewer.viewport()->cursor().shape() == Qt::IBeamCursor);
+        const bool emitOff = (spyInkMode.count() == 2) && !std::get<0>(spyInkMode.at(1));
+
+        // Duplicate setInkDrawingMode(false) -> no-op, no signal
+        viewer.setInkDrawingMode(false);
+        pump(20);
+        const bool dupOffSuppressed = (spyInkMode.count() == 2);
+
+        // toggleInkDrawingMode flips state: false -> true
+        viewer.toggleInkDrawingMode();
+        pump(20);
+        const bool toggleOn = viewer.isInkDrawingMode();
+        const bool toggleEmitOn = (spyInkMode.count() == 3) && std::get<0>(spyInkMode.at(2));
+
+        // toggleInkDrawingMode flips state: true -> false
+        viewer.toggleInkDrawingMode();
+        pump(20);
+        const bool toggleOff = !viewer.isInkDrawingMode();
+        const bool toggleEmitOff = (spyInkMode.count() == 4) && !std::get<0>(spyInkMode.at(3));
+
+        const bool g42Ok = defaultModeOff && modeOn && cursorCross && emitOn && dupOnSuppressed
+            && modeOff && cursorIBeam && emitOff && dupOffSuppressed
+            && toggleOn && toggleEmitOn && toggleOff && toggleEmitOff;
+
+        std::string d42 = "defOff=" + std::to_string(defaultModeOff)
+            + " modeOn=" + std::to_string(modeOn) + " cross=" + std::to_string(cursorCross)
+            + " emitOn=" + std::to_string(emitOn) + " dupOn=" + std::to_string(dupOnSuppressed)
+            + " modeOff=" + std::to_string(modeOff) + " ibeam=" + std::to_string(cursorIBeam)
+            + " emitOff=" + std::to_string(emitOff) + " dupOff=" + std::to_string(dupOffSuppressed)
+            + " togOn=" + std::to_string(toggleOn) + " togEmitOn=" + std::to_string(toggleEmitOn)
+            + " togOff=" + std::to_string(toggleOff) + " togEmitOff=" + std::to_string(toggleEmitOff);
+
+        recordTest(g42Ok, "Group 4.42: Ink drawing mode toggle, duplicate signal suppression, and cursor shape", d42);
+    }
+
+    // 4.43: Mutual mode exclusion with redaction mode and active selection clearing
+    {
+        // Switch to twoPageTextPdf to test selection clearing
+        viewer.openDocument(twoPageTextPdf);
+        viewer.waitForRendering();
+        pump(100);
+
+        waitFor([&]() {
+            return viewer.getPageText(0) && viewer.getPageText(1);
+        }, 5000);
+
+        auto makeSelection = [&]() {
+            const auto pt0 = viewer.getPageText(0);
+            if (pt0 && pt0->charCount() > 5) {
+                const auto& pl0 = viewer.layout().getPageLayout(0);
+                const double dpr = viewer.effectiveDpr();
+                const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+                auto charCenter = [&](const layout::PageLayout& pl, const pdf::PageCharBox& b) -> QPointF {
+                    double x = (static_cast<double>(pl.leftPixel) + ((b.left + b.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+                    double y = (static_cast<double>(pl.topPixel) + ((b.top + b.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+                    return QPointF(x, y);
+                };
+                QPointF from = charCenter(pl0, pt0->chars[0]);
+                QPointF to = charCenter(pl0, pt0->chars[4]);
+                QMouseEvent p(QEvent::MouseButtonPress, from, from, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &p);
+                pump(20);
+                QMouseEvent m(QEvent::MouseMove, to, to, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &m);
+                pump(20);
+                QMouseEvent r(QEvent::MouseButtonRelease, to, to, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &r);
+                pump(50);
+            }
+        };
+
+        // Direction 1: Redaction active + selection active -> setInkDrawingMode(true)
+        // must disable redaction mode, clear selection, and emit signals
+        viewer.setRedactionMode(true);
+        pump(20);
+        viewer.setRedactionMode(false); // reset
+        pump(20);
+
+        makeSelection();
+        const bool sel1Created = viewer.hasSelection();
+
+        viewer.setRedactionMode(true);
+        pump(20);
+
+        // Make selection again while in normal (we turn off redaction briefly, select, turn on redaction)
+        viewer.setRedactionMode(false);
+        makeSelection();
+        const bool selBeforeRedact = viewer.hasSelection();
+        viewer.setRedactionMode(true);
+        const bool selClearedByRedact = selBeforeRedact && !viewer.hasSelection();
+
+        // Turn on ink mode while redaction mode is on
+        SignalRecorder<bool> spyRedactRec(&viewer, &ui::PdfViewerWidget::redactionModeChanged);
+        SignalRecorder<bool> spyInkRec(&viewer, &ui::PdfViewerWidget::inkDrawingModeChanged);
+
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const bool inkOnRedactOff = viewer.isInkDrawingMode() && !viewer.isRedactionMode();
+        const bool redactSignalEmitted = (spyRedactRec.count() == 1) && !std::get<0>(spyRedactRec.at(0));
+        const bool inkSignalEmitted = (spyInkRec.count() == 1) && std::get<0>(spyInkRec.at(0));
+
+        // Direction 2: Ink active -> setRedactionMode(true)
+        // must disable ink mode, clear selection, and emit signals
+        viewer.setInkDrawingMode(false);
+        makeSelection();
+        const bool selBeforeInk = viewer.hasSelection();
+        viewer.setInkDrawingMode(true);
+        const bool selClearedByInk = selBeforeInk && !viewer.hasSelection();
+
+        spyRedactRec.clear();
+        spyInkRec.clear();
+
+        viewer.setRedactionMode(true);
+        pump(20);
+
+        const bool redactOnInkOff = viewer.isRedactionMode() && !viewer.isInkDrawingMode();
+        const bool inkOffSignalEmitted = (spyInkRec.count() == 1) && !std::get<0>(spyInkRec.at(0));
+        const bool redactOnSignalEmitted = (spyRedactRec.count() == 1) && std::get<0>(spyRedactRec.at(0));
+
+        viewer.setRedactionMode(false);
+        viewer.clearStagedRedactions();
+        viewer.setInkDrawingMode(false);
+
+        // Restore samplePdf
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(100);
+
+        const bool g43Ok = sel1Created && selClearedByRedact && inkOnRedactOff
+            && redactSignalEmitted && inkSignalEmitted && selClearedByInk
+            && redactOnInkOff && inkOffSignalEmitted && redactOnSignalEmitted;
+
+        std::string d43 = "sel1=" + std::to_string(sel1Created)
+            + " selClrRedact=" + std::to_string(selClearedByRedact)
+            + " inkOnRedactOff=" + std::to_string(inkOnRedactOff)
+            + " redactSig=" + std::to_string(redactSignalEmitted)
+            + " inkSig=" + std::to_string(inkSignalEmitted)
+            + " selClrByInk=" + std::to_string(selClearedByInk)
+            + " redactOnInkOff=" + std::to_string(redactOnInkOff)
+            + " inkOffSig=" + std::to_string(inkOffSignalEmitted)
+            + " redactOnSig=" + std::to_string(redactOnSignalEmitted);
+
+        recordTest(g43Ok, "Group 4.43: Mutual mode exclusion with redaction mode and active selection clearing", d43);
+    }
+
+    auto pageDisplayToViewport = [&](int page, double pageDispX, double pageDispY) -> QPointF {
+        int64_t docX = 0, docY = 0;
+        viewer.layout().pagePointsToDocument(page, pageDispX, pageDispY, docX, docY);
+        const double dpr = viewer.effectiveDpr();
+        return QPointF(static_cast<double>(docX - viewer.currentDocScrollX()) / dpr,
+                       static_cast<double>(docY - viewer.currentDocScrollY()) / dpr);
+    };
+
+    // 4.44: Mid-stroke mode disable discards in-flight stroke cleanly
+    {
+        viewer.editLog().clear();
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const QPointF ptA = pageDisplayToViewport(0, 100.0, 100.0);
+        const QPointF ptB = pageDisplayToViewport(0, 150.0, 150.0);
+
+        // Press and move while in ink mode
+        QMouseEvent press1(QEvent::MouseButtonPress, ptA, ptA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press1);
+        pump(20);
+
+        QMouseEvent move1(QEvent::MouseMove, ptB, ptB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move1);
+        pump(20);
+
+        // Turn off ink mode mid-stroke
+        viewer.setInkDrawingMode(false);
+        pump(20);
+
+        // Release after mode was turned off
+        QMouseEvent rel1(QEvent::MouseButtonRelease, ptB, ptB, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel1);
+        pump(50);
+
+        const bool nothingLogged = viewer.editLog().activeCommands().empty();
+
+        // Re-enable ink mode and draw fresh stroke: points from discarded stroke must not bleed through
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const QPointF ptC = pageDisplayToViewport(0, 200.0, 200.0);
+        const QPointF ptD = pageDisplayToViewport(0, 220.0, 220.0);
+
+        QMouseEvent press2(QEvent::MouseButtonPress, ptC, ptC, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press2);
+        pump(20);
+
+        QMouseEvent move2(QEvent::MouseMove, ptD, ptD, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move2);
+        pump(20);
+
+        QMouseEvent rel2(QEvent::MouseButtonRelease, ptD, ptD, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel2);
+        pump(50);
+
+        const auto& cmds = viewer.editLog().activeCommands();
+        bool freshStrokeOk = (cmds.size() == 1);
+        std::string extra44;
+        if (freshStrokeOk) {
+            const auto& strokes = cmds[0].after.inkStrokes;
+            freshStrokeOk = (strokes.size() == 1) && (strokes[0].size() == 2);
+            if (!strokes.empty() && !strokes[0].empty()) {
+                extra44 = " p0=(" + std::to_string(strokes[0][0].x) + "," + std::to_string(strokes[0][0].y) + ")";
+                if (strokes[0].size() > 1) {
+                    extra44 += " p1=(" + std::to_string(strokes[0][1].x) + "," + std::to_string(strokes[0][1].y) + ")";
+                }
+            }
+            if (freshStrokeOk) {
+                // Must contain ptC and ptD user coords (~200 and ~220), and definitely NOT ptA or ptB (100 and 150)
+                freshStrokeOk = (std::abs(strokes[0][0].x - 200.0) < 1.0) &&
+                                (std::abs(strokes[0][1].x - 220.0) < 1.0) &&
+                                (strokes[0][0].x > 180.0) && (strokes[0][1].x > 180.0);
+            }
+        }
+
+        viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+
+        const bool g44Ok = nothingLogged && freshStrokeOk;
+        const std::string d44 = "nothingLogged=" + std::to_string(nothingLogged)
+            + " freshStroke=" + std::to_string(freshStrokeOk) + extra44;
+
+        recordTest(g44Ok, "Group 4.44: Mid-stroke mode disable discards in-flight stroke cleanly", d44);
+    }
+
+    // 4.45: Press event acceptance: on-page accepted, off-page/gap falls through
+    {
+        viewer.editLog().clear();
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const QPointF pOn = pageDisplayToViewport(0, 100.0, 100.0);
+
+        // Case 1: Press on page -> accepted directly by ink handler
+        QMouseEvent pressOn(QEvent::MouseButtonPress, pOn, pOn, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        pressOn.ignore();
+        QApplication::sendEvent(viewer.viewport(), &pressOn);
+        const bool onAccepted = pressOn.isAccepted();
+
+        // Release to commit active stroke and verify stroke was created
+        QMouseEvent relOn(QEvent::MouseButtonRelease, pOn, pOn, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &relOn);
+        const bool onCreatedStroke = (viewer.editLog().activeCommands().size() == 1);
+        viewer.editLog().clear();
+
+        // Case 2: Press outside any page (margin at (2, 2)) -> falls through to QAbstractScrollArea
+        const QPointF pOff(2.0, 2.0);
+        const double dpr = viewer.effectiveDpr();
+        const int64_t offDocX = viewer.currentDocScrollX() + static_cast<int64_t>(std::round(pOff.x() * dpr));
+        const int64_t offDocY = viewer.currentDocScrollY() + static_cast<int64_t>(std::round(pOff.y() * dpr));
+        const bool isOffPage = (viewer.layout().getPageAt(offDocX, offDocY) < 0);
+
+        QMouseEvent pressOff(QEvent::MouseButtonPress, pOff, pOff, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        pressOff.ignore();
+        QApplication::sendEvent(viewer.viewport(), &pressOff);
+        // Falls through to QAbstractScrollArea::mousePressEvent (which accepts it)
+        const bool offFellThrough = pressOff.isAccepted();
+
+        // Release commits nothing to edit log (no stroke started)
+        QMouseEvent relOff(QEvent::MouseButtonRelease, pOff, pOff, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &relOff);
+        const bool noOffCommand = viewer.editLog().activeCommands().empty();
+
+        viewer.setInkDrawingMode(false);
+
+        const bool g45Ok = onAccepted && onCreatedStroke && isOffPage && offFellThrough && noOffCommand;
+        const std::string d45 = "onAccepted=" + std::to_string(onAccepted)
+            + " onStroke=" + std::to_string(onCreatedStroke)
+            + " isOff=" + std::to_string(isOffPage)
+            + " offFellThrough=" + std::to_string(offFellThrough)
+            + " noOffCmd=" + std::to_string(noOffCommand);
+
+        recordTest(g45Ok, "Group 4.45: Press event acceptance: on-page accepted, off-page/gap ignored", d45);
+    }
+
+    // 4.46: Point acceptance distance filter (>= 1.0) and bottom-up PDF user coordinate inversion
+    {
+        viewer.editLog().clear();
+        viewer.setZoom(2.0);
+        viewer.waitForRendering();
+        pump(50);
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const auto& pl0 = viewer.layout().getPageLayout(0);
+        const double dispX0 = 60.0;
+        const double dispY0 = 80.0;
+        const QPointF pt0 = pageDisplayToViewport(0, dispX0, dispY0);
+
+        // Press at pt0: adds initial stroke point
+        QMouseEvent press(QEvent::MouseButtonPress, pt0, pt0, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        pump(20);
+
+        // Sub-threshold move: 1 device pixel at scale 2.0 -> dx = 0.5 pt -> dx^2 + dy^2 = 0.25 < 1.0 -> rejected
+        const QPointF ptSub = pt0 + QPointF(1.0, 0.0);
+        QMouseEvent moveSub(QEvent::MouseMove, ptSub, ptSub, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &moveSub);
+        pump(20);
+
+        // Boundary move: 2 device pixels at scale 2.0 -> dx = 1.0 pt -> dx^2 + dy^2 = 1.0 >= 1.0 -> accepted
+        const QPointF ptBoundary = pt0 + QPointF(2.0, 0.0);
+        QMouseEvent moveBoundary(QEvent::MouseMove, ptBoundary, ptBoundary, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &moveBoundary);
+        pump(20);
+
+        // Release at ptBoundary
+        QMouseEvent rel(QEvent::MouseButtonRelease, ptBoundary, ptBoundary, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel);
+        pump(50);
+
+        const auto& cmds = viewer.editLog().activeCommands();
+        bool pointsOk = (cmds.size() == 1);
+        bool coordMathOk = false;
+        bool filterBoundaryOk = false;
+
+        if (pointsOk) {
+            const auto& strokes = cmds[0].after.inkStrokes;
+            pointsOk = (strokes.size() == 1) && (strokes[0].size() == 2);
+            if (pointsOk) {
+                const auto& p0 = strokes[0][0];
+                const auto& p1 = strokes[0][1];
+
+                // Coordinate math: Y must be inverted: pl0.heightPoints - dispY0
+                const double expectedY0 = pl0.heightPoints - dispY0;
+                coordMathOk = (std::abs(p0.x - dispX0) < 1e-4) &&
+                              (std::abs(p0.y - expectedY0) < 1e-4) &&
+                              (std::abs(p1.x - (dispX0 + 1.0)) < 1e-4) &&
+                              (std::abs(p1.y - expectedY0) < 1e-4);
+
+                // Boundary filter check: distance squared between p0 and p1 is exactly 1.0
+                const double distSq = (p1.x - p0.x) * (p1.x - p0.x) + (p1.y - p0.y) * (p1.y - p0.y);
+                filterBoundaryOk = (std::abs(distSq - 1.0) < 1e-4);
+            }
+        }
+
+        viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+        viewer.setZoom(1.0);
+        viewer.waitForRendering();
+        pump(50);
+
+        const bool g46Ok = pointsOk && coordMathOk && filterBoundaryOk;
+        const std::string d46 = "pointsOk=" + std::to_string(pointsOk)
+            + " coordMath=" + std::to_string(coordMathOk)
+            + " filterBoundary=" + std::to_string(filterBoundaryOk);
+
+        recordTest(g46Ok, "Group 4.46: Point acceptance distance filter (>= 1.0) and bottom-up PDF user coordinate inversion", d46);
+    }
+
+    // 4.47: Click-without-drag synthesizes second point at x + 0.1
+    {
+        viewer.editLog().clear();
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const auto& pl0 = viewer.layout().getPageLayout(0);
+        const double dispX = 120.0;
+        const double dispY = 140.0;
+        const QPointF pt = pageDisplayToViewport(0, dispX, dispY);
+
+        // Press without any mouse move
+        QMouseEvent press(QEvent::MouseButtonPress, pt, pt, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        pump(20);
+
+        // Immediate release at same point
+        QMouseEvent rel(QEvent::MouseButtonRelease, pt, pt, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel);
+        pump(50);
+
+        const auto& cmds = viewer.editLog().activeCommands();
+        bool singleClickOk = (cmds.size() == 1);
+        bool syntheticPointOk = false;
+
+        if (singleClickOk) {
+            const auto& strokes = cmds[0].after.inkStrokes;
+            singleClickOk = (strokes.size() == 1) && (strokes[0].size() == 2);
+            if (singleClickOk) {
+                const auto& p0 = strokes[0][0];
+                const auto& p1 = strokes[0][1];
+                const double expectedY = pl0.heightPoints - dispY;
+
+                const bool p0Ok = (std::abs(p0.x - dispX) < 1e-4) && (std::abs(p0.y - expectedY) < 1e-4);
+                const bool p1Ok = (std::abs(p1.x - (p0.x + 0.1)) < 1e-4) && (std::abs(p1.y - p0.y) < 1e-4);
+                syntheticPointOk = p0Ok && p1Ok;
+            }
+        }
+
+        viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+
+        const bool g47Ok = singleClickOk && syntheticPointOk;
+        const std::string d47 = "singleClickOk=" + std::to_string(singleClickOk)
+            + " syntheticPt=" + std::to_string(syntheticPointOk);
+
+        recordTest(g47Ok, "Group 4.47: Click-without-drag synthesizes second point at x + 0.1", d47);
+    }
+
+    // 4.48: Ink annotation commit attributes (defaults, custom color/borderWidth, and page reset)
+    {
+        viewer.editLog().clear();
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        // 1. Defaults: color 0xFF000000, borderWidth 2.0
+        const bool defColor = (viewer.inkColor() == 0xFF000000);
+        const bool defWidth = (std::abs(viewer.inkBorderWidth() - 2.0) < 1e-4);
+
+        // Draw on page 0
+        const auto& pl0 = viewer.layout().getPageLayout(0);
+        const double pl0Left = static_cast<double>(pl0.leftPixel);
+        const double pl0Top = static_cast<double>(pl0.topPixel);
+        const QPointF p0A(pl0Left + 100.0, pl0Top + 100.0);
+        const QPointF p0B(pl0Left + 110.0, pl0Top + 110.0);
+
+        QMouseEvent pr0(QEvent::MouseButtonPress, p0A, p0A, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pr0);
+        QMouseEvent mv0(QEvent::MouseMove, p0B, p0B, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mv0);
+        QMouseEvent rel0(QEvent::MouseButtonRelease, p0B, p0B, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel0);
+        pump(50);
+
+        const auto& cmds1 = viewer.editLog().activeCommands();
+        bool defCommitOk = (cmds1.size() == 1);
+        if (defCommitOk) {
+            const auto& it = cmds1[0].after;
+            defCommitOk = (it.subtype == pdf::AnnotationSubtype::Ink) &&
+                          (it.pageIndex == 0) &&
+                          (it.colorArgb == 0xFF000000) &&
+                          (std::abs(it.borderWidth - 2.0) < 1e-4) &&
+                          (it.flags == 4);
+        }
+
+        // 2. Custom attributes: color 0xFF112233, borderWidth 4.5
+        viewer.setInkColor(0xFF112233);
+        viewer.setInkBorderWidth(4.5);
+        const bool custColor = (viewer.inkColor() == 0xFF112233);
+        const bool custWidth = (std::abs(viewer.inkBorderWidth() - 4.5) < 1e-4);
+
+        // Draw on page 1
+        const auto& pl1 = viewer.layout().getPageLayout(1);
+        const double pl1Left = static_cast<double>(pl1.leftPixel);
+        const double pl1Top = static_cast<double>(pl1.topPixel);
+        const QPointF p1A(pl1Left + 100.0, pl1Top + 100.0);
+        const QPointF p1B(pl1Left + 110.0, pl1Top + 110.0);
+
+        QMouseEvent pr1(QEvent::MouseButtonPress, p1A, p1A, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pr1);
+        QMouseEvent mv1(QEvent::MouseMove, p1B, p1B, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mv1);
+        QMouseEvent rel1(QEvent::MouseButtonRelease, p1B, p1B, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel1);
+        pump(50);
+
+        const auto& cmds2 = viewer.editLog().activeCommands();
+        bool custCommitOk = (cmds2.size() == 2);
+        if (custCommitOk) {
+            const auto& it = cmds2[1].after;
+            custCommitOk = (it.subtype == pdf::AnnotationSubtype::Ink) &&
+                           (it.pageIndex == 1) &&
+                           (it.colorArgb == 0xFF112233) &&
+                           (std::abs(it.borderWidth - 4.5) < 1e-4) &&
+                           (it.flags == 4);
+        }
+
+        // Reset viewer ink attributes to defaults
+        viewer.setInkColor(0xFF000000);
+        viewer.setInkBorderWidth(2.0);
+        viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+
+        const bool g48Ok = defColor && defWidth && defCommitOk && custColor && custWidth && custCommitOk;
+        const std::string d48 = "defCol=" + std::to_string(defColor) + " defWid=" + std::to_string(defWidth)
+            + " defCommit=" + std::to_string(defCommitOk)
+            + " custCol=" + std::to_string(custColor) + " custWid=" + std::to_string(custWidth)
+            + " custCommit=" + std::to_string(custCommitOk);
+
+        recordTest(g48Ok, "Group 4.48: Ink annotation commit attributes (defaults, custom color/borderWidth, and page reset)", d48);
+    }
+
+    // 4.49: Point cap enforcement at pdf::kMaxInkPoints (100,000 points)
+    {
+        viewer.editLog().clear();
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const auto& pl0 = viewer.layout().getPageLayout(0);
+        const double pl0Left = static_cast<double>(pl0.leftPixel);
+        const double pl0Top = static_cast<double>(pl0.topPixel);
+        const QPointF ptBase(pl0Left + 100.0, pl0Top + 100.0);
+        const QPointF ptAlt(pl0Left + 103.0, pl0Top + 100.0);
+
+        // Press adds 1 initial point (size = 1)
+        QMouseEvent press(QEvent::MouseButtonPress, ptBase, ptBase, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+
+        // Send moves alternating between ptBase and ptAlt (distance = 3.0 >= 1.0)
+        // Must saturate at exactly pdf::kMaxInkPoints (100,000)
+        constexpr size_t totalMovesToSend = pdf::kMaxInkPoints + 5;
+        for (size_t i = 0; i < totalMovesToSend; ++i) {
+            const QPointF& curPt = (i % 2 == 0) ? ptAlt : ptBase;
+            QMouseEvent mv(QEvent::MouseMove, curPt, curPt, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(viewer.viewport(), &mv);
+        }
+
+        // Release commits the capped stroke
+        QMouseEvent rel(QEvent::MouseButtonRelease, ptBase, ptBase, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel);
+        pump(50);
+
+        const auto& cmds = viewer.editLog().activeCommands();
+        bool capOk = (cmds.size() == 1);
+        size_t actualPoints = 0;
+        if (capOk) {
+            const auto& strokes = cmds[0].after.inkStrokes;
+            capOk = (strokes.size() == 1);
+            if (capOk) {
+                actualPoints = strokes[0].size();
+                capOk = (actualPoints == pdf::kMaxInkPoints);
+            }
+        }
+
+        viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+
+        const bool g49Ok = capOk;
+        const std::string d49 = "capOk=" + std::to_string(capOk)
+            + " (points=" + std::to_string(actualPoints) + " exp=" + std::to_string(pdf::kMaxInkPoints) + ")";
+
+        recordTest(g49Ok, "Group 4.49: Point cap enforcement at pdf::kMaxInkPoints (100,000 points)", d49);
+    }
+
+    // 4.50: Document lifecycle: mid-stroke closeDocument silently rejects without loadError
+    {
+        viewer.editLog().clear();
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        SignalCounter spyLoadError(&viewer, &ui::PdfViewerWidget::loadError);
+
+        const auto& pl0 = viewer.layout().getPageLayout(0);
+        const double pl0Left = static_cast<double>(pl0.leftPixel);
+        const double pl0Top = static_cast<double>(pl0.topPixel);
+        const QPointF ptA(pl0Left + 100.0, pl0Top + 100.0);
+        const QPointF ptB(pl0Left + 150.0, pl0Top + 150.0);
+
+        // Start drawing ink stroke
+        QMouseEvent press(QEvent::MouseButtonPress, ptA, ptA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &press);
+        QMouseEvent move(QEvent::MouseMove, ptB, ptB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &move);
+
+        // Close document mid-stroke
+        viewer.closeDocument();
+        pump(50);
+
+        // Release after closeDocument -> addInkAnnotation rejects silently because !m_hasDocument
+        QMouseEvent rel(QEvent::MouseButtonRelease, ptB, ptB, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel);
+        pump(50);
+
+        const bool noCommandsCommitted = viewer.editLog().activeCommands().empty();
+        const bool silentRejectOnClose = (spyLoadError.count() == 0);
+
+        // Also verify addInkAnnotation directly on closed document returns false silently
+        const bool directCallRejected = !viewer.addInkAnnotation(0, {{{10.0, 10.0}, {20.0, 20.0}}});
+        const bool directSilent = (spyLoadError.count() == 0);
+
+        // Reopen samplePdf and ensure drawing works cleanly with no ghost stroke state
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(100);
+
+        viewer.setInkDrawingMode(true);
+        const auto& newPl0 = viewer.layout().getPageLayout(0);
+        const double newPl0Left = static_cast<double>(newPl0.leftPixel);
+        const double newPl0Top = static_cast<double>(newPl0.topPixel);
+        const QPointF pNewA(newPl0Left + 80.0, newPl0Top + 80.0);
+        const QPointF pNewB(newPl0Left + 95.0, newPl0Top + 95.0);
+
+        QMouseEvent prNew(QEvent::MouseButtonPress, pNewA, pNewA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &prNew);
+        QMouseEvent mvNew(QEvent::MouseMove, pNewB, pNewB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mvNew);
+        QMouseEvent relNew(QEvent::MouseButtonRelease, pNewB, pNewB, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &relNew);
+        pump(50);
+
+        const auto& cleanCmds = viewer.editLog().activeCommands();
+        bool reopenDrawClean = (cleanCmds.size() == 1);
+        if (reopenDrawClean) {
+            reopenDrawClean = (cleanCmds[0].after.inkStrokes.size() == 1) &&
+                              (cleanCmds[0].after.inkStrokes[0].size() == 2);
+        }
+
+        viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+
+        const bool g50Ok = noCommandsCommitted && silentRejectOnClose && directCallRejected && directSilent && reopenDrawClean;
+        const std::string d50 = "noCmd=" + std::to_string(noCommandsCommitted)
+            + " silentClose=" + std::to_string(silentRejectOnClose)
+            + " directRej=" + std::to_string(directCallRejected)
+            + " directSilent=" + std::to_string(directSilent)
+            + " cleanReopen=" + std::to_string(reopenDrawClean);
+
+        recordTest(g50Ok, "Group 4.50: Document lifecycle: mid-stroke closeDocument silently rejects without loadError", d50);
+    }
+
+    // 4.51: Non-left mouse buttons and stray moves do not initiate ink strokes
+    {
+        viewer.editLog().clear();
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const auto& pl0 = viewer.layout().getPageLayout(0);
+        const double pl0Left = static_cast<double>(pl0.leftPixel);
+        const double pl0Top = static_cast<double>(pl0.topPixel);
+        const QPointF ptA(pl0Left + 100.0, pl0Top + 100.0);
+        const QPointF ptB(pl0Left + 140.0, pl0Top + 140.0);
+
+        // Right-button press, move, and release
+        QMouseEvent prRight(QEvent::MouseButtonPress, ptA, ptA, Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &prRight);
+        QMouseEvent mvRight(QEvent::MouseMove, ptB, ptB, Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mvRight);
+        QMouseEvent relRight(QEvent::MouseButtonRelease, ptB, ptB, Qt::RightButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &relRight);
+        pump(20);
+
+        const bool rightButtonIgnored = viewer.editLog().activeCommands().empty();
+
+        // Mouse move without buttons pressed
+        QMouseEvent mvNoBtn(QEvent::MouseMove, ptA, ptA, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mvNoBtn);
+
+        // Stray mouse release without prior press
+        QMouseEvent relStray(QEvent::MouseButtonRelease, ptA, ptA, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &relStray);
+        pump(20);
+
+        const bool strayIgnored = viewer.editLog().activeCommands().empty();
+
+        viewer.setInkDrawingMode(false);
+
+        const bool g51Ok = rightButtonIgnored && strayIgnored;
+        const std::string d51 = "rightBtn=" + std::to_string(rightButtonIgnored)
+            + " stray=" + std::to_string(strayIgnored);
+
+        recordTest(g51Ok, "Group 4.51: Non-left mouse buttons and stray moves do not initiate ink strokes", d51);
     }
 }
 
