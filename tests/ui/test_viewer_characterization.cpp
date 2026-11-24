@@ -3909,6 +3909,584 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         viewer.waitForRendering();
         pump(100);
     }
+
+    // 4.28: addTextAnnotation item construction, UUID name, unclamped rect, default color, and flags (A1)
+    {
+        viewer.editLog().clear();
+
+        // 1. Add note with default color (0), specific coordinates
+        const double x1 = 50.0;
+        const double y1 = 80.0;
+        const bool add1 = viewer.addTextAnnotation(0, x1, y1, QStringLiteral("Sticky Note One"), 0);
+        const auto cmds1 = viewer.editLog().activeCommands();
+        bool a1Ok = add1 && (cmds1.size() == 1);
+        if (a1Ok) {
+            const auto& item1 = cmds1.back().after;
+            const bool prefixOk = item1.name.startsWith(QStringLiteral("pdfr-"));
+            const QString uuidPart = item1.name.mid(5);
+            const bool uuidLenOk = (uuidPart.length() == 36) && !uuidPart.contains(QLatin1Char('{')) && !uuidPart.contains(QLatin1Char('}'));
+            const bool subtypeOk = (item1.subtype == pdf::AnnotationSubtype::Text);
+            const bool rectOk = (std::abs(item1.left - 50.0) < 1e-3) &&
+                               (std::abs(item1.bottom - 56.0) < 1e-3) && // 80 - 24
+                               (std::abs(item1.right - 74.0) < 1e-3) &&  // 50 + 24
+                               (std::abs(item1.top - 80.0) < 1e-3);
+            const bool colorOk = (item1.colorArgb == 0xFFFFD700) && item1.hasColor;
+            const bool flagsOk = (item1.flags == 4);
+            const bool contentsOk = (item1.contents == QStringLiteral("Sticky Note One"));
+
+            // 2. Add second note: verify unique UUID and unclamped coordinates outside page (e.g. negative)
+            const bool add2 = viewer.addTextAnnotation(0, -10.0, -5.0, QStringLiteral("Outside Page Note"), 0xFF112233);
+            const auto cmds2 = viewer.editLog().activeCommands();
+            bool note2Ok = false;
+            if (add2 && cmds2.size() == 2) {
+                const auto& item2 = cmds2.back().after;
+                const bool uniqueName = (item2.name != item1.name) && item2.name.startsWith(QStringLiteral("pdfr-"));
+                const bool unclamped = (std::abs(item2.left - (-10.0)) < 1e-3) &&
+                                       (std::abs(item2.bottom - (-29.0)) < 1e-3) &&
+                                       (std::abs(item2.right - 14.0) < 1e-3) &&
+                                       (std::abs(item2.top - (-5.0)) < 1e-3);
+                const bool colorExplicit = (item2.colorArgb == 0xFF112233);
+                note2Ok = uniqueName && unclamped && colorExplicit;
+            }
+            a1Ok = prefixOk && uuidLenOk && subtypeOk && rectOk && colorOk && flagsOk && contentsOk && note2Ok;
+        }
+
+        recordTest(a1Ok, "Group 4.28: addTextAnnotation name, unclamped rect, default gold color, flags, contents (A1)");
+        viewer.editLog().clear();
+    }
+
+    // 4.29: addSquareAnnotation and addCircleAnnotation rect normalization, bottom/top mapping, border width, default colors (A2)
+    {
+        viewer.editLog().clear();
+
+        // 1. Square: un-normalized rect QRectF(150, 280, -50, -80) -> normalized(100, 200, 50, 80)
+        // bottom = normalized.top() = 200, top = normalized.bottom() = 280
+        // Border width: test 0.0 -> fallback 2.0; default color -> 0xFFFF0000
+        const bool addSq1 = viewer.addSquareAnnotation(0, QRectF(150.0, 280.0, -50.0, -80.0), 0, 0.0);
+        // Border width: test negative (-5.0) -> fallback 2.0
+        const bool addSq2 = viewer.addSquareAnnotation(0, QRectF(10.0, 10.0, 20.0, 20.0), 0xFFAABBCC, -5.0);
+        // Border width: test exactly 100.0 -> accepted 100.0
+        const bool addSq3 = viewer.addSquareAnnotation(0, QRectF(10.0, 10.0, 20.0, 20.0), 0xFFAABBCC, 100.0);
+        // Border width: test just over 100.0 (100.1) -> fallback 2.0
+        const bool addSq4 = viewer.addSquareAnnotation(0, QRectF(10.0, 10.0, 20.0, 20.0), 0xFFAABBCC, 100.1);
+
+        // 2. Circle: default color -> 0xFF0000FF, border width 3.5 -> 3.5
+        const bool addCr1 = viewer.addCircleAnnotation(0, QRectF(200.0, 300.0, 40.0, 60.0), 0, 3.5);
+
+        // 3. Rejections: empty rect and bad page must return false and log nothing
+        const size_t cmdsBeforeRejects = viewer.editLog().activeCommands().size();
+        const bool rejEmpty1 = !viewer.addSquareAnnotation(0, QRectF(10.0, 10.0, 0.0, 20.0));
+        const bool rejEmpty2 = !viewer.addCircleAnnotation(0, QRectF(10.0, 10.0, 20.0, 0.0));
+        const bool rejBadPage = !viewer.addSquareAnnotation(-1, QRectF(10.0, 10.0, 20.0, 20.0)) &&
+                                !viewer.addCircleAnnotation(viewer.pageCount(), QRectF(10.0, 10.0, 20.0, 20.0));
+        const bool noRejectsLogged = (viewer.editLog().activeCommands().size() == cmdsBeforeRejects);
+
+        const auto cmds = viewer.editLog().activeCommands();
+        bool a2Ok = addSq1 && addSq2 && addSq3 && addSq4 && addCr1 &&
+                    rejEmpty1 && rejEmpty2 && rejBadPage && noRejectsLogged && (cmds.size() == 5);
+        if (a2Ok) {
+            const auto& sq1 = cmds[0].after;
+            const bool sq1Mapping = (sq1.subtype == pdf::AnnotationSubtype::Square) &&
+                                    (std::abs(sq1.left - 100.0) < 1e-3) &&
+                                    (std::abs(sq1.bottom - 200.0) < 1e-3) && // normalized.top()
+                                    (std::abs(sq1.right - 150.0) < 1e-3) &&
+                                    (std::abs(sq1.top - 280.0) < 1e-3) &&    // normalized.bottom()
+                                    (sq1.borderWidth == 2.0) &&              // fallback from 0
+                                    (sq1.colorArgb == 0xFFFF0000) && sq1.hasColor && (sq1.flags == 4);
+
+            const bool sq2Bw = (cmds[1].after.borderWidth == 2.0);   // fallback from negative
+            const bool sq3Bw = (cmds[2].after.borderWidth == 100.0); // boundary accepted
+            const bool sq4Bw = (cmds[3].after.borderWidth == 2.0);   // fallback from > 100
+
+            const auto& cr1 = cmds[4].after;
+            const bool cr1Ok = (cr1.subtype == pdf::AnnotationSubtype::Circle) &&
+                               (std::abs(cr1.left - 200.0) < 1e-3) &&
+                               (std::abs(cr1.bottom - 300.0) < 1e-3) &&
+                               (std::abs(cr1.right - 240.0) < 1e-3) &&
+                               (std::abs(cr1.top - 360.0) < 1e-3) &&
+                               (cr1.borderWidth == 3.5) &&
+                               (cr1.colorArgb == 0xFF0000FF) && cr1.hasColor && (cr1.flags == 4);
+
+            a2Ok = sq1Mapping && sq2Bw && sq3Bw && sq4Bw && cr1Ok;
+        }
+
+        recordTest(a2Ok, "Group 4.29: addSquareAnnotation and addCircleAnnotation rect mapping, border width, default colors (A2)");
+        viewer.editLog().clear();
+    }
+
+    // 4.30: addInkAnnotation stroke storage, border width bounds, default black, and empty stroke rejection (A3)
+    {
+        viewer.editLog().clear();
+
+        // 1. Valid ink strokes
+        const std::vector<std::vector<pdf::AnnotationPoint>> strokes = {
+            { {10.0, 20.0}, {30.0, 40.0} },
+            { {50.0, 60.0}, {70.0, 80.0}, {90.0, 100.0} }
+        };
+        // Test default color (0) -> 0xFF000000, border width 0 -> 2.0
+        const bool addInk1 = viewer.addInkAnnotation(0, strokes, 0, 0.0);
+        // Test border width 100 -> 100
+        const bool addInk2 = viewer.addInkAnnotation(0, strokes, 0xFF123456, 100.0);
+        // Test border width 100.5 -> 2.0
+        const bool addInk3 = viewer.addInkAnnotation(0, strokes, 0xFF123456, 100.5);
+        // Test border width negative -> 2.0
+        const bool addInk4 = viewer.addInkAnnotation(0, strokes, 0xFF123456, -2.0);
+
+        // 2. Rejection of empty strokes
+        const size_t cmdsBeforeRejects = viewer.editLog().activeCommands().size();
+        const bool rejEmpty = !viewer.addInkAnnotation(0, {}, 0, 2.0);
+        const bool rejBadPage = !viewer.addInkAnnotation(-1, strokes, 0, 2.0);
+        const bool noRejectsLogged = (viewer.editLog().activeCommands().size() == cmdsBeforeRejects);
+
+        const auto cmds = viewer.editLog().activeCommands();
+        bool a3Ok = addInk1 && addInk2 && addInk3 && addInk4 && rejEmpty && rejBadPage && noRejectsLogged && (cmds.size() == 4);
+        if (a3Ok) {
+            const auto& ink1 = cmds[0].after;
+            const bool subtypeOk = (ink1.subtype == pdf::AnnotationSubtype::Ink);
+            const bool strokesOk = (ink1.inkStrokes.size() == 2) &&
+                                   (ink1.inkStrokes[0].size() == 2) &&
+                                   (ink1.inkStrokes[0][0].x == 10.0 && ink1.inkStrokes[0][0].y == 20.0) &&
+                                   (ink1.inkStrokes[1].size() == 3) &&
+                                   (ink1.inkStrokes[1][2].x == 90.0 && ink1.inkStrokes[1][2].y == 100.0);
+            const bool colorOk = (ink1.colorArgb == 0xFF000000) && ink1.hasColor;
+            const bool bw1 = (ink1.borderWidth == 2.0);
+            const bool flagsOk = (ink1.flags == 4);
+
+            const bool bw2 = (cmds[1].after.borderWidth == 100.0);
+            const bool bw3 = (cmds[2].after.borderWidth == 2.0);
+            const bool bw4 = (cmds[3].after.borderWidth == 2.0);
+
+            a3Ok = subtypeOk && strokesOk && colorOk && bw1 && flagsOk && bw2 && bw3 && bw4;
+        }
+
+        recordTest(a3Ok, "Group 4.30: addInkAnnotation stroke storage, border width bounds, default black, empty rejection (A3)");
+        viewer.editLog().clear();
+    }
+
+    // 4.31: addFreeTextAnnotation trimmed empty, font size bounds, top anchoring, text outline, and error paths (A4)
+    {
+        viewer.editLog().clear();
+        SignalRecorder<QString> spyErr(&viewer, &ui::PdfViewerWidget::loadError);
+
+        // 1. Rejection of trimmed empty text
+        const bool rejTrimmed1 = !viewer.addFreeTextAnnotation(0, QRectF(50, 50, 100, 40), QStringLiteral("   "));
+        const bool rejTrimmed2 = !viewer.addFreeTextAnnotation(0, QRectF(50, 50, 100, 40), QStringLiteral("\t\n  \n"));
+
+        // 2. Successful add with default color (0 -> 0xFF000000), font size 0 -> 12
+        // rect QRectF(50, 60, 100, 30) -> left=50, bottom=60, right=150, top=90
+        const bool addFt1 = viewer.addFreeTextAnnotation(0, QRectF(50.0, 60.0, 100.0, 30.0), QStringLiteral("Hello FreeText"), 0, 0.0);
+        // Test font size bounds: 144 -> accepted 144
+        const bool addFt2 = viewer.addFreeTextAnnotation(0, QRectF(50.0, 60.0, 100.0, 30.0), QStringLiteral("Big FreeText"), 0xFF00FF00, 144.0);
+        // Test font size bounds: 145 -> fallback 12
+        const bool addFt3 = viewer.addFreeTextAnnotation(0, QRectF(50.0, 60.0, 100.0, 30.0), QStringLiteral("Over FreeText"), 0xFF00FF00, 145.0);
+
+        // 3. Error paths:
+        // Undrawable character: Private Use code point U+10FFFD
+        const size_t errCountBeforeUndrawable = spyErr.count();
+        const char32_t missing = 0x10FFFD;
+        const QString undrawableText = QStringLiteral("AB") + QString::fromUcs4(&missing, 1);
+        const bool rejUndrawable = !viewer.addFreeTextAnnotation(0, QRectF(50, 50, 100, 30), undrawableText);
+        const bool undrawableEmitted = (spyErr.count() > errCountBeforeUndrawable);
+
+        // NothingToDraw: string containing zero-width space U+200B (non-empty after trim, but leavesNoInk)
+        const size_t errCountBeforeNothing = spyErr.count();
+        const bool rejNothing = !viewer.addFreeTextAnnotation(0, QRectF(50, 50, 100, 30), QString(QChar(0x200B)));
+        const bool nothingEmitted = (spyErr.count() > errCountBeforeNothing);
+
+        // TooLarge: 30000 characters
+        const size_t errCountBeforeTooLarge = spyErr.count();
+        const QString hugeText(30000, QLatin1Char('W'));
+        const bool rejTooLarge = !viewer.addFreeTextAnnotation(0, QRectF(50, 50, 100, 30), hugeText);
+        const bool tooLargeEmitted = (spyErr.count() > errCountBeforeTooLarge);
+
+        const auto cmds = viewer.editLog().activeCommands();
+        bool a4Ok = rejTrimmed1 && rejTrimmed2 && addFt1 && addFt2 && addFt3 &&
+                    rejUndrawable && undrawableEmitted &&
+                    rejNothing && nothingEmitted &&
+                    rejTooLarge && tooLargeEmitted && (cmds.size() == 3);
+        if (a4Ok) {
+            const auto& ft1 = cmds[0].after;
+            const bool subtypeOk = (ft1.subtype == pdf::AnnotationSubtype::FreeText);
+            const bool topAnchorOk = (std::abs(ft1.top - 90.0) < 1e-3);
+            const bool bottomGrownOk = (ft1.bottom <= 60.0); // top stayed anchored, bottom grew downward
+            const bool outlineOk = !ft1.textOutline.empty();
+            const bool colorOk = (ft1.colorArgb == 0xFF000000) && ft1.hasColor;
+            const bool fs1Ok = (ft1.fontSize == 12.0); // fallback from 0
+            const bool flagsOk = (ft1.flags == 4);
+
+            const bool fs2Ok = (cmds[1].after.fontSize == 144.0);
+            const bool fs3Ok = (cmds[2].after.fontSize == 12.0); // fallback from 145
+
+            a4Ok = subtypeOk && topAnchorOk && bottomGrownOk && outlineOk && colorOk && fs1Ok && flagsOk && fs2Ok && fs3Ok;
+        }
+
+        recordTest(a4Ok, "Group 4.31: addFreeTextAnnotation font size, top anchor, outline, and loadError paths (A4)");
+        viewer.editLog().clear();
+    }
+
+    // 4.32: addStampAnnotation trimmed text, length limit, default color, border width, outline, and DRAFT fallback (A5)
+    {
+        viewer.editLog().clear();
+        SignalRecorder<QString> spyErr(&viewer, &ui::PdfViewerWidget::loadError);
+
+        // 1. Text is trimmed: "  APPROVED  " -> contents == "APPROVED"
+        const bool addSt1 = viewer.addStampAnnotation(0, QRectF(50.0, 50.0, 120.0, 40.0), QStringLiteral("  APPROVED  "), 0);
+
+        // 2. Text longer than kMaxStampTextCharacters (128) emits loadError and logs nothing
+        const QString over128(129, QLatin1Char('X'));
+        const size_t errBeforeOver = spyErr.count();
+        const size_t cmdsBeforeOver = viewer.editLog().activeCommands().size();
+        const bool rejOver = !viewer.addStampAnnotation(0, QRectF(50.0, 50.0, 120.0, 40.0), over128);
+        const bool overEmitted = (spyErr.count() > errBeforeOver);
+        const bool overNotLogged = (viewer.editLog().activeCommands().size() == cmdsBeforeOver);
+
+        // Exactly 128 characters is accepted
+        const QString exact128(128, QLatin1Char('Y'));
+        const bool addExact = viewer.addStampAnnotation(0, QRectF(50.0, 50.0, 120.0, 40.0), exact128);
+
+        // 3. addDefaultAnnotationAt(Stamp, ..., "") uses "DRAFT"
+        const bool addDefStamp = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Stamp, 50.0, 50.0, QString());
+
+        const auto cmds = viewer.editLog().activeCommands();
+        bool a5Ok = addSt1 && rejOver && overEmitted && overNotLogged && addExact && addDefStamp && (cmds.size() == 3);
+        if (a5Ok) {
+            const auto& st1 = cmds[0].after;
+            const bool subtypeOk = (st1.subtype == pdf::AnnotationSubtype::Stamp);
+            const bool contentsOk = (st1.contents == QStringLiteral("APPROVED")); // trimmed!
+            const bool colorOk = (st1.colorArgb == 0xFFCC0000) && st1.hasColor;
+            const bool bwOk = (st1.borderWidth == 2.0);
+            const bool flagsOk = (st1.flags == 4);
+            const bool outlineOk = !st1.textOutline.empty();
+
+            const auto& defStamp = cmds[2].after;
+            const bool draftOk = (defStamp.contents == QStringLiteral("DRAFT"));
+
+            a5Ok = subtypeOk && contentsOk && colorOk && bwOk && flagsOk && outlineOk && draftOk;
+        }
+
+        recordTest(a5Ok, "Group 4.32: addStampAnnotation trimmed text, length limit, default color, outline, DRAFT fallback (A5)");
+        viewer.editLog().clear();
+    }
+
+    // 4.33: addFileAttachmentAnnotation invalid filename, payload limits, flags, contents, placeOnPage, default color (A6)
+    {
+        viewer.editLog().clear();
+        SignalRecorder<QString> spyErr(&viewer, &ui::PdfViewerWidget::loadError);
+
+        // 1. Invalid filename emits loadError
+        const size_t errBeforeBadFile = spyErr.count();
+        const bool rejBadFile = !viewer.addFileAttachmentAnnotation(0, 50.0, 50.0, QStringLiteral("invalid/filename.bin"), "data");
+        const bool badFileEmitted = (spyErr.count() > errBeforeBadFile);
+
+        // 2. Empty payload emits loadError
+        const size_t errBeforeEmpty = spyErr.count();
+        const bool rejEmptyPayload = !viewer.addFileAttachmentAnnotation(0, 50.0, 50.0, QStringLiteral("valid.bin"), QByteArray());
+        const bool emptyPayloadEmitted = (spyErr.count() > errBeforeEmpty);
+
+        // 3. Oversize payload (> 16 MiB) emits loadError
+        const size_t errBeforeOver = spyErr.count();
+        QByteArray overData;
+        overData.resize(pdf::kMaxAnnotationAttachmentBytes + 1);
+        const bool rejOverPayload = !viewer.addFileAttachmentAnnotation(0, 50.0, 50.0, QStringLiteral("valid.bin"), overData);
+        const bool overPayloadEmitted = (spyErr.count() > errBeforeOver);
+
+        // 4. Successful addFileAttachmentAnnotation with default color (0 -> 0xFF336699)
+        const QByteArray validData("PayloadContent123");
+        const bool addFa = viewer.addFileAttachmentAnnotation(0, 50.0, 50.0, QStringLiteral("attachment.txt"), validData, 0);
+
+        const auto cmds = viewer.editLog().activeCommands();
+        bool a6Ok = rejBadFile && badFileEmitted && rejEmptyPayload && emptyPayloadEmitted &&
+                    rejOverPayload && overPayloadEmitted && addFa && (cmds.size() == 1);
+        if (a6Ok) {
+            const auto& fa = cmds[0].after;
+            const bool subtypeOk = (fa.subtype == pdf::AnnotationSubtype::FileAttachment);
+            const bool fileOk = (fa.attachmentFileName == QStringLiteral("attachment.txt"));
+            const bool contentsOk = (fa.contents == QStringLiteral("attachment.txt"));
+            const bool payloadOk = (fa.binaryPayload == validData);
+            const uint32_t expectedFlags = pdf::AnnotationFlag::Print | pdf::AnnotationFlag::NoZoom | pdf::AnnotationFlag::NoRotate;
+            const bool flagsOk = (fa.flags == expectedFlags); // 4 | 8 | 16 = 28
+            const bool colorOk = (fa.colorArgb == 0xFF336699) && fa.hasColor;
+
+            // Geometry: placeOnPage placed 24x24 inside page
+            const auto& pl = viewer.layout().getPageLayout(0);
+            const bool rectPlaced = (std::abs((fa.right - fa.left) - 24.0) < 1e-3) &&
+                                    (std::abs((fa.top - fa.bottom) - 24.0) < 1e-3) &&
+                                    (fa.left >= 0.0) && (fa.right <= pl.widthPoints) &&
+                                    (fa.bottom >= 0.0) && (fa.top <= pl.heightPoints);
+
+            a6Ok = subtypeOk && fileOk && contentsOk && payloadOk && flagsOk && colorOk && rectPlaced;
+        }
+
+        recordTest(a6Ok, "Group 4.33: addFileAttachmentAnnotation filename/payload validation, flags, contents, placeOnPage (A6)");
+        viewer.editLog().clear();
+    }
+
+    // 4.34: addDefaultAnnotationAt size table, unsupported subtypes, and closed document guard (A7)
+    {
+        viewer.editLog().clear();
+
+        // 1. Size table verification:
+        // Text: 24x24
+        const bool addText = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Text, 100.0, 200.0, QStringLiteral("Default Text"));
+        // Square: 100x60
+        const bool addSq = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Square, 100.0, 200.0);
+        // Circle: 100x60
+        const bool addCr = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Circle, 100.0, 200.0);
+        // Stamp: 120x40
+        const bool addSt = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Stamp, 100.0, 200.0, QStringLiteral("STAMP"));
+
+        // 2. Unsupported subtypes in addDefaultAnnotationAt:
+        // FileAttachment returns false
+        const bool rejFileAtt = !viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::FileAttachment, 100.0, 200.0);
+        // Markup subtypes return false
+        const bool rejHl = !viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Highlight, 100.0, 200.0);
+        const bool rejUl = !viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Underline, 100.0, 200.0);
+        const bool rejSo = !viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::StrikeOut, 100.0, 200.0);
+        const bool rejSq = !viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Squiggly, 100.0, 200.0);
+        const bool rejInk = !viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Ink, 100.0, 200.0);
+
+        const auto cmds = viewer.editLog().activeCommands();
+        bool a7Ok = addText && addSq && addCr && addSt &&
+                    rejFileAtt && rejHl && rejUl && rejSo && rejSq && rejInk && (cmds.size() == 4);
+        if (a7Ok) {
+            const auto& t = cmds[0].after;
+            const bool textDim = (std::abs((t.right - t.left) - 24.0) < 1e-3) && (std::abs((t.top - t.bottom) - 24.0) < 1e-3);
+            const auto& sq = cmds[1].after;
+            const bool sqDim = (std::abs((sq.right - sq.left) - 100.0) < 1e-3) && (std::abs((sq.top - sq.bottom) - 60.0) < 1e-3);
+            const auto& cr = cmds[2].after;
+            const bool crDim = (std::abs((cr.right - cr.left) - 100.0) < 1e-3) && (std::abs((cr.top - cr.bottom) - 60.0) < 1e-3);
+            const auto& st = cmds[3].after;
+            const bool stDim = (std::abs((st.right - st.left) - 120.0) < 1e-3) && (std::abs((st.top - st.bottom) - 40.0) < 1e-3);
+
+            a7Ok = textDim && sqDim && crDim && stDim;
+        }
+
+        // 3. Document closed: addDefaultAnnotationAt returns false
+        viewer.editLog().clear();
+        viewer.closeDocument();
+        pump(50);
+        const bool rejClosed = !viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Text, 100.0, 200.0, QStringLiteral("Closed Text"));
+        a7Ok = a7Ok && rejClosed;
+
+        // Restore samplePdf
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(100);
+
+        recordTest(a7Ok, "Group 4.34: addDefaultAnnotationAt size table, unsupported subtypes, closed doc guard (A7)");
+        viewer.editLog().clear();
+    }
+
+    // 4.35: markupSelection default colors, quad corners, min/max bounds, multi-page, reverse selection, selection clearing (A8)
+    {
+        // Open twoPageTextPdf for text selection
+        if (!twoPageTextPdf.isEmpty()) {
+            viewer.editLog().clear();
+            viewer.openDocument(twoPageTextPdf);
+            viewer.waitForRendering();
+            viewer.setZoom(0.2);
+            viewer.goToPage(0);
+            viewer.waitForRendering();
+            pump(100);
+            waitFor([&]() {
+                return viewer.getPageText(0) != nullptr && viewer.getPageText(1) != nullptr;
+            }, 5000);
+        }
+
+        viewer.clearSelection();
+        pump(50);
+
+        // 1. With no selection: returns false
+        const bool noSelFalse = !viewer.markupSelection(pdf::AnnotationSubtype::Highlight);
+
+        const auto pt0 = viewer.getPageText(0);
+        const auto pt1 = viewer.getPageText(1);
+        bool a8Ok = false;
+        bool hlOk = false;
+        bool colorsOk = false;
+        bool bwdOk = false;
+        bool mpOk = false;
+        bool textAvail = (pt0 && pt1 && pt0->charCount() > 5 && pt1->charCount() > 5);
+        if (textAvail) {
+            const auto& pl0 = viewer.layout().getPageLayout(0);
+            const double dpr = viewer.effectiveDpr();
+            const double effScale = pdf::quantizeScale(viewer.currentZoom()) * dpr;
+            auto charCenter = [&](const layout::PageLayout& pl, const pdf::PageCharBox& b) -> QPointF {
+                double x = (static_cast<double>(pl.leftPixel) + ((b.left + b.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+                double y = (static_cast<double>(pl.topPixel) + ((b.top + b.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+                return QPointF(x, y);
+            };
+
+            auto selectRange = [&](const QPointF& from, const QPointF& to) {
+                QMouseEvent p(QEvent::MouseButtonPress, from, from, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &p);
+                pump(20);
+                QMouseEvent m(QEvent::MouseMove, to, to, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &m);
+                pump(20);
+                QMouseEvent r(QEvent::MouseButtonRelease, to, to, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &r);
+                pump(50);
+            };
+
+            // 2. Single-page forward selection on page 0
+            selectRange(charCenter(pl0, pt0->chars[0]), charCenter(pl0, pt0->chars[3]));
+            const QString selText1 = viewer.selectedText();
+
+            // Highlight with default color (0 -> 0x80FFFF00)
+            viewer.editLog().clear();
+            const bool hlAdded = viewer.markupSelection(pdf::AnnotationSubtype::Highlight, 0);
+            const bool selClearedAfterHl = !viewer.hasSelection(); // cleared on success!
+            const auto cmdsHl = viewer.editLog().activeCommands();
+
+            hlOk = false;
+            if (hlAdded && selClearedAfterHl && (cmdsHl.size() == 1)) {
+                const auto& item = cmdsHl[0].after;
+                const bool subtypeOk = (item.subtype == pdf::AnnotationSubtype::Highlight);
+                const bool colorOk = (item.colorArgb == 0x80FFFF00) && item.hasColor;
+                const bool flagsOk = (item.flags == 4);
+                const bool contentsOk = (item.contents == selText1);
+
+                // Quad geometry: corners (pLeft, pTop), (pRight, pTop), (pLeft, pBottom), (pRight, pBottom)
+                bool quadsOk = !item.quadPoints.empty();
+                double expectedMinX = std::numeric_limits<double>::max();
+                double expectedMaxX = std::numeric_limits<double>::lowest();
+                double expectedMinY = std::numeric_limits<double>::max();
+                double expectedMaxY = std::numeric_limits<double>::lowest();
+                for (size_t i = 0; i < item.quadPoints.size(); ++i) {
+                    const auto& q = item.quadPoints[i];
+                    // In user space: x1=left, x2=right, x3=left, x4=right, y1=top, y2=top, y3=bottom, y4=bottom
+                    if (q.x1 > q.x2 || q.y1 < q.y3 || q.x3 > q.x4 || q.y2 < q.y4) {
+                        quadsOk = false;
+                    }
+                    expectedMinX = std::min({expectedMinX, q.x1, q.x2, q.x3, q.x4});
+                    expectedMaxX = std::max({expectedMaxX, q.x1, q.x2, q.x3, q.x4});
+                    expectedMinY = std::min({expectedMinY, q.y1, q.y2, q.y3, q.y4});
+                    expectedMaxY = std::max({expectedMaxY, q.y1, q.y2, q.y3, q.y4});
+                }
+                const bool boundsOk = (std::abs(item.left - expectedMinX) < 1e-3) &&
+                                     (std::abs(item.right - expectedMaxX) < 1e-3) &&
+                                     (std::abs(item.bottom - expectedMinY) < 1e-3) &&
+                                     (std::abs(item.top - expectedMaxY) < 1e-3);
+                hlOk = subtypeOk && colorOk && flagsOk && contentsOk && quadsOk && boundsOk;
+            }
+
+            // 3. Test other default colors: Underline 0xFF00AA00, StrikeOut 0xFFFF0000, Squiggly 0xFFFF0000, Other 0x80FFFF00
+            selectRange(charCenter(pl0, pt0->chars[0]), charCenter(pl0, pt0->chars[2]));
+            viewer.markupSelection(pdf::AnnotationSubtype::Underline, 0);
+            selectRange(charCenter(pl0, pt0->chars[0]), charCenter(pl0, pt0->chars[2]));
+            viewer.markupSelection(pdf::AnnotationSubtype::StrikeOut, 0);
+            selectRange(charCenter(pl0, pt0->chars[0]), charCenter(pl0, pt0->chars[2]));
+            viewer.markupSelection(pdf::AnnotationSubtype::Squiggly, 0);
+            selectRange(charCenter(pl0, pt0->chars[0]), charCenter(pl0, pt0->chars[2]));
+            viewer.markupSelection(pdf::AnnotationSubtype::Text, 0); // "any other subtype" -> default 0x80FFFF00
+
+            const auto cmdsColors = viewer.editLog().activeCommands();
+            bool colorsOk = (cmdsColors.size() == 5);
+            if (colorsOk) {
+                colorsOk = (cmdsColors[1].after.colorArgb == 0xFF00AA00) &&
+                           (cmdsColors[2].after.colorArgb == 0xFFFF0000) &&
+                           (cmdsColors[3].after.colorArgb == 0xFFFF0000) &&
+                           (cmdsColors[4].after.colorArgb == 0x80FFFF00);
+            }
+
+            // 4. Backward selection produces same quad bounds and contents
+            selectRange(charCenter(pl0, pt0->chars[3]), charCenter(pl0, pt0->chars[0])); // backward
+            viewer.editLog().clear();
+            const bool bwdAdded = viewer.markupSelection(pdf::AnnotationSubtype::Highlight, 0);
+            const auto cmdsBwd = viewer.editLog().activeCommands();
+            bwdOk = bwdAdded && (cmdsBwd.size() == 1);
+            if (bwdOk && hlOk) {
+                const auto& itemBwd = cmdsBwd[0].after;
+                const auto& itemFwd = cmdsHl[0].after;
+                bwdOk = (std::abs(itemBwd.left - itemFwd.left) < 1e-3) &&
+                        (std::abs(itemBwd.right - itemFwd.right) < 1e-3) &&
+                        (std::abs(itemBwd.bottom - itemFwd.bottom) < 1e-3) &&
+                        (std::abs(itemBwd.top - itemFwd.top) < 1e-3) &&
+                        (itemBwd.contents == itemFwd.contents);
+            }
+
+            // 5. Multi-page selection produces one annotation per page
+            const auto& pl1 = viewer.layout().getPageLayout(1);
+            selectRange(charCenter(pl0, pt0->chars[1]), charCenter(pl1, pt1->chars[2]));
+            viewer.editLog().clear();
+            const bool mpAdded = viewer.markupSelection(pdf::AnnotationSubtype::Highlight, 0);
+            const auto cmdsMp = viewer.editLog().activeCommands();
+            mpOk = mpAdded && (cmdsMp.size() == 2) &&
+                   (cmdsMp[0].after.pageIndex == 0) &&
+                   (cmdsMp[1].after.pageIndex == 1);
+
+            a8Ok = noSelFalse && hlOk && colorsOk && bwdOk && mpOk;
+        }
+
+        // Restore samplePdf
+        viewer.clearSelection();
+        viewer.editLog().clear();
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(100);
+
+        const std::string dA8 = "textAvail=" + std::to_string(textAvail) +
+                                " noSel=" + std::to_string(noSelFalse) +
+                                " hl=" + std::to_string(hlOk) +
+                                " colors=" + std::to_string(colorsOk) +
+                                " bwd=" + std::to_string(bwdOk) +
+                                " mp=" + std::to_string(mpOk);
+        recordTest(a8Ok, "Group 4.35: markupSelection colors, quads, bounds, multi-page, bwd parity, clearSelection (A8)", dA8);
+        viewer.editLog().clear();
+    }
+
+    // 4.36: Public API guard contracts: closed doc, page -1, page == pageCount for all add functions (A9)
+    {
+        viewer.editLog().clear();
+
+        // 1. When document is open: test page -1 and page == pageCount
+        const int pCount = viewer.pageCount();
+        const std::vector<std::vector<pdf::AnnotationPoint>> validStrokes = {{{10.0, 10.0}, {20.0, 20.0}}};
+        const QRectF validRect(10.0, 10.0, 50.0, 50.0);
+
+        bool openGuardsOk = true;
+        for (int badPage : {-1, pCount, pCount + 1}) {
+            if (viewer.addTextAnnotation(badPage, 50.0, 50.0, QStringLiteral("text")) ||
+                viewer.addSquareAnnotation(badPage, validRect) ||
+                viewer.addCircleAnnotation(badPage, validRect) ||
+                viewer.addInkAnnotation(badPage, validStrokes) ||
+                viewer.addFreeTextAnnotation(badPage, validRect, QStringLiteral("freetext")) ||
+                viewer.addStampAnnotation(badPage, validRect, QStringLiteral("STAMP")) ||
+                viewer.addFileAttachmentAnnotation(badPage, 50.0, 50.0, QStringLiteral("file.txt"), "data") ||
+                viewer.addDefaultAnnotationAt(badPage, pdf::AnnotationSubtype::Text, 50.0, 50.0)) {
+                openGuardsOk = false;
+            }
+        }
+        const bool openLogsClean = viewer.editLog().activeCommands().empty();
+
+        // 2. When document is closed: all add functions and markupSelection must return false
+        viewer.closeDocument();
+        pump(50);
+
+        bool closedGuardsOk = true;
+        if (viewer.addTextAnnotation(0, 50.0, 50.0, QStringLiteral("text")) ||
+            viewer.addSquareAnnotation(0, validRect) ||
+            viewer.addCircleAnnotation(0, validRect) ||
+            viewer.addInkAnnotation(0, validStrokes) ||
+            viewer.addFreeTextAnnotation(0, validRect, QStringLiteral("freetext")) ||
+            viewer.addStampAnnotation(0, validRect, QStringLiteral("STAMP")) ||
+            viewer.addFileAttachmentAnnotation(0, 50.0, 50.0, QStringLiteral("file.txt"), "data") ||
+            viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Text, 50.0, 50.0) ||
+            viewer.markupSelection(pdf::AnnotationSubtype::Highlight)) {
+            closedGuardsOk = false;
+        }
+        const bool closedLogsClean = viewer.editLog().activeCommands().empty();
+
+        // Restore samplePdf for Group 5
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(100);
+
+        const bool a9Ok = openGuardsOk && openLogsClean && closedGuardsOk && closedLogsClean;
+        recordTest(a9Ok, "Group 4.36: Public API guards reject closed doc, page -1, page >= pageCount for all adders (A9)");
+        viewer.editLog().clear();
+    }
 }
 
 // ======================================================================

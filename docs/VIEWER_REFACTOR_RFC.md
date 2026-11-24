@@ -163,6 +163,25 @@ Every implementation pass must avoid broad formatting, renaming, or unrelated cl
 
 **One behavior to pin, not fix:** `setRedactionMode(false)` does not cancel an in-progress drag, and the release handler checks `m_isRedacting`, not the mode. A drag that outlives the mode toggle still stages a mark on release. Characterize this as-is. Do not change it during the refactor.
 
+**Pass 4b revised amendment**
+
+Every `add*Annotation` function has the same five parts:
+1. The guard (`m_hasDocument`, `m_saveInProgress`, `m_editInProgress`, `m_loading`, `m_recovering`).
+2. The `QScopedValueRollback` on `m_editInProgress`.
+3. **Build an `AnnotationItem`.**
+4. Call `m_renderWorker.addAnnotationSync`, then `m_editLog.recordAddAnnotation`, then `refreshAfterEdit()`.
+5. Emit `loadError` on failure.
+
+Parts 1, 2, 4 and 5 are the edit owner's job: the shared edit guard, the edit log, the cache and generation refresh, and crash-recovery replay. Those move in Pass 5 (`ViewerEditController`). If extracted earlier, a temporary host-callback interface would be needed and Pass 5 would immediately rewrite it. Part 3, building the item, is pure and about 40% of the code. The ink state and gestures are a second separable piece, shaped like redaction.
+
+| Step | Work | Notes |
+|---|---|---|
+| 4b-1 | `ViewerAnnotationBuilder` (stateless): item construction for text, square, circle, ink, free text, stamp, file attachment and markup. It also takes `fitTextBoxOutline`, the default-size table, and the static `placeOnPage` and `annotationTooltipHtml` bodies. | The facade keeps the guard, the worker call, the log, the refresh, the `loadError` emits and the public API. The builder returns the item or an error code. |
+| 4b-2 | `ViewerInkController`: ink mode, the in-flight stroke, point-accumulation rules, ink colour and width, and the stroke overlay. | Same shape as 4a. The facade keeps the ink/redaction mutual exclusion, the emits and the `addInkAnnotation` call. |
+| 4b-3 (deferred) | Command execution (guard, worker, log, refresh) plus delete, modify, hit-test and tooltip orchestration. | Folds into Pass 5 with `ViewerEditController`. The RFC table's `ViewerAnnotationController` is not built as one unit. |
+
+Expected savings are roughly 400–500 lines from the facade. The 1,600-line target stays far off until Passes 5 and 6.
+
 **Acceptance:** the frozen `test_widget.cpp` hash is unchanged, all four CI legs are green, there is no public API diff, and the line counts are reported.
 
 ## 6. Compatibility and safety constraints
