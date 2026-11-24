@@ -4487,6 +4487,319 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         recordTest(a9Ok, "Group 4.36: Public API guards reject closed doc, page -1, page >= pageCount for all adders (A9)");
         viewer.editLog().clear();
     }
+
+    // 4.37: loadError emission counts: silent (0) vs exactly one (1) with message prefix (E1)
+    {
+        viewer.editLog().clear();
+        SignalRecorder<QString> spyErr(&viewer, &ui::PdfViewerWidget::loadError);
+        const QRectF validRect(10.0, 10.0, 50.0, 50.0);
+        const std::vector<std::vector<pdf::AnnotationPoint>> validStrokes = {{{10.0, 10.0}, {20.0, 20.0}}};
+        const QRectF emptyRect(10.0, 10.0, 0.0, 0.0);
+        const int pCount = viewer.pageCount();
+
+        bool silentOk = true;
+
+        // 1. Silent rejections when document is closed (0 loadError emissions)
+        viewer.closeDocument();
+        pump(50);
+        spyErr.clear();
+
+        if (viewer.addTextAnnotation(0, 50.0, 50.0, QStringLiteral("txt")) || spyErr.count() != 0 ||
+            viewer.addSquareAnnotation(0, validRect) || spyErr.count() != 0 ||
+            viewer.addCircleAnnotation(0, validRect) || spyErr.count() != 0 ||
+            viewer.addInkAnnotation(0, validStrokes) || spyErr.count() != 0 ||
+            viewer.addFreeTextAnnotation(0, validRect, QStringLiteral("txt")) || spyErr.count() != 0 ||
+            viewer.addStampAnnotation(0, validRect, QStringLiteral("STAMP")) || spyErr.count() != 0 ||
+            viewer.addFileAttachmentAnnotation(0, 50.0, 50.0, QStringLiteral("f.bin"), "data") || spyErr.count() != 0 ||
+            viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Text, 50.0, 50.0) || spyErr.count() != 0 ||
+            viewer.markupSelection(pdf::AnnotationSubtype::Highlight) || spyErr.count() != 0) {
+            silentOk = false;
+        }
+
+        // Reopen samplePdf
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
+        spyErr.clear();
+
+        // 2. Silent rejections for out-of-range page (-1, == pageCount, > pageCount) -> catches G1
+        for (int badPage : {-1, pCount, pCount + 2}) {
+            spyErr.clear();
+            if (viewer.addTextAnnotation(badPage, 50.0, 50.0, QStringLiteral("txt")) || spyErr.count() != 0 ||
+                viewer.addSquareAnnotation(badPage, validRect) || spyErr.count() != 0 ||
+                viewer.addCircleAnnotation(badPage, validRect) || spyErr.count() != 0 ||
+                viewer.addInkAnnotation(badPage, validStrokes) || spyErr.count() != 0 ||
+                viewer.addFreeTextAnnotation(badPage, validRect, QStringLiteral("txt")) || spyErr.count() != 0 ||
+                viewer.addStampAnnotation(badPage, validRect, QStringLiteral("STAMP")) || spyErr.count() != 0 ||
+                viewer.addFileAttachmentAnnotation(badPage, 50.0, 50.0, QStringLiteral("f.bin"), "data") || spyErr.count() != 0 ||
+                viewer.addDefaultAnnotationAt(badPage, pdf::AnnotationSubtype::Text, 50.0, 50.0) || spyErr.count() != 0) {
+                silentOk = false;
+            }
+        }
+
+        // 3. Silent rejections for empty / zero-area rect -> catches G2
+        spyErr.clear();
+        if (viewer.addSquareAnnotation(0, emptyRect) || spyErr.count() != 0 ||
+            viewer.addCircleAnnotation(0, emptyRect) || spyErr.count() != 0 ||
+            viewer.addFreeTextAnnotation(0, emptyRect, QStringLiteral("txt")) || spyErr.count() != 0 ||
+            viewer.addStampAnnotation(0, emptyRect, QStringLiteral("STAMP")) || spyErr.count() != 0) {
+            silentOk = false;
+        }
+
+        // 4. Silent rejections for empty strokes
+        spyErr.clear();
+        if (viewer.addInkAnnotation(0, {}) || spyErr.count() != 0) {
+            silentOk = false;
+        }
+
+        // 5. Silent rejections for whitespace-only free-text -> catches T1
+        spyErr.clear();
+        if (viewer.addFreeTextAnnotation(0, validRect, QStringLiteral("   ")) || spyErr.count() != 0 ||
+            viewer.addFreeTextAnnotation(0, validRect, QStringLiteral("\t\n  \n")) || spyErr.count() != 0) {
+            silentOk = false;
+        }
+
+        // 6. Silent rejections for whitespace-only stamp text
+        spyErr.clear();
+        if (viewer.addStampAnnotation(0, validRect, QStringLiteral("   ")) || spyErr.count() != 0 ||
+            viewer.addStampAnnotation(0, validRect, QStringLiteral("\t\n  ")) || spyErr.count() != 0) {
+            silentOk = false;
+        }
+
+        // 7. Silent rejections for addDefaultAnnotationAt rejections
+        spyErr.clear();
+        if (viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Highlight, 50.0, 50.0) || spyErr.count() != 0 ||
+            viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::FileAttachment, 50.0, 50.0) || spyErr.count() != 0 ||
+            viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Ink, 50.0, 50.0) || spyErr.count() != 0 ||
+            viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::FreeText, 50.0, 50.0, QStringLiteral("")) || spyErr.count() != 0) {
+            silentOk = false;
+        }
+
+        // 8. Exactly one emission for invalid attachment filename
+        spyErr.clear();
+        const bool badFileRet = !viewer.addFileAttachmentAnnotation(0, 50.0, 50.0, QStringLiteral("bad/file.txt"), "data");
+        const bool badFileOk = badFileRet && (spyErr.count() == 1) &&
+                               std::get<0>(spyErr.at(0)).startsWith(viewer.tr("Could not attach file: invalid attachment filename."));
+
+        // 9. Exactly one emission for empty attachment payload -> catches A2
+        spyErr.clear();
+        const bool emptyPayloadRet = !viewer.addFileAttachmentAnnotation(0, 50.0, 50.0, QStringLiteral("valid.txt"), QByteArray());
+        const bool emptyPayloadOk = emptyPayloadRet && (spyErr.count() == 1) &&
+                                    std::get<0>(spyErr.at(0)).startsWith(viewer.tr("Could not attach file: attachment payload must be between 1 byte and 16 MiB."));
+
+        // 10. Exactly one emission for oversized attachment payload (> 16 MiB)
+        spyErr.clear();
+        QByteArray overPayload(1, 'x');
+        overPayload.resize(pdf::kMaxAnnotationAttachmentBytes + 1);
+        const bool overPayloadRet = !viewer.addFileAttachmentAnnotation(0, 50.0, 50.0, QStringLiteral("valid.txt"), overPayload);
+        const bool overPayloadOk = overPayloadRet && (spyErr.count() == 1) &&
+                                   std::get<0>(spyErr.at(0)).startsWith(viewer.tr("Could not attach file: attachment payload must be between 1 byte and 16 MiB."));
+
+        // 11. Exactly one emission for stamp text exceeding kMaxStampTextCharacters (128)
+        spyErr.clear();
+        const QString overStampText(pdf::kMaxStampTextCharacters + 1, 'X');
+        const bool overStampRet = !viewer.addStampAnnotation(0, validRect, overStampText);
+        const bool overStampOk = overStampRet && (spyErr.count() == 1) &&
+                                 std::get<0>(spyErr.at(0)).startsWith(viewer.tr("Could not add stamp: stamp text exceeds"));
+
+        // 12. Exactly one emission for undrawable free-text
+        spyErr.clear();
+        constexpr char32_t kUndrawableCp = 0x10FFFD;
+        const QString undrawableText = QString::fromUcs4(&kUndrawableCp, 1);
+        const bool undrawableRet = !viewer.addFreeTextAnnotation(0, validRect, undrawableText);
+        const bool undrawableOk = undrawableRet && (spyErr.count() == 1) &&
+                                  std::get<0>(spyErr.at(0)).startsWith(viewer.tr("Could not add text box: no installed font can draw"));
+
+        const bool e1Ok = silentOk && badFileOk && emptyPayloadOk && overPayloadOk && overStampOk && undrawableOk;
+        recordTest(e1Ok, "Group 4.37: loadError emission counts: silent (0) vs exactly one (1) with message prefix (E1)");
+        viewer.editLog().clear();
+    }
+
+    // 4.38: Attachment payload boundary pinning: kMax accepted and logged, kMax + 1 rejected (E2)
+    {
+        viewer.editLog().clear();
+        SignalRecorder<QString> spyErr(&viewer, &ui::PdfViewerWidget::loadError);
+
+        // 1. Exactly kMaxAnnotationAttachmentBytes (16 MiB) accepted and logged
+        QByteArray exactPayload(1, 'A');
+        exactPayload.resize(pdf::kMaxAnnotationAttachmentBytes);
+        spyErr.clear();
+        const bool exactOk = viewer.addFileAttachmentAnnotation(0, 100.0, 200.0, QStringLiteral("exact.bin"), exactPayload);
+        const size_t exactErrCount = spyErr.count();
+        const auto cmds = viewer.editLog().activeCommands();
+        const bool loggedOk = (cmds.size() == 1) &&
+                              (cmds.back().after.binaryPayload.size() == pdf::kMaxAnnotationAttachmentBytes) &&
+                              (cmds.back().after.attachmentFileName == QStringLiteral("exact.bin"));
+
+        // 2. Exactly kMaxAnnotationAttachmentBytes + 1 rejected with exactly one loadError
+        QByteArray overPayload(1, 'B');
+        overPayload.resize(pdf::kMaxAnnotationAttachmentBytes + 1);
+        spyErr.clear();
+        const bool overOk = !viewer.addFileAttachmentAnnotation(0, 100.0, 200.0, QStringLiteral("over.bin"), overPayload);
+        const bool overErrOk = (spyErr.count() == 1) &&
+                               std::get<0>(spyErr.at(0)).startsWith(viewer.tr("Could not attach file: attachment payload must be between 1 byte and 16 MiB."));
+        const bool logUnchanged = (viewer.editLog().activeCommands().size() == 1);
+
+        const bool e2Ok = exactOk && (exactErrCount == 0) && loggedOk && overOk && overErrOk && logUnchanged;
+        recordTest(e2Ok, "Group 4.38: Attachment payload boundary pinning: kMax accepted and logged, kMax + 1 rejected (E2)");
+        viewer.editLog().clear();
+    }
+
+    // 4.39: Markup quad exactness: all 8 coordinates match character user-space box (E3)
+    {
+        viewer.clearSelection();
+        viewer.editLog().clear();
+        viewer.openDocument(twoPageTextPdf);
+        viewer.setZoom(0.2); // Both pages rendered
+        viewer.waitForRendering();
+        pump(100);
+
+        auto pt0 = viewer.getPageText(0);
+        bool e3Ok = false;
+        if (pt0 && pt0->charCount() > 0 && pt0->chars[0].hasUserSpaceBox) {
+            const auto& pl0 = viewer.layout().getPageLayout(0);
+            const auto& b = pt0->chars[0];
+            const double effScale = viewer.currentZoom();
+            const double dpr = viewer.devicePixelRatio();
+
+            auto charCenter = [&](const layout::PageLayout& pl, const auto& cb) {
+                double x = (static_cast<double>(pl.leftPixel) + ((cb.left + cb.right) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollX())) / dpr;
+                double y = (static_cast<double>(pl.topPixel) + ((cb.top + cb.bottom) * 0.5) * effScale - static_cast<double>(viewer.currentDocScrollY())) / dpr;
+                return QPointF(x, y);
+            };
+
+            auto selectRange = [&](const QPointF& from, const QPointF& to) {
+                QMouseEvent p(QEvent::MouseButtonPress, from, from, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &p);
+                pump(20);
+                QMouseEvent m(QEvent::MouseMove, to, to, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &m);
+                pump(20);
+                QMouseEvent r(QEvent::MouseButtonRelease, to, to, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(viewer.viewport(), &r);
+                pump(50);
+            };
+
+            // Select first few characters so first quad is chars[0]
+            selectRange(charCenter(pl0, pt0->chars[0]), charCenter(pl0, pt0->chars[2]));
+
+            const bool hlAdded = viewer.markupSelection(pdf::AnnotationSubtype::Highlight, 0);
+            const auto cmds = viewer.editLog().activeCommands();
+            if (hlAdded && (cmds.size() == 1) && !cmds[0].after.quadPoints.empty()) {
+                const auto& q = cmds[0].after.quadPoints[0];
+                const bool x1Ok = (std::abs(q.x1 - b.userSpaceLeft) < 1e-4);
+                const bool y1Ok = (std::abs(q.y1 - b.userSpaceTop) < 1e-4);
+                const bool x2Ok = (std::abs(q.x2 - b.userSpaceRight) < 1e-4);
+                const bool y2Ok = (std::abs(q.y2 - b.userSpaceTop) < 1e-4);
+                const bool x3Ok = (std::abs(q.x3 - b.userSpaceLeft) < 1e-4);
+                const bool y3Ok = (std::abs(q.y3 - b.userSpaceBottom) < 1e-4);
+                const bool x4Ok = (std::abs(q.x4 - b.userSpaceRight) < 1e-4);
+                const bool y4Ok = (std::abs(q.y4 - b.userSpaceBottom) < 1e-4);
+                e3Ok = x1Ok && y1Ok && x2Ok && y2Ok && x3Ok && y3Ok && x4Ok && y4Ok;
+            }
+        }
+
+        // Restore samplePdf
+        viewer.clearSelection();
+        viewer.editLog().clear();
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(100);
+
+        recordTest(e3Ok, "Group 4.39: Markup quad exactness: all 8 coordinates match character user-space box (E3)");
+        viewer.editLog().clear();
+    }
+
+    // 4.40: addDefaultAnnotationAt placement and anchor corner for all 5 subtypes (E4)
+    {
+        viewer.editLog().clear();
+        const auto& pl = viewer.layout().getPageLayout(0);
+        const QSizeF pageSize(pl.widthPoints, pl.heightPoints);
+
+        // Anchor near top-left edge so clamp kicks in
+        const QPointF anchor(2.0, 2.0);
+
+        // 1. Text: 24x24 icon placed on page, anchored from bottom of rect
+        const QSizeF textSize(24.0, 24.0);
+        const QRectF expectedTextRect = viewer.placeOnPage(anchor, textSize, pageSize);
+        viewer.editLog().clear();
+        const bool addTextOk = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Text, anchor.x(), anchor.y(), QStringLiteral("NoteContents"));
+        const auto cmdsText = viewer.editLog().activeCommands();
+        bool textPlacedOk = addTextOk && (cmdsText.size() == 1);
+        if (textPlacedOk) {
+            const auto& note = cmdsText[0].after;
+            // addDefaultAnnotationAt passes rect.left(), rect.bottom()
+            // note.left = rect.left(), note.right = rect.right(), note.bottom = rect.top(), note.top = rect.bottom()
+            textPlacedOk = (std::abs(note.left - expectedTextRect.left()) < 1e-4) &&
+                           (std::abs(note.right - expectedTextRect.right()) < 1e-4) &&
+                           (std::abs(note.bottom - expectedTextRect.top()) < 1e-4) &&
+                           (std::abs(note.top - expectedTextRect.bottom()) < 1e-4);
+        }
+
+        // 2. Square: 100x60 placed on page
+        const QSizeF sqSize(100.0, 60.0);
+        const QRectF expectedSqRect = viewer.placeOnPage(anchor, sqSize, pageSize);
+        viewer.editLog().clear();
+        const bool addSqOk = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Square, anchor.x(), anchor.y());
+        const auto cmdsSq = viewer.editLog().activeCommands();
+        bool sqPlacedOk = addSqOk && (cmdsSq.size() == 1);
+        if (sqPlacedOk) {
+            const auto& sq = cmdsSq[0].after;
+            sqPlacedOk = (std::abs(sq.left - expectedSqRect.left()) < 1e-4) &&
+                         (std::abs(sq.right - expectedSqRect.right()) < 1e-4) &&
+                         (std::abs(sq.bottom - expectedSqRect.top()) < 1e-4) &&
+                         (std::abs(sq.top - expectedSqRect.bottom()) < 1e-4);
+        }
+
+        // 3. Circle: 100x60 placed on page
+        const QSizeF circleSize(100.0, 60.0);
+        const QRectF expectedCircleRect = viewer.placeOnPage(anchor, circleSize, pageSize);
+        viewer.editLog().clear();
+        const bool addCircleOk = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Circle, anchor.x(), anchor.y());
+        const auto cmdsCircle = viewer.editLog().activeCommands();
+        bool circlePlacedOk = addCircleOk && (cmdsCircle.size() == 1);
+        if (circlePlacedOk) {
+            const auto& circ = cmdsCircle[0].after;
+            circlePlacedOk = (std::abs(circ.left - expectedCircleRect.left()) < 1e-4) &&
+                             (std::abs(circ.right - expectedCircleRect.right()) < 1e-4) &&
+                             (std::abs(circ.bottom - expectedCircleRect.top()) < 1e-4) &&
+                             (std::abs(circ.top - expectedCircleRect.bottom()) < 1e-4);
+        }
+
+        // 4. Stamp: 120x40 placed on page
+        const QSizeF stampSize(120.0, 40.0);
+        const QRectF expectedStampRect = viewer.placeOnPage(anchor, stampSize, pageSize);
+        viewer.editLog().clear();
+        const bool addStampOk = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::Stamp, anchor.x(), anchor.y(), QStringLiteral("DRAFT"));
+        const auto cmdsStamp = viewer.editLog().activeCommands();
+        bool stampPlacedOk = addStampOk && (cmdsStamp.size() == 1);
+        if (stampPlacedOk) {
+            const auto& st = cmdsStamp[0].after;
+            stampPlacedOk = (std::abs(st.left - expectedStampRect.left()) < 1e-4) &&
+                            (std::abs(st.right - expectedStampRect.right()) < 1e-4) &&
+                            (std::abs(st.bottom - expectedStampRect.top()) < 1e-4) &&
+                            (std::abs(st.top - expectedStampRect.bottom()) < 1e-4);
+        }
+
+        // 5. FreeText: placed on page
+        const QString ftText = QStringLiteral("Sample FreeText");
+        viewer.editLog().clear();
+        const bool addFtOk = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::FreeText, anchor.x(), anchor.y(), ftText);
+        const auto cmdsFt = viewer.editLog().activeCommands();
+        bool ftPlacedOk = addFtOk && (cmdsFt.size() == 1);
+        if (ftPlacedOk) {
+            const auto& ft = cmdsFt[0].after;
+            const QSizeF ftSize(ft.right - ft.left, ft.top - ft.bottom);
+            const QRectF expectedFtRect = viewer.placeOnPage(anchor, ftSize, pageSize);
+            ftPlacedOk = (std::abs(ft.left - expectedFtRect.left()) < 1e-4) &&
+                         (std::abs(ft.right - expectedFtRect.right()) < 1e-4) &&
+                         (std::abs(ft.top - expectedFtRect.bottom()) < 1e-4);
+        }
+
+        const bool e4Ok = textPlacedOk && sqPlacedOk && circlePlacedOk && stampPlacedOk && ftPlacedOk;
+        recordTest(e4Ok, "Group 4.40: addDefaultAnnotationAt placement and anchor corner for all 5 subtypes (E4)");
+        viewer.editLog().clear();
+    }
 }
 
 // ======================================================================
