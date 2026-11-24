@@ -22,6 +22,7 @@
 #include "ipc/IpcMessages.h"
 #include "engine/EditLog.h"
 #include "engine/FormFieldTypes.h"
+#include "ui/FreeTextLayout.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -4798,6 +4799,89 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
 
         const bool e4Ok = textPlacedOk && sqPlacedOk && circlePlacedOk && stampPlacedOk && ftPlacedOk;
         recordTest(e4Ok, "Group 4.40: addDefaultAnnotationAt placement and anchor corner for all 5 subtypes (E4)");
+        viewer.editLog().clear();
+    }
+
+    // 4.41: fitTextBoxOutline boundary condition at 144 pt, 12 pt fallback, and free-text default slack
+    {
+        viewer.editLog().clear();
+
+        // 1. Boundary condition: Exactly 144 pt font size.
+        // In QRectF(50, 60, 100, 30), top anchor is 90.0 (60 + 30).
+        // Text "Big FreeText" at 144 pt has line height > 144 pt, so the box must expand downward:
+        // bottom must be < 60 - 100 (-40.0).
+        // Regression bug had item.fontSize < 144.0, which fell back to 12 pt layout (bottom == 60.0).
+        const bool add144Ok = viewer.addFreeTextAnnotation(0, QRectF(50.0, 60.0, 100.0, 30.0), QStringLiteral("Big FreeText"), 0xFF00FF00, 144.0);
+        const auto cmds144 = viewer.editLog().activeCommands();
+        bool bound144Ok = add144Ok && (cmds144.size() == 1);
+        if (bound144Ok) {
+            const auto& item144 = cmds144[0].after;
+            const bool fsStored = (item144.fontSize == 144.0);
+            const bool bottomGrown = (item144.bottom < -40.0); // bottom < 60 - 100
+            bound144Ok = fsStored && bottomGrown;
+        }
+
+        // 2. 12 pt fallback at fit level: deleting a non-log free-text item with fontSize == 0
+        // must fit using the 12 pt fallback, matching an item added explicitly at 12 pt.
+        bool fallback12Ok = false;
+        viewer.editLog().clear();
+        const QString fbText = QStringLiteral("Fallback Test String");
+        const QRectF fbBox(100.0, 200.0, 150.0, 10.0);
+        // Add reference item explicitly at 12.0 pt
+        const bool addRef = viewer.addFreeTextAnnotation(0, fbBox, fbText, 0xFF112233, 12.0);
+        const auto cmdsRef = viewer.editLog().activeCommands();
+        if (addRef && (cmdsRef.size() == 1)) {
+            const pdf::AnnotationItem refItem = cmdsRef[0].after;
+            viewer.editLog().clear();
+
+            // Prepare item to delete with empty outline and fontSize == 0.0 (non-log delete)
+            pdf::AnnotationItem unloggedItem = refItem;
+            unloggedItem.textOutline.clear();
+            unloggedItem.fontSize = 0.0;
+            unloggedItem.bottom = fbBox.top(); // Reset to unexpanded box bottom (200.0)
+
+            const bool delOk = viewer.deleteAnnotation(0, unloggedItem);
+            const auto cmdsDel = viewer.editLog().activeCommands();
+            if (delOk && (cmdsDel.size() == 1)) {
+                // The recorded item in the Delete command was fitted with fitTextBoxOutline
+                const auto& rec = cmdsDel[0].before;
+                const bool outlineMatches = (rec.textOutline.size() == refItem.textOutline.size()) && !rec.textOutline.empty() &&
+                                            (std::abs(rec.textOutline[0].y - refItem.textOutline[0].y) < 1e-4);
+                const bool bottomMatches = (std::abs(rec.bottom - refItem.bottom) < 1e-4);
+                const bool topMatches = (std::abs(rec.top - refItem.top) < 1e-4);
+
+                const bool undoOk = viewer.undoEdit();
+                fallback12Ok = outlineMatches && bottomMatches && topMatches && undoOk;
+            }
+        }
+
+        // 3. Default annotation size slack (+ 1.0 pt)
+        const QString slackText = QStringLiteral("Slack measurement test");
+        const auto& pl = viewer.layout().getPageLayout(0);
+        const QSizeF pageSize(pl.widthPoints, pl.heightPoints);
+        const double maxInner = std::max(20.0, std::min(300.0, pageSize.width() - 8.0 - 2.0 * ui::kFreeTextPadding));
+        const auto measured = ui::layoutFreeText(slackText, 12.0, maxInner, false);
+        const double expectedW = std::ceil(measured.size.width()) + 1.0 + 2.0 * ui::kFreeTextPadding;
+        const double expectedH = std::ceil(measured.size.height()) + 1.0 + 2.0 * ui::kFreeTextPadding;
+
+        viewer.editLog().clear();
+        const bool addSlackOk = viewer.addDefaultAnnotationAt(0, pdf::AnnotationSubtype::FreeText, 100.0, 300.0, slackText);
+        const auto cmdsSlack = viewer.editLog().activeCommands();
+        bool slackOk = addSlackOk && (cmdsSlack.size() == 1);
+        if (slackOk) {
+            const auto& ftItem = cmdsSlack[0].after;
+            const double actualW = ftItem.right - ftItem.left;
+            const double actualH = ftItem.top - ftItem.bottom;
+            slackOk = (std::abs(actualW - expectedW) < 1e-4) && (std::abs(actualH - expectedH) < 1e-4);
+        }
+
+        const bool g41Ok = bound144Ok && fallback12Ok && slackOk;
+        std::string failDetail;
+        if (!bound144Ok) failDetail += "bound144=0 ";
+        if (!fallback12Ok) failDetail += "fallback12=0 ";
+        if (!slackOk) failDetail += "slack=0 ";
+
+        recordTest(g41Ok, "Group 4.41: fitTextBoxOutline boundary at 144 pt, 12 pt fallback, and free-text default slack", failDetail);
         viewer.editLog().clear();
     }
 }
