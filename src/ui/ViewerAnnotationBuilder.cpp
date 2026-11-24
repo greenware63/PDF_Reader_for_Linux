@@ -123,7 +123,7 @@ ViewerAnnotationBuilder::BuiltAnnotation ViewerAnnotationBuilder::buildInk(
 
 ViewerAnnotationBuilder::TextBoxFit ViewerAnnotationBuilder::fitTextBoxOutline(
     pdf::AnnotationItem& item, QString* undrawable) {
-    const double fontSize = (item.fontSize > 0.0 && item.fontSize < 144.0) ? item.fontSize : 12.0;
+    const double fontSize = (item.fontSize > 0.0 && item.fontSize <= 144.0) ? item.fontSize : 12.0;
     const double left = std::min(item.left, item.right);
     const double right = std::max(item.left, item.right);
     const double lower = std::min(item.bottom, item.top);
