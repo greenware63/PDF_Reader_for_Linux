@@ -22,6 +22,7 @@
 #include "ViewerSelectionController.h"
 #include "ViewerSearchController.h"
 #include "ViewerRedactionController.h"
+#include "ViewerInkController.h"
 #include "cache/TileCache.h"
 #include "ipc/WorkerClient.h"
 #include "engine/PageText.h"
@@ -275,13 +276,13 @@ public:
     /// if the text of any selected page could not be obtained: redaction is never silently partial.
     bool markSelectionForRedaction();
     // Ink drawing APIs
-    bool isInkDrawingMode() const noexcept { return m_inkDrawingMode; }
+    bool isInkDrawingMode() const noexcept { return m_inkController.isMode(); }
     void setInkDrawingMode(bool enabled);
-    void toggleInkDrawingMode() { setInkDrawingMode(!m_inkDrawingMode); }
-    void setInkColor(uint32_t colorArgb) noexcept { m_inkColorArgb = colorArgb; }
-    uint32_t inkColor() const noexcept { return m_inkColorArgb; }
-    void setInkBorderWidth(double width) noexcept { m_inkBorderWidth = width; }
-    double inkBorderWidth() const noexcept { return m_inkBorderWidth; }
+    void toggleInkDrawingMode() { setInkDrawingMode(!m_inkController.isMode()); }
+    void setInkColor(uint32_t colorArgb) noexcept { m_inkController.setColor(colorArgb); }
+    uint32_t inkColor() const noexcept { return m_inkController.color(); }
+    void setInkBorderWidth(double width) noexcept { m_inkController.setBorderWidth(width); }
+    double inkBorderWidth() const noexcept { return m_inkController.borderWidth(); }
 
 
 Q_SIGNALS:
@@ -402,14 +403,7 @@ private:
     ColorMode m_colorMode{ColorMode::Normal};
     bool m_darkMode{false};
     mutable std::unordered_map<pdf::TileKey, QPixmap, pdf::TileKeyHash> m_transformedPixmapCache;
-    // Ink drawing state
-    bool m_inkDrawingMode{false};
-    uint32_t m_inkColorArgb{0xFF000000};
-    double m_inkBorderWidth{2.0};
-    bool m_isDrawingInk{false};
-    int m_inkCurrentPage{-1};
-    std::vector<pdf::AnnotationPoint> m_currentInkStroke;
-    void drawActiveInkStroke(QPainter& painter, int64_t scrollDocX, int64_t scrollDocY);
+    ViewerInkController m_inkController;
 
     pdf::EditLog m_editLog;
     bool m_saveInProgress{false};

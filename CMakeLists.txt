@@ -265,6 +265,7 @@ add_executable(pdf-reader
     src/ui/ViewerSearchController.cpp
     src/ui/ViewerRedactionController.h
     src/ui/ViewerRedactionController.cpp
+    src/ui/ViewerInkController.cpp
     src/ui/ViewerAnnotationBuilder.h
     src/ui/ViewerAnnotationBuilder.cpp
     src/ui/PdfViewerWidget.cpp
@@ -342,6 +343,7 @@ add_executable(test_widget
     src/ui/ViewerSearchController.cpp
     src/ui/ViewerRedactionController.h
     src/ui/ViewerRedactionController.cpp
+    src/ui/ViewerInkController.cpp
     src/ui/ViewerAnnotationBuilder.h
     src/ui/ViewerAnnotationBuilder.cpp
     src/ui/PdfViewerWidget.cpp
@@ -387,6 +389,7 @@ add_executable(test_redaction_rotation
     src/ui/ViewerSearchController.cpp
     src/ui/ViewerRedactionController.h
     src/ui/ViewerRedactionController.cpp
+    src/ui/ViewerInkController.cpp
     src/ui/ViewerAnnotationBuilder.h
     src/ui/ViewerAnnotationBuilder.cpp
     src/ui/PdfViewerWidget.cpp
@@ -438,6 +441,7 @@ add_executable(test_viewer_characterization
     src/ui/ViewerSearchController.cpp
     src/ui/ViewerRedactionController.h
     src/ui/ViewerRedactionController.cpp
+    src/ui/ViewerInkController.cpp
     src/ui/ViewerAnnotationBuilder.h
     src/ui/ViewerAnnotationBuilder.cpp
     src/ui/PdfViewerWidget.cpp
@@ -481,6 +485,7 @@ add_executable(test_password_prompt
     src/ui/ViewerSearchController.cpp
     src/ui/ViewerRedactionController.h
     src/ui/ViewerRedactionController.cpp
+    src/ui/ViewerInkController.cpp
     src/ui/ViewerAnnotationBuilder.h
     src/ui/ViewerAnnotationBuilder.cpp
     src/ui/PdfViewerWidget.cpp
