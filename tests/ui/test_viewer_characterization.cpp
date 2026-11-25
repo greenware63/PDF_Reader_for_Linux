@@ -14,6 +14,7 @@
 #include "ui/ViewerTileController.h"
 #include "ui/ViewerSelectionController.h"
 #include "ui/ViewerSearchController.h"
+#include "ui/ViewerInkController.h"
 #include "ui/MainWindow.h"
 #include "ui/ColorMode.h"
 #include "layout/DocumentLayout.h"
@@ -5690,6 +5691,382 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
             + " stray=" + std::to_string(strayIgnored);
 
         recordTest(g51Ok, "Group 4.51: Non-left mouse buttons and stray moves do not initiate ink strokes", d51);
+    }
+
+    // 4.52: Rotation (controller level) on two distinct page sizes (612x792 and 300x500)
+    {
+        layout::DocumentLayout rotLayout;
+        const std::vector<std::pair<double, double>> pageSizes = {{612.0, 792.0}, {300.0, 500.0}};
+
+        const int rotations[] = {0, 90, 180, 270};
+        bool rotOk = true;
+        std::string rotDetail;
+
+        for (int rot : rotations) {
+            rotLayout.setRotation(rot);
+            rotLayout.setPageSizes(pageSizes);
+            rotLayout.updateLayout(1.0, 1.0, 800);
+
+            for (int pg = 0; pg < 2; ++pg) {
+                const auto& pl = rotLayout.getPageLayout(pg);
+                const double W = pageSizes[pg].first;
+                const double H = pageSizes[pg].second;
+
+                const double dx0 = 100.0, dy0 = 200.0;
+                const double dx1 = 120.0, dy1 = 210.0;
+
+                ui::ViewerInkController ctrl;
+                ctrl.setMode(true);
+                const bool began = ctrl.beginStroke(rotLayout, pl.leftPixel + static_cast<int64_t>(dx0),
+                                                    pl.topPixel + static_cast<int64_t>(dy0));
+                const bool ext = ctrl.extendStroke(rotLayout, pl.leftPixel + static_cast<int64_t>(dx1),
+                                                   pl.topPixel + static_cast<int64_t>(dy1));
+                int outPage = -1;
+                std::vector<pdf::AnnotationPoint> outPts;
+                const bool fin = ctrl.finishStroke(outPage, outPts);
+
+                auto expectedPt = [&](double dx, double dy) -> std::pair<double, double> {
+                    switch (rot) {
+                        case 90:  return {dy, dx};
+                        case 180: return {W - dx, dy};
+                        case 270: return {W - dy, H - dx};
+                        default:  return {dx, H - dy};
+                    }
+                };
+                const auto [ex0, ey0] = expectedPt(dx0, dy0);
+                const auto [ex1, ey1] = expectedPt(dx1, dy1);
+
+                const bool caseOk = began && ext && fin && (outPage == pg) && (outPts.size() == 2) &&
+                                    (std::abs(outPts[0].x - ex0) < 1e-6) &&
+                                    (std::abs(outPts[0].y - ey0) < 1e-6) &&
+                                    (std::abs(outPts[1].x - ex1) < 1e-6) &&
+                                    (std::abs(outPts[1].y - ey1) < 1e-6);
+                if (!caseOk) {
+                    rotOk = false;
+                    rotDetail += " rot=" + std::to_string(rot) + ",pg=" + std::to_string(pg);
+                    if (outPts.size() >= 2) {
+                        rotDetail += ",got0=(" + std::to_string(outPts[0].x) + "," + std::to_string(outPts[0].y) + ")"
+                                     + ",exp0=(" + std::to_string(ex0) + "," + std::to_string(ey0) + ")"
+                                     + ",got1=(" + std::to_string(outPts[1].x) + "," + std::to_string(outPts[1].y) + ")"
+                                     + ",exp1=(" + std::to_string(ex1) + "," + std::to_string(ey1) + ")";
+                    }
+                }
+            }
+        }
+
+        recordTest(rotOk, "Group 4.52: ViewerInkController rotation mapping across distinct page sizes", rotDetail);
+    }
+
+    // 4.53: Controller state machine (ViewerInkController direct unit characterization)
+    {
+        layout::DocumentLayout smLayout;
+        smLayout.setPageSizes({{612.0, 792.0}});
+        smLayout.updateLayout(1.0, 1.0, 800);
+        const auto& pl0 = smLayout.getPageLayout(0);
+
+        ui::ViewerInkController ctrl;
+        const bool defaultsOk = !ctrl.isMode() && (ctrl.color() == 0xFF000000) &&
+                                (std::abs(ctrl.borderWidth() - 2.0) < 1e-6) &&
+                                !ctrl.isDrawing() && (ctrl.currentPage() == -1);
+
+        // beginStroke outside any page
+        const bool outBegin = !ctrl.beginStroke(smLayout, 0, 0) && !ctrl.isDrawing() && (ctrl.currentPage() == -1);
+
+        // setMode return values (true on change, false on no-op)
+        const bool modeOn1 = ctrl.setMode(true);
+        const bool modeOnDup = !ctrl.setMode(true);
+        const bool modeOff1 = ctrl.setMode(false);
+        const bool modeOffDup = !ctrl.setMode(false);
+        const bool modeRetOk = modeOn1 && modeOnDup && modeOff1 && modeOffDup;
+
+        // finishStroke with no stroke leaves outputs untouched
+        int sentinelPage = 99;
+        std::vector<pdf::AnnotationPoint> sentinelPts = {{1.0, 2.0}};
+        const bool emptyFinishOk = !ctrl.finishStroke(sentinelPage, sentinelPts) &&
+                                   (sentinelPage == 99) && (sentinelPts.size() == 1);
+
+        // beginStroke, extendStroke distance filter (0 < 1.0, 1 >= 1.0), finishStroke reset
+        ctrl.setMode(true);
+        const int64_t bx = pl0.leftPixel + 50;
+        const int64_t by = pl0.topPixel + 50;
+        const bool began = ctrl.beginStroke(smLayout, bx, by);
+        const bool subRejected = !ctrl.extendStroke(smLayout, bx, by);
+        const bool boundaryAccepted = ctrl.extendStroke(smLayout, bx + 1, by);
+        int outPg = -1;
+        std::vector<pdf::AnnotationPoint> outPts;
+        const bool finOk = ctrl.finishStroke(outPg, outPts) &&
+                           (outPg == 0) && (outPts.size() == 2) &&
+                           !ctrl.isDrawing() && (ctrl.currentPage() == -1);
+
+        // Single point synthesizes x + 0.1 with same y
+        const bool singleBegan = ctrl.beginStroke(smLayout, bx, by);
+        int singlePg = -1;
+        std::vector<pdf::AnnotationPoint> singlePts;
+        const bool singleFin = ctrl.finishStroke(singlePg, singlePts) &&
+                               (singlePts.size() == 2) &&
+                               (std::abs(singlePts[1].x - (singlePts[0].x + 0.1)) < 1e-6) &&
+                               (std::abs(singlePts[1].y - singlePts[0].y) < 1e-6);
+
+        // setMode(false) mid-stroke clears drawing state and prevents later finishStroke
+        ctrl.beginStroke(smLayout, bx, by);
+        ctrl.extendStroke(smLayout, bx + 10, by);
+        const bool midDisableRet = ctrl.setMode(false);
+        const bool midDisableState = !ctrl.isDrawing() && (ctrl.currentPage() == -1);
+        int afterDisablePg = 77;
+        std::vector<pdf::AnnotationPoint> afterDisablePts;
+        const bool afterDisableFinish = !ctrl.finishStroke(afterDisablePg, afterDisablePts) && (afterDisablePg == 77);
+
+        // Cap at kMaxInkPoints (100,005 alternating moves)
+        ctrl.setMode(true);
+        ctrl.beginStroke(smLayout, bx, by);
+        for (size_t i = 0; i < pdf::kMaxInkPoints + 5; ++i) {
+            const int64_t mx = (i % 2 == 0) ? (bx + 3) : bx;
+            ctrl.extendStroke(smLayout, mx, by);
+        }
+        int capPg = -1;
+        std::vector<pdf::AnnotationPoint> capPts;
+        const bool capOk = ctrl.finishStroke(capPg, capPts) && (capPts.size() == pdf::kMaxInkPoints);
+
+        const bool g53Ok = defaultsOk && outBegin && modeRetOk && emptyFinishOk && began &&
+                           subRejected && boundaryAccepted && finOk && singleBegan && singleFin &&
+                           midDisableRet && midDisableState && afterDisableFinish && capOk;
+        const std::string d53 = "def=" + std::to_string(defaultsOk)
+            + " outBeg=" + std::to_string(outBegin)
+            + " modeRet=" + std::to_string(modeRetOk)
+            + " emptyFin=" + std::to_string(emptyFinishOk)
+            + " subRej=" + std::to_string(subRejected)
+            + " bndAcc=" + std::to_string(boundaryAccepted)
+            + " fin=" + std::to_string(finOk)
+            + " single=" + std::to_string(singleBegan && singleFin)
+            + " midDis=" + std::to_string(midDisableRet && midDisableState && afterDisableFinish)
+            + " cap=" + std::to_string(capOk);
+
+        recordTest(g53Ok, "Group 4.53: ViewerInkController state machine invariants", d53);
+    }
+
+    // 4.54: Painting (controller level into unantialiased QImage)
+    {
+        layout::DocumentLayout pLayout;
+        pLayout.setPageSizes({{300.0, 300.0}});
+        pLayout.updateLayout(2.0, 1.0, 700);
+        const auto& pl = pLayout.getPageLayout(0);
+
+        ui::ViewerInkController ctrl;
+        ctrl.setMode(true);
+        const uint32_t strokeArgb = 0xFF112233;
+        ctrl.setColor(strokeArgb);
+        ctrl.setBorderWidth(5.0); // at scale 2.0, effBw = 10.0 px (half-width = 5 px)
+
+        const QPen initPen(Qt::red, 9.0);
+        const QBrush initBrush(Qt::green);
+        auto paintInto = [&](QImage& img, int64_t scrollX, int64_t scrollY, bool& statePreserved) {
+            img.fill(Qt::transparent);
+            QPainter p(&img);
+            p.setPen(initPen);
+            p.setBrush(initBrush);
+            ctrl.drawActiveStroke(p, pLayout, 1, scrollX, scrollY);
+            statePreserved = (p.pen() == initPen) && (p.brush() == initBrush);
+        };
+
+        // 1. Fewer than 2 points paints nothing
+        ctrl.beginStroke(pLayout, pl.leftPixel + 80, pl.topPixel + 100);
+        QImage img1(400, 400, QImage::Format_ARGB32);
+        bool stateOk1 = false;
+        paintInto(img1, pl.leftPixel, pl.topPixel, stateOk1);
+        bool emptyPainted = true;
+        for (int y = 0; y < img1.height() && emptyPainted; ++y) {
+            for (int x = 0; x < img1.width(); ++x) {
+                if (img1.pixelColor(x, y).alpha() != 0) {
+                    emptyPainted = false;
+                    break;
+                }
+            }
+        }
+
+        // 2. Extend horizontal segment at y = 100 (top half of 600px page) from x = 80 to x = 280
+        ctrl.extendStroke(pLayout, pl.leftPixel + 280, pl.topPixel + 100);
+        QImage img2(600, 600, QImage::Format_ARGB32);
+        bool stateOk2 = false;
+        paintInto(img2, pl.leftPixel, pl.topPixel, stateOk2);
+
+        const QColor expectedCol(0x11, 0x22, 0x33);
+        const bool midColored = (img2.pixelColor(180, 100).rgb() == expectedCol.rgb());
+        const bool farTransparent = (img2.pixelColor(10, 10).alpha() == 0);
+        const bool insideHalfWidth = (img2.pixelColor(180, 103).rgb() == expectedCol.rgb());
+        const bool outsideHalfWidth = (img2.pixelColor(180, 110).alpha() == 0);
+        // Y-flip check: segment is at y=100, NOT at H-100 = 500
+        const bool yFlipOk = midColored && (img2.pixelColor(180, 500).alpha() == 0);
+
+        // 3. Non-zero scroll offset shifts stroke by (-50, -40)
+        QImage img3(600, 600, QImage::Format_ARGB32);
+        bool stateOk3 = false;
+        paintInto(img3, pl.leftPixel + 50, pl.topPixel + 40, stateOk3);
+        const bool scrollShifted = (img3.pixelColor(130, 60).rgb() == expectedCol.rgb()) &&
+                                   (img3.pixelColor(180, 100).alpha() == 0);
+
+        // 4. Thin borderWidth at scale 1.0 tests std::max(1.0, ...) clamp
+        layout::DocumentLayout thinLayout;
+        thinLayout.setPageSizes({{300.0, 300.0}});
+        thinLayout.updateLayout(1.0, 1.0, 400);
+        const auto& tpl = thinLayout.getPageLayout(0);
+        ui::ViewerInkController thinCtrl;
+        thinCtrl.setMode(true);
+        thinCtrl.setColor(strokeArgb);
+        thinCtrl.setBorderWidth(0.2);
+        thinCtrl.beginStroke(thinLayout, tpl.leftPixel + 20, tpl.topPixel + 50);
+        thinCtrl.extendStroke(thinLayout, tpl.leftPixel + 120, tpl.topPixel + 50);
+        QImage imgThin(300, 300, QImage::Format_ARGB32);
+        imgThin.fill(Qt::transparent);
+        {
+            QPainter pt(&imgThin);
+            thinCtrl.drawActiveStroke(pt, thinLayout, 1, tpl.leftPixel, tpl.topPixel);
+        }
+        const bool thinVisible = (imgThin.pixelColor(70, 50).rgb() == expectedCol.rgb());
+
+        const bool g54Ok = emptyPainted && midColored && farTransparent && insideHalfWidth &&
+                           outsideHalfWidth && yFlipOk && scrollShifted &&
+                           stateOk1 && stateOk2 && stateOk3 && thinVisible;
+        const std::string d54 = "empty=" + std::to_string(emptyPainted)
+            + " mid=" + std::to_string(midColored) + " far=" + std::to_string(farTransparent)
+            + " inW=" + std::to_string(insideHalfWidth) + " outW=" + std::to_string(outsideHalfWidth)
+            + " yFlip=" + std::to_string(yFlipOk) + " scroll=" + std::to_string(scrollShifted)
+            + " state=" + std::to_string(stateOk1 && stateOk2 && stateOk3)
+            + " thin=" + std::to_string(thinVisible);
+
+        recordTest(g54Ok, "Group 4.54: ViewerInkController active stroke painting invariants", d54);
+    }
+
+    // 4.55: Widget wiring (mid-stroke grab shows ink color; setInkDrawingMode(false) removes it)
+    {
+        viewer.editLog().clear();
+        viewer.setZoom(1.0);
+        viewer.goToPage(0);
+        viewer.waitForRendering();
+        pump(50);
+
+        viewer.setInkColor(0xFF00AAFF);
+        viewer.setInkBorderWidth(4.0);
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const QPointF ptA = pageDisplayToViewport(0, 100.0, 100.0);
+        const QPointF ptB = pageDisplayToViewport(0, 200.0, 100.0);
+        const QPoint ptMid = ((ptA + ptB) * 0.5).toPoint();
+        const bool midInViewport = viewer.viewport()->rect().contains(ptMid);
+
+        QMouseEvent pr(QEvent::MouseButtonPress, ptA, ptA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pr);
+        QMouseEvent mv(QEvent::MouseMove, ptB, ptB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mv);
+        viewer.viewport()->repaint();
+        pump(20);
+
+        const QImage grabActive = viewer.viewport()->grab().toImage();
+        const QColor inkRgb(0x00, 0xAA, 0xFF);
+        const bool activeColored = midInViewport && (grabActive.pixelColor(ptMid).rgb() == inkRgb.rgb());
+
+        // Turn off ink mode mid-stroke -> active stroke disappears from viewport
+        viewer.setInkDrawingMode(false);
+        viewer.viewport()->repaint();
+        pump(20);
+
+        const QImage grabAfterOff = viewer.viewport()->grab().toImage();
+        const bool removedAfterOff = (grabAfterOff.pixelColor(ptMid).rgb() != inkRgb.rgb());
+
+        viewer.setInkColor(0xFF000000);
+        viewer.setInkBorderWidth(2.0);
+
+        const bool g55Ok = midInViewport && activeColored && removedAfterOff;
+        const std::string d55 = "inVp=" + std::to_string(midInViewport)
+            + " activeCol=" + std::to_string(activeColored)
+            + " removed=" + std::to_string(removedAfterOff);
+
+        recordTest(g55Ok, "Group 4.55: Widget paint hook renders mid-stroke ink and clears on mode off", d55);
+    }
+
+    // 4.56: Signal order (widget level)
+    {
+        viewer.setInkDrawingMode(false);
+        viewer.setRedactionMode(false);
+        pump(20);
+
+        std::vector<std::string> seqLog;
+        auto curName = [&]() -> std::string {
+            const Qt::CursorShape cs = viewer.viewport()->cursor().shape();
+            if (cs == Qt::CrossCursor) return "cross";
+            if (cs == Qt::IBeamCursor) return "ibeam";
+            return std::to_string(static_cast<int>(cs));
+        };
+        const auto c1 = QObject::connect(&viewer, &ui::PdfViewerWidget::inkDrawingModeChanged, [&](bool v) {
+            seqLog.push_back(std::string("ink=") + (v ? "1" : "0") + "," + curName());
+        });
+        const auto c2 = QObject::connect(&viewer, &ui::PdfViewerWidget::redactionModeChanged, [&](bool v) {
+            seqLog.push_back(std::string("redact=") + (v ? "1" : "0") + "," + curName());
+        });
+
+        // 1. ink on -> ink=1,cross
+        viewer.setInkDrawingMode(true);
+        const bool seq1Ok = (seqLog == std::vector<std::string>{"ink=1,cross"});
+
+        // 2. redaction on while ink is on -> ink=0,ibeam then redact=1,cross
+        seqLog.clear();
+        viewer.setRedactionMode(true);
+        const bool seq2Ok = (seqLog == std::vector<std::string>{"ink=0,ibeam", "redact=1,cross"});
+
+        // 3. ink on while redaction is on -> redact=0,ibeam then ink=1,cross
+        seqLog.clear();
+        viewer.setInkDrawingMode(true);
+        const bool seq3Ok = (seqLog == std::vector<std::string>{"redact=0,ibeam", "ink=1,cross"});
+
+        QObject::disconnect(c1);
+        QObject::disconnect(c2);
+        viewer.setInkDrawingMode(false);
+        viewer.setRedactionMode(false);
+
+        const bool g56Ok = seq1Ok && seq2Ok && seq3Ok;
+        const std::string d56 = "seq1=" + std::to_string(seq1Ok)
+            + " seq2=" + std::to_string(seq2Ok)
+            + " seq3=" + std::to_string(seq3Ok);
+
+        recordTest(g56Ok, "Group 4.56: Mode exclusion signal emission order and cursor state", d56);
+    }
+
+    // 4.57: Stale stroke across closeDocument and openDocument (characterizing un-reset ink state)
+    {
+        viewer.editLog().clear();
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const QPointF ptA = pageDisplayToViewport(0, 100.0, 100.0);
+        const QPointF ptB = pageDisplayToViewport(0, 140.0, 140.0);
+
+        QMouseEvent pr(QEvent::MouseButtonPress, ptA, ptA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pr);
+        QMouseEvent mv(QEvent::MouseMove, ptB, ptB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mv);
+
+        // Close without release, then reopen without resetting ink controller
+        viewer.closeDocument();
+        pump(30);
+        const auto openErr = viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
+
+        // Send only a release on the newly opened document -> commits the stale stroke from prior doc
+        QMouseEvent rel(QEvent::MouseButtonRelease, ptB, ptB, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel);
+        pump(50);
+
+        const auto& cmds = viewer.editLog().activeCommands();
+        const bool staleCommitted = (openErr == pdf::DocumentError::None) &&
+                                    (cmds.size() == 1) &&
+                                    (cmds[0].after.subtype == pdf::AnnotationSubtype::Ink);
+
+        viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+
+        recordTest(staleCommitted, "Group 4.57: Stale stroke across closeDocument and openDocument commits on release",
+                   "staleCommitted=" + std::to_string(staleCommitted));
     }
 }
 
