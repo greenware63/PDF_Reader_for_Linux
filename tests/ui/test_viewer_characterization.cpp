@@ -5191,6 +5191,14 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         const bool noOffCommand = viewer.editLog().activeCommands().empty();
 
         // Case 3: Press in the inter-page gap between page 0 and page 1 -> falls through, no stroke
+        // samplePdf may be 1-page (e.g. sample.pdf via CTest), so switch to twoPageTextPdf for 2 pages.
+        viewer.setInkDrawingMode(false);
+        viewer.openDocument(twoPageTextPdf);
+        viewer.waitForRendering();
+        pump(50);
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
         const auto& pl0 = viewer.layout().getPageLayout(0);
         const auto& pl1 = viewer.layout().getPageLayout(1);
         const int64_t gapDocX = pl0.leftPixel + pl0.widthPixel / 2;
@@ -5209,6 +5217,9 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         const bool noGapCommand = viewer.editLog().activeCommands().empty();
 
         viewer.setInkDrawingMode(false);
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
 
         const bool g45Ok = onAccepted && onCreatedStroke && isOffPage && offFellThrough && noOffCommand
             && isGapOffPage && gapFellThrough && noGapCommand;
@@ -5385,6 +5396,15 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         }
 
         // 2. Custom attributes: color 0xFF112233, borderWidth 4.5 on page 1
+        // Use twoPageTextPdf so page 1 always exists even when samplePdf is 1-page sample.pdf.
+        viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+        viewer.openDocument(twoPageTextPdf);
+        viewer.waitForRendering();
+        pump(50);
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
         viewer.setInkColor(0xFF112233);
         viewer.setInkBorderWidth(4.5);
         const bool custColor = (viewer.inkColor() == 0xFF112233);
@@ -5405,9 +5425,9 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         pump(50);
 
         const auto& cmds2 = viewer.editLog().activeCommands();
-        bool custCommitOk = (cmds2.size() == 2);
+        bool custCommitOk = (cmds2.size() == 1);
         if (custCommitOk) {
-            const auto& it = cmds2[1].after;
+            const auto& it = cmds2[0].after;
             custCommitOk = (it.subtype == pdf::AnnotationSubtype::Ink) &&
                            (it.pageIndex == 1) &&
                            (it.colorArgb == 0xFF112233) &&
@@ -5436,20 +5456,23 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         pump(50);
 
         const auto& cmds3 = viewer.editLog().activeCommands();
-        bool midStrokeAppliesOk = (cmds3.size() == 3);
+        bool midStrokeAppliesOk = (cmds3.size() == 2);
         if (midStrokeAppliesOk) {
-            const auto& it = cmds3[2].after;
+            const auto& it = cmds3[1].after;
             midStrokeAppliesOk = (it.subtype == pdf::AnnotationSubtype::Ink) &&
                                  (it.pageIndex == 0) &&
                                  (it.colorArgb == 0xFF445566) &&
                                  (std::abs(it.borderWidth - 6.0) < 1e-4);
         }
 
-        // Reset viewer ink attributes to defaults
+        // Reset viewer ink attributes and restore samplePdf
         viewer.setInkColor(0xFF000000);
         viewer.setInkBorderWidth(2.0);
         viewer.setInkDrawingMode(false);
         viewer.editLog().clear();
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
 
         const bool g48Ok = defColor && defWidth && defCommitOk && custColor && custWidth && custCommitOk && midStrokeAppliesOk;
         const std::string d48 = "defCol=" + std::to_string(defColor) + " defWid=" + std::to_string(defWidth)
