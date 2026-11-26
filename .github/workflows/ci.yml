@@ -167,3 +167,17 @@ jobs:
           QT_QPA_PLATFORM: "offscreen"
           REDACT_REQUIRE_WITNESSES: "1"
         run: ctest --test-dir build-shipping --output-on-failure
+
+  docs-checks:
+    name: Docs checks
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Validate parity matrix
+        run: python3 scripts/validate_matrix.py
+
+      - name: Check docs for line-number citations
+        run: python3 scripts/check_docs.py
