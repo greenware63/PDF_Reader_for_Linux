@@ -6208,6 +6208,173 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         recordTest(survivedRebase, "Group 4.60: Active ink stroke survives saveDocument rebase",
                    "saved=" + std::to_string(savedOk) + " survived=" + std::to_string(survivedRebase));
     }
+
+    // 4.61: Staged redaction marks cleared on openDocument() without closeDocument()
+    {
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(true);
+        viewer.addStagedRedaction(0, pdf::ipc::RedactRect{20.0, 20.0, 120.0, 120.0});
+        const bool beforeOk = (viewer.stagedRedactionCount() == 1);
+
+        SignalCounter spyMarks(&viewer, &ui::PdfViewerWidget::redactionMarksChanged);
+        const auto err1 = viewer.openDocument(twoPageTextPdf);
+        viewer.waitForRendering();
+        pump(50);
+
+        const bool cleared = (err1 == pdf::DocumentError::None) &&
+                             (viewer.stagedRedactionCount() == 0) &&
+                             !viewer.hasStagedRedactions();
+        const bool emittedOnce = (spyMarks.count() == 1);
+
+        // Second open when already empty emits nothing
+        const auto err2 = viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
+        const bool secondSilent = (err2 == pdf::DocumentError::None) && (spyMarks.count() == 1);
+
+        viewer.setRedactionMode(false);
+
+        const bool g61Ok = beforeOk && cleared && emittedOnce && secondSilent;
+        const std::string d61 = "before=" + std::to_string(beforeOk)
+            + " cleared=" + std::to_string(cleared)
+            + " emitOnce=" + std::to_string(emittedOnce)
+            + " secondSilent=" + std::to_string(secondSilent);
+
+        recordTest(g61Ok, "Group 4.61: Staged redaction marks cleared on openDocument without closeDocument", d61);
+    }
+
+    // 4.62: In-progress redaction drag is reset on openDocument() without closeDocument()
+    {
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(true);
+        pump(20);
+
+        const QPointF ptA = pageDisplayToViewport(0, 80.0, 80.0);
+        const QPointF ptB = pageDisplayToViewport(0, 180.0, 180.0);
+
+        QMouseEvent pr(QEvent::MouseButtonPress, ptA, ptA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pr);
+        QMouseEvent mv(QEvent::MouseMove, ptB, ptB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mv);
+
+        const auto openErr = viewer.openDocument(twoPageTextPdf);
+        viewer.waitForRendering();
+        pump(50);
+
+        // Release after openDocument -> must not stage a mark
+        QMouseEvent rel(QEvent::MouseButtonRelease, ptB, ptB, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel);
+        pump(30);
+
+        const bool noStaged = (openErr == pdf::DocumentError::None) &&
+                              (viewer.stagedRedactionCount() == 0);
+
+        viewer.setRedactionMode(false);
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
+
+        recordTest(noStaged, "Group 4.62: In-progress redaction drag reset on openDocument without closeDocument",
+                   "noStaged=" + std::to_string(noStaged));
+    }
+
+    // 4.63: Staged redaction marks cleared on openDocumentAsync()
+    {
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(true);
+        viewer.addStagedRedaction(0, pdf::ipc::RedactRect{25.0, 25.0, 125.0, 125.0});
+        const bool beforeOk = (viewer.stagedRedactionCount() == 1);
+
+        SignalCounter spyMarks(&viewer, &ui::PdfViewerWidget::redactionMarksChanged);
+        SignalCounter spyLoaded(&viewer, &ui::PdfViewerWidget::documentLoaded);
+
+        viewer.openDocumentAsync(twoPageTextPdf);
+        const bool loaded = waitFor([&]() { return spyLoaded.count() >= 1; }, 5000);
+        viewer.waitForRendering();
+        pump(50);
+
+        const bool cleared = loaded && (viewer.stagedRedactionCount() == 0) && !viewer.hasStagedRedactions();
+        const bool emittedOnce = (spyMarks.count() == 1);
+
+        viewer.setRedactionMode(false);
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
+
+        const bool g63Ok = beforeOk && cleared && emittedOnce;
+        const std::string d63 = "before=" + std::to_string(beforeOk)
+            + " cleared=" + std::to_string(cleared)
+            + " emitOnce=" + std::to_string(emittedOnce);
+
+        recordTest(g63Ok, "Group 4.63: Staged redaction marks cleared on openDocumentAsync", d63);
+    }
+
+    // 4.64: Staged redaction marks survive saveDocument rebase (m_preserveEditLogOnOpen)
+    {
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(true);
+        viewer.addStagedRedaction(0, pdf::ipc::RedactRect{30.0, 30.0, 130.0, 130.0});
+        const bool beforeOk = (viewer.stagedRedactionCount() == 1);
+
+        QTemporaryDir saveDir;
+        const QString savedPath = saveDir.path() + "/t38_rebase.pdf";
+        const bool savedOk = saveDir.isValid() && viewer.saveDocument(savedPath);
+        pump(50);
+
+        const bool preserved = savedOk && (viewer.stagedRedactionCount() == 1);
+
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(false);
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
+
+        const bool g64Ok = beforeOk && preserved;
+        recordTest(g64Ok, "Group 4.64: Staged redaction marks survive saveDocument rebase",
+                   "before=" + std::to_string(beforeOk) + " preserved=" + std::to_string(preserved));
+    }
+
+    // 4.65: Failed openDocument leaves staged redaction marks intact
+    {
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(true);
+        viewer.addStagedRedaction(0, pdf::ipc::RedactRect{35.0, 35.0, 135.0, 135.0});
+
+        const auto failErr = viewer.openDocument(twoPageTextPdf + ".does_not_exist.pdf");
+        pump(30);
+
+        const bool failed = (failErr != pdf::DocumentError::None);
+        const bool marksKept = (viewer.stagedRedactionCount() == 1);
+
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(false);
+
+        const bool g65Ok = failed && marksKept;
+        recordTest(g65Ok, "Group 4.65: Failed openDocument preserves staged redaction marks",
+                   "failed=" + std::to_string(failed) + " marksKept=" + std::to_string(marksKept));
+    }
+
+    // 4.66: Redaction mode persists across openDocument()
+    {
+        viewer.clearStagedRedactions();
+        viewer.setRedactionMode(true);
+        const bool modeBefore = viewer.isRedactionMode();
+
+        const auto openErr = viewer.openDocument(twoPageTextPdf);
+        viewer.waitForRendering();
+        pump(50);
+
+        const bool modeAfter = (openErr == pdf::DocumentError::None) && viewer.isRedactionMode();
+
+        viewer.setRedactionMode(false);
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
+
+        const bool g66Ok = modeBefore && modeAfter;
+        recordTest(g66Ok, "Group 4.66: Redaction mode persists across openDocument",
+                   "before=" + std::to_string(modeBefore) + " after=" + std::to_string(modeAfter));
+    }
 }
 
 // ======================================================================
