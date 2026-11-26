@@ -105,3 +105,5 @@ Selecting and deleting:
 ## Redaction
 
 See [REDACTION.md](REDACTION.md): output is rasterised, existing signatures are invalidated.
+
+- Opening another document in the same tab discards staged redaction marks without a confirmation prompt.
