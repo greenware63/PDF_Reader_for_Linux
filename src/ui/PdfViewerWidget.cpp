@@ -222,6 +222,8 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     if (!m_preserveEditLogOnOpen) {
         clearFormFieldsCache();
         m_inkController.resetStroke();
+        clearStagedRedactions();
+        m_redactionController.resetDrag();
     }
     clearSelection();
     clearSearch();
