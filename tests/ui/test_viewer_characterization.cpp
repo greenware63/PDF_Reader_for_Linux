@@ -6031,7 +6031,7 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         recordTest(g56Ok, "Group 4.56: Mode exclusion signal emission order and cursor state", d56);
     }
 
-    // 4.57: Stale stroke across closeDocument and openDocument (characterizing un-reset ink state)
+    // 4.57: Stale stroke across closeDocument and openDocument is discarded
     {
         viewer.editLog().clear();
         viewer.setInkDrawingMode(true);
@@ -6045,28 +6045,168 @@ void runGroup4AnnotationAndRedaction(const QString& samplePdf, const QString& tw
         QMouseEvent mv(QEvent::MouseMove, ptB, ptB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
         QApplication::sendEvent(viewer.viewport(), &mv);
 
-        // Close without release, then reopen without resetting ink controller
+        // Close without release, then reopen
         viewer.closeDocument();
         pump(30);
         const auto openErr = viewer.openDocument(samplePdf);
         viewer.waitForRendering();
         pump(50);
 
-        // Send only a release on the newly opened document -> commits the stale stroke from prior doc
+        // Send only a release on the newly opened document -> stale stroke must NOT commit
+        QMouseEvent rel(QEvent::MouseButtonRelease, ptB, ptB, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel);
+        pump(50);
+
+        const bool discarded = (openErr == pdf::DocumentError::None) &&
+                               viewer.editLog().activeCommands().empty();
+
+        viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+
+        recordTest(discarded, "Group 4.57: Stale stroke across closeDocument and openDocument is discarded",
+                   "discarded=" + std::to_string(discarded));
+    }
+
+    // 4.58: Stale stroke across openDocument() without closeDocument() is discarded (real open path)
+    {
+        viewer.editLog().clear();
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const QPointF ptA = pageDisplayToViewport(0, 100.0, 100.0);
+        const QPointF ptB = pageDisplayToViewport(0, 140.0, 140.0);
+
+        QMouseEvent pr(QEvent::MouseButtonPress, ptA, ptA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pr);
+        QMouseEvent mv(QEvent::MouseMove, ptB, ptB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mv);
+
+        // Open another file directly without closeDocument()
+        const auto openErr = viewer.openDocument(twoPageTextPdf);
+        viewer.waitForRendering();
+        pump(50);
+
+        // Release commits nothing
+        QMouseEvent rel(QEvent::MouseButtonRelease, ptB, ptB, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel);
+        pump(30);
+        const bool releaseDiscarded = (openErr == pdf::DocumentError::None) &&
+                                      viewer.editLog().activeCommands().empty();
+
+        // Hover moves with no button do not grow a stroke
+        const QPointF ptHover = pageDisplayToViewport(0, 180.0, 180.0);
+        QMouseEvent mvHover(QEvent::MouseMove, ptHover, ptHover, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mvHover);
+        QMouseEvent relHover(QEvent::MouseButtonRelease, ptHover, ptHover, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &relHover);
+        pump(30);
+        const bool hoverClean = viewer.editLog().activeCommands().empty();
+
+        // Fresh press + release commits only the new 2-point stroke (no leftover points)
+        const QPointF ptC = pageDisplayToViewport(0, 220.0, 220.0);
+        QMouseEvent pr2(QEvent::MouseButtonPress, ptC, ptC, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pr2);
+        QMouseEvent rel2(QEvent::MouseButtonRelease, ptC, ptC, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &rel2);
+        pump(50);
+
+        const auto& cmds = viewer.editLog().activeCommands();
+        bool freshOk = (cmds.size() == 1);
+        if (freshOk) {
+            const auto& st = cmds[0].after.inkStrokes;
+            freshOk = (st.size() == 1) && (st[0].size() == 2) &&
+                      (std::abs(st[0][0].x - 220.0) < 1.0) &&
+                      (std::abs(st[0][1].x - (st[0][0].x + 0.1)) < 1e-4);
+        }
+
+        viewer.setInkDrawingMode(false);
+        viewer.editLog().clear();
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
+
+        const bool g58Ok = releaseDiscarded && hoverClean && freshOk;
+        const std::string d58 = "relDisc=" + std::to_string(releaseDiscarded)
+            + " hover=" + std::to_string(hoverClean)
+            + " fresh=" + std::to_string(freshOk);
+
+        recordTest(g58Ok, "Group 4.58: Stale stroke across openDocument without closeDocument is discarded", d58);
+    }
+
+    // 4.59: ViewerInkController::resetStroke invariants
+    {
+        layout::DocumentLayout rLayout;
+        rLayout.setPageSizes({{612.0, 792.0}});
+        rLayout.updateLayout(1.0, 1.0, 800);
+        const auto& pl = rLayout.getPageLayout(0);
+
+        ui::ViewerInkController ctrl;
+        ctrl.setMode(true);
+        ctrl.setColor(0xFF112233);
+        ctrl.setBorderWidth(4.5);
+
+        // No-op when idle
+        ctrl.resetStroke();
+        const bool idleOk = !ctrl.isDrawing() && (ctrl.currentPage() == -1) &&
+                            ctrl.isMode() && (ctrl.color() == 0xFF112233) &&
+                            (std::abs(ctrl.borderWidth() - 4.5) < 1e-6);
+
+        // After begin + extend, resetStroke clears stroke state while preserving mode/color/width
+        ctrl.beginStroke(rLayout, pl.leftPixel + 50, pl.topPixel + 50);
+        ctrl.extendStroke(rLayout, pl.leftPixel + 80, pl.topPixel + 80);
+        ctrl.resetStroke();
+
+        int outPg = 99;
+        std::vector<pdf::AnnotationPoint> outPts;
+        const bool activeOk = !ctrl.isDrawing() && (ctrl.currentPage() == -1) &&
+                              !ctrl.finishStroke(outPg, outPts) && (outPg == 99) &&
+                              ctrl.isMode() && (ctrl.color() == 0xFF112233) &&
+                              (std::abs(ctrl.borderWidth() - 4.5) < 1e-6);
+
+        const bool g59Ok = idleOk && activeOk;
+        const std::string d59 = "idle=" + std::to_string(idleOk) + " active=" + std::to_string(activeOk);
+
+        recordTest(g59Ok, "Group 4.59: ViewerInkController::resetStroke clears active stroke and preserves attributes", d59);
+    }
+
+    // 4.60: Preserve path: active ink stroke survives save-rebase (m_preserveEditLogOnOpen)
+    {
+        viewer.editLog().clear();
+        viewer.setInkDrawingMode(true);
+        pump(20);
+
+        const QPointF ptA = pageDisplayToViewport(0, 100.0, 100.0);
+        const QPointF ptB = pageDisplayToViewport(0, 130.0, 130.0);
+
+        QMouseEvent pr(QEvent::MouseButtonPress, ptA, ptA, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &pr);
+        QMouseEvent mv(QEvent::MouseMove, ptB, ptB, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(viewer.viewport(), &mv);
+
+        QTemporaryDir saveTmpDir;
+        const QString savedPath = saveTmpDir.path() + "/t37_rebase.pdf";
+        const bool savedOk = saveTmpDir.isValid() && viewer.saveDocument(savedPath);
+        pump(50);
+
+        // Release after save-rebase -> in-progress stroke must still commit
         QMouseEvent rel(QEvent::MouseButtonRelease, ptB, ptB, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
         QApplication::sendEvent(viewer.viewport(), &rel);
         pump(50);
 
         const auto& cmds = viewer.editLog().activeCommands();
-        const bool staleCommitted = (openErr == pdf::DocumentError::None) &&
-                                    (cmds.size() == 1) &&
-                                    (cmds[0].after.subtype == pdf::AnnotationSubtype::Ink);
+        const bool survivedRebase = savedOk && (cmds.size() == 1) &&
+                                    (cmds[0].after.subtype == pdf::AnnotationSubtype::Ink) &&
+                                    (cmds[0].after.inkStrokes.size() == 1) &&
+                                    (cmds[0].after.inkStrokes[0].size() == 2);
 
         viewer.setInkDrawingMode(false);
         viewer.editLog().clear();
+        viewer.openDocument(samplePdf);
+        viewer.waitForRendering();
+        pump(50);
 
-        recordTest(staleCommitted, "Group 4.57: Stale stroke across closeDocument and openDocument commits on release",
-                   "staleCommitted=" + std::to_string(staleCommitted));
+        recordTest(survivedRebase, "Group 4.60: Active ink stroke survives saveDocument rebase",
+                   "saved=" + std::to_string(savedOk) + " survived=" + std::to_string(survivedRebase));
     }
 }
 

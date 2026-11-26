@@ -36,6 +36,7 @@ public:
     bool beginStroke(const layout::DocumentLayout& layout, int64_t docX, int64_t docY);
     bool extendStroke(const layout::DocumentLayout& layout, int64_t docX, int64_t docY);
     bool finishStroke(int& outPage, std::vector<pdf::AnnotationPoint>& outPoints);
+    void resetStroke() noexcept;
 
     // Painting
     void drawActiveStroke(QPainter& painter, const layout::DocumentLayout& layout,

@@ -81,6 +81,12 @@ bool ViewerInkController::finishStroke(int& outPage, std::vector<pdf::Annotation
     return hasStroke;
 }
 
+void ViewerInkController::resetStroke() noexcept {
+    m_isDrawingInk = false;
+    m_currentInkStroke.clear();
+    m_inkCurrentPage = -1;
+}
+
 void ViewerInkController::drawActiveStroke(QPainter& painter, const layout::DocumentLayout& layout,
                                            int pageCount, int64_t scrollDocX, int64_t scrollDocY) const {
     if (!m_isDrawingInk || m_inkCurrentPage < 0 || m_inkCurrentPage >= pageCount || m_currentInkStroke.size() < 2) {
