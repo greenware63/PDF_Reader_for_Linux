@@ -221,6 +221,7 @@ void PdfViewerWidget::applyOpenedDocument(int64_t nextDocId, const QString& file
     m_transformedPixmapCache.clear();
     if (!m_preserveEditLogOnOpen) {
         clearFormFieldsCache();
+        m_inkController.resetStroke();
     }
     clearSelection();
     clearSearch();
@@ -380,6 +381,7 @@ void PdfViewerWidget::closeDocument() {
     QScopedValueRollback<bool> closeGuard(m_editInProgress, true);
     clearStagedRedactions();
     m_redactionController.resetDrag();
+    m_inkController.resetStroke();
     m_workerErrorMessage.clear();
     cancelPendingOpen();
     // Close document and page cache serially on worker thread
