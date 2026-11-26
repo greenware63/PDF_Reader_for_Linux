@@ -19,7 +19,7 @@ deferred, not an undiscovered bug.
 
 - **Explicit appearances**: Text edits are saved with a verified normal `/AP`; PDFium regenerates standard Latin, multiline, and comb appearances. Editable combos and PDFium readback failures use a minimal single-line fallback only for printable ASCII. If a valid appearance cannot be read back or built, the edit is rolled back instead of saving a value that may appear blank.
 - **`/NeedAppearances`**: The pinned PDFium public API can set annotation appearances but does not expose a way to mutate the catalog's AcroForm `/NeedAppearances` entry. The viewer therefore does not rely on that flag; the explicit `/AP` is required. The flag may remain false.
-- **Password fields**: Password-type text fields (`Ff` bit 14) are not editable through the engine or viewer. This is the combined T20-A/T20-B behavior; T20-B does not apply any appearance or value edit to them.
+- **Password fields**: Password-type text fields (`Ff` bit 14) are not editable through the engine or viewer. This is the combined behavior from task T20-A/T20-B; task T20-B does not apply any appearance or value edit to them.
 - **External viewers**: Automated Poppler and MuPDF checks cover saved appearances, flattened text, and widget-region ink. Manual compatibility with Adobe Acrobat, Foxit, and Okular remains unverified.
 
 ### Form Editing & Navigation

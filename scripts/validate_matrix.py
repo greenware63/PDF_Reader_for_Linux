@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Validation script for docs/PARITY_MATRIX.md
+"""Validation script for docs/PARITY_MATRIX.md.
 
 Validates that:
 1. Executive summary counts match Table 1 counts exactly across all status values.
 2. The total count matches the number of rows in Table 1.
 3. The count of Architectural Capabilities matches Table 2.
-4. Every cited file exists and referenced line numbers are within range.
-5. Quoted test titles can be matched in their respective test files.
+4. Every cited file exists and no link uses :line or #L... line-number citations.
+5. Every quoted test title or symbol name (`...`) matches verbatim in its cited file.
 """
 
 import os
 import re
 import sys
+
 
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -95,58 +96,66 @@ def main():
     # 3. Check citations in Table 1 and Table 2
     print("\nVerifying citations in all rows...")
     all_rows = table1_rows + table2_rows
+    file_cache = {}
+
+    def read_cached(fpath):
+        if fpath not in file_cache:
+            full_path = os.path.normpath(os.path.join(repo_root, fpath))
+            with open(full_path, 'r', encoding='utf-8', errors='ignore') as tf:
+                file_cache[fpath] = tf.read()
+        return file_cache[fpath]
 
     for r in all_rows:
         feature_name = r[0]
         evidence = r[3]
 
-        # Extract markdown links [`path:line`](url) or [`path`](url)
+        # Extract markdown links [`path`](url)
         links = re.findall(r'\[`([^`]+)`\]\(([^)]+)\)', evidence)
-        for text, _ in links:
-            if ':' in text:
-                fpath, line_str = text.split(':', 1)
-                try:
-                    line_no = int(line_str.split('-')[0])
-                except ValueError:
-                    line_no = None
-            else:
-                fpath = text
-                line_no = None
+        for text, url in links:
+            if re.search(r':\d+', text):
+                print(f"ERROR in \"{feature_name}\": Line-number citation is forbidden: {text}")
+                errors += 1
+            if re.search(r'#L\d+', url):
+                print(f"ERROR in \"{feature_name}\": Line-number anchor (#L...) is forbidden: {url}")
+                errors += 1
 
+            fpath = re.sub(r':\d+.*$', '', text)
             full_path = os.path.normpath(os.path.join(repo_root, fpath))
             if not os.path.exists(full_path):
                 print(f"ERROR in \"{feature_name}\": File not found: {fpath} (full: {full_path})")
                 errors += 1
-            else:
-                if line_no is not None:
-                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as src_file:
-                        src_lines = src_file.readlines()
-                    if line_no > len(src_lines) or line_no < 1:
-                        print(f"ERROR in \"{feature_name}\": Line {line_no} out of range for {fpath} ({len(src_lines)} lines)")
-                        errors += 1
 
-        # Extract quoted test titles: (`exact test title`)
-        quoted_tests = re.findall(r'\(`([^`]+)`\)', evidence)
-        for q_test in quoted_tests:
-            found = False
-            for text, _ in links:
-                fpath = text.split(':')[0]
-                if fpath.endswith('.cpp'):
-                    full_path = os.path.normpath(os.path.join(repo_root, fpath))
-                    if os.path.exists(full_path):
-                        with open(full_path, 'r', encoding='utf-8', errors='ignore') as tf:
-                            tf_content = tf.read()
-                        prefix = q_test[:25].strip()
-                        if prefix.lower() in tf_content.lower():
-                            found = True
-                            break
-            if not found:
-                print(f"WARNING in \"{feature_name}\": Could not locate quoted test snippet \"{q_test[:40]}\" in cited files")
+        # Verify each [`file`](url) (`exact test title or symbol`) pair verbatim
+        paired = re.findall(r'\[`([^`]+)`\]\([^)]+\)\s*\(`([^`]+)`\)', evidence)
+        for text, symbol in paired:
+            fpath = re.sub(r':\d+.*$', '', text)
+            if not fpath.endswith(('.cpp', '.h', '.py')):
+                continue
+            full_path = os.path.normpath(os.path.join(repo_root, fpath))
+            if not os.path.exists(full_path):
+                continue
+            if symbol not in read_cached(fpath):
+                print(f"ERROR in \"{feature_name}\": Quoted name \"{symbol}\" not found verbatim in {fpath}")
+                errors += 1
+
+        # Also check any inline [`file`](url) `Test ...` patterns without parens
+        inline_paired = re.findall(r'\[`([^`]+)`\]\([^)]+\)\s+`([^`]+)`', evidence)
+        for text, symbol in inline_paired:
+            fpath = re.sub(r':\d+.*$', '', text)
+            if not fpath.endswith(('.cpp', '.h', '.py')):
+                continue
+            full_path = os.path.normpath(os.path.join(repo_root, fpath))
+            if not os.path.exists(full_path):
+                continue
+            if symbol not in read_cached(fpath):
+                print(f"ERROR in \"{feature_name}\": Quoted name \"{symbol}\" not found verbatim in {fpath}")
+                errors += 1
 
     print(f"\nTotal validation errors: {errors}")
     if errors > 0:
         sys.exit(1)
     print("ALL CHECKS PASSED!")
+
 
 if __name__ == '__main__':
     main()
