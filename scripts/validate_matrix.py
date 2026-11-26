@@ -97,6 +97,7 @@ def main():
     print("\nVerifying citations in all rows...")
     all_rows = table1_rows + table2_rows
     file_cache = {}
+    verified_citations = 0
 
     def read_cached(fpath):
         if fpath not in file_cache:
@@ -137,6 +138,8 @@ def main():
             if symbol not in read_cached(fpath):
                 print(f"ERROR in \"{feature_name}\": Quoted name \"{symbol}\" not found verbatim in {fpath}")
                 errors += 1
+            else:
+                verified_citations += 1
 
         # Also check any inline [`file`](url) `Test ...` patterns without parens
         inline_paired = re.findall(r'\[`([^`]+)`\]\([^)]+\)\s+`([^`]+)`', evidence)
@@ -150,6 +153,13 @@ def main():
             if symbol not in read_cached(fpath):
                 print(f"ERROR in \"{feature_name}\": Quoted name \"{symbol}\" not found verbatim in {fpath}")
                 errors += 1
+            else:
+                verified_citations += 1
+
+    print(f"Verified citations in docs/PARITY_MATRIX.md: {verified_citations}")
+    if verified_citations == 0:
+        print("ERROR: Vacuity guard failed — 0 verified citations in docs/PARITY_MATRIX.md")
+        errors += 1
 
     print(f"\nTotal validation errors: {errors}")
     if errors > 0:
