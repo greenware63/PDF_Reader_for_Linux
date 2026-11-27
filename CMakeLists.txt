@@ -767,6 +767,15 @@ elseif(UNIX AND NOT APPLE)
     )
 endif()
 
+# Developer spike tool (not part of product install or CTest)
+add_executable(page_ops_spike EXCLUDE_FROM_ALL tests/spikes/page_ops_spike.cpp)
+target_link_libraries(page_ops_spike PRIVATE pdfium)
+if(UNIX AND NOT APPLE)
+    set_target_properties(page_ops_spike PROPERTIES
+        BUILD_RPATH "${pdfium_binaries_SOURCE_DIR}/lib"
+    )
+endif()
+
 # Installation & Packaging
 install(TARGETS pdf-reader pdf_worker
     RUNTIME DESTINATION bin

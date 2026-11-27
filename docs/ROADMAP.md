@@ -24,7 +24,7 @@ Development proceeds through sequential, gate-enforced phases:
    - Parity matrix tracking ([`docs/PARITY_MATRIX.md`](PARITY_MATRIX.md))
    - Viewer widget modular refactoring ([`docs/VIEWER_REFACTOR_RFC.md`](VIEWER_REFACTOR_RFC.md))
 2. **Page Organization & Security**:
-   - Page manipulation (insert, delete, split, replace, combine, reorder, crop, merge)
+   - Page manipulation (insert, delete, split, replace, combine, reorder, crop, merge) ([`docs/PAGE_ORGANIZATION_RFC.md`](PAGE_ORGANIZATION_RFC.md))
    - Permission passwords and permission flags
    - Dynamic watermarking
 3. **Annotation Completeness & Document Identification**:
