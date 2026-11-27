@@ -4257,6 +4257,62 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: extractPages with flatten over IPC verified." << std::endl;
     }
 
+    // --- TEST 43: Deterministic stale-idle-event ordering regression (T42) ---
+    std::cout << "[TEST 43] Testing stale onIdle() event orders reply after finished work..." << std::endl;
+#ifdef PDF_WORKER_TEST_HOOKS
+    {
+        qputenv("PDF_WORKER_TEST_STALE_IDLE_RACE", "1");
+        pdf::ipc::WorkerClient client;
+        auto openRes = client.openDocumentSync(43, samplePdf.toStdString());
+        qunsetenv("PDF_WORKER_TEST_STALE_IDLE_RACE");
+        if (openRes.error != pdf::DocumentError::None) {
+            std::cerr << "[FAIL] 43: openDocumentSync failed" << std::endl;
+            return 1;
+        }
+        client.setRenderDelayForTesting(std::chrono::milliseconds(10));
+        std::atomic<int> answers{0};
+        QMetaObject::Connection answerConn = QObject::connect(
+            &client, &pdf::ipc::WorkerClient::tileReady, &client,
+            [&](int64_t, uint64_t, const pdf::TileKey&, const pdf::PixelBuffer&) { ++answers; }, Qt::DirectConnection);
+        constexpr int kIterations = 10;
+        int late = 0;
+        for (int i = 0; i < kIterations; ++i) {
+            answers = 0;
+            pdf::TileRenderRequest req;
+            req.documentId = 43;
+            req.generation = 1;
+            req.pageIndex = 0;
+            req.rect = pdf::PixelRect{0, i * 16, 64, 16};
+            req.scale = 1.0;
+            req.dpr = 1.0;
+            req.key = pdf::TileKey::create(43, 0, 0, i, 1.0, 1.0);
+            req.priority = 1;
+            client.enqueueRequest(req);
+            client.waitForIdle();
+            if (answers.load() != 1) {
+                ++late;
+                QElapsedTimer drain;
+                drain.start();
+                while (answers.load() < 1 && drain.elapsed() < 2000) {
+                    QCoreApplication::processEvents();
+                }
+            }
+        }
+        QObject::disconnect(answerConn);
+        client.closeDocumentSync();
+        client.stop();
+        if (late != 0) {
+            std::cerr << "[FAIL] 43: waitForIdle returned before the reply in " << late << " of " << kIterations
+                      << " iterations" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: " << kIterations << " stale-idle race iterations each saw their reply first."
+                  << std::endl;
+    }
+#else
+    std::cout << "  -> Skipped (requires ENABLE_TEST_HOOKS=ON)" << std::endl;
+#endif
+
     std::cout << "========================================" << std::endl;
     std::cout << " ALL WORKER IPC UNIT TESTS PASSED!     " << std::endl;
     std::cout << "========================================" << std::endl;

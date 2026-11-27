@@ -722,6 +722,14 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
             if (request.waitForIdle) {
                 if (!m_engineWorker.isIdle()) {
                     m_pendingControlRequests.push_back(request);
+#ifdef PDF_WORKER_TEST_HOOKS
+                    if (qEnvironmentVariableIsSet("PDF_WORKER_TEST_STALE_IDLE_RACE")) {
+                        // Queue a stale onIdle() ahead of the engine's result MetaCall, then give the
+                        // worker thread a few ms to finish and flip to idle before dispatchMessage returns.
+                        QMetaObject::invokeMethod(this, &WorkerServer::onIdle, Qt::QueuedConnection);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                    }
+#endif
                     break;
                 }
                 // The engine is idle, but the responses for the work it just finished travel to this thread as
@@ -758,6 +766,11 @@ void WorkerServer::onIdle() {
     }
     auto pending = std::move(m_pendingControlRequests);
     m_pendingControlRequests.clear();
+    // Idleness was confirmed above, so every response for the finished work is already posted
+    // as a queued MetaCall. Flush them before sending the idle replies so a stale idle() event
+    // ahead of a result cannot put WorkerControlResponse on the wire first. Moving `pending`
+    // out first ensures any nested onIdle() during sendPostedEvents sees nothing left to send.
+    QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
     for (const auto& request : pending) {
         ipc::WorkerControlResponse response;
         response.requestId = request.requestId;
