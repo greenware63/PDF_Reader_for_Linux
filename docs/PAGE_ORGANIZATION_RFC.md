@@ -28,32 +28,33 @@ All seven candidate PDFium APIs were compiled and executed against pinned PDFium
 - **Unsaved edits handling:** Require a **clean `EditLog`** (or prompt the user to Save / Discard / Cancel before launching Organize Pages), matching the existing `MainWindow::applyAndSaveRedactions` pattern. Replaying pending annotation/form edits onto a structurally reindexed scratch document is error-prone because page indices shift under delete/reorder/insert; requiring a clean `EditLog` avoids index-remapping bugs and keeps `EditLog` undo history unambiguous.
 
 ### Decision 2: IPC and Bounds
-**Recommendation:** Keep `extractPages` bytes-over-IPC **only** for small contiguous extractions capped strictly by existing IPC frame bounds (e.g., $\le 16\text{ MiB}$ / $\le 100$ pages); route all general **page-organization rewrites** through a **descriptor-based request** (`OrganizePagesRequest` with an `O_WRONLY` output fd passed via `SCM_RIGHTS`, plus progress heartbeats like `SaveDocumentRequest`).
-- **Bounds:** Enforce strict caps at UI, IPC deserializer, and worker:
-  - Maximum operation count per request: `kMaxPageOpsPerRequest = 256`.
-  - Maximum resulting page count: `kMaxOrganizedPages = 10,000`.
-  - Maximum page range / index list length: `kMaxPageIndices = 10,000`.
+**Recommendation:** Keep `extractPages` bytes-over-IPC **only** for small contiguous extractions capped strictly by existing IPC frame bounds (e.g., $\le 16\text{ MiB}$ / $\le 100$ pages); route general **page-organization rewrites** through a descriptor-based request (`OrganizePagesRequest` with an `O_WRONLY` output fd passed via `SCM_RIGHTS`, plus progress heartbeats like `SaveDocumentRequest`).
+- **Declarative output spec:** Send a declarative list of `PageSpec { sourceIndex, rotationDegrees }` entries rather than an imperative sequence of move/delete operations. Reordering a large document as individual moves would hit operation-count caps and suffer from index-shift pitfalls; a declarative spec is idempotent and makes validation straightforward (non-empty, $\le \min(\text{pageCount}, 10{,}000)$, unique in-range indices, rotation $\in \{0, 90, 180, 270\}$).
+- **Bounds:** Enforce strict caps at engine, IPC deserializer, and worker:
+  - Maximum resulting page count (`kMaxOrganizedPages`): `10,000`.
   - Secondary import source size / fd validation: same `RLIMIT_AS` / `512 MiB` streaming limits as `OpenDocumentRequest`, with `O_RDONLY` fd check via `fcntl(F_GETFL) & O_ACCMODE`.
 
 ### Decision 3: UI Model
 **Recommendation:** Ship a **modal "Organize Pages" dialog** in Slice 1 that previews thumbnails, stages a batch of page operations (delete, reorder, rotate, insert from file), and writes to a **new output file** (via `QFileDialog::getSaveFileName`, with overwrite guard or explicit save-as).
 - Live in-tab editing (mutating the open tab's page tree with full `EditLog` undo/redo across structural page shifts) requires cross-document `EditLog` page-index remapping, tile-cache invalidation, and selection/form-cache rebuilding; deferring live in-tab structural editing keeps Slice 1 localized, safe, and easy to verify.
+- **Dependency on T20 (T37/T38):** Because page indices shift across organized outputs, per-document UI state (staged redaction marks, active redaction drag, and in-progress ink strokes) must not survive reopening an organized output. T37 and T38 (`PdfViewerWidget::applyOpenedDocument()`) already enforce this reset on document open.
 
 ### Decision 4: What Survives (Outlines, Destinations, Links, Forms, Labels, Structure Tree)
 Based directly on the spike measurements:
 - **In-document delete (`FPDFPage_Delete`) & reorder (`FPDF_MovePages`):**
-  - **Outlines & Named Destinations:** Surviving targets follow moved pages automatically, **except** targets pointing at deleted pages become dangling (`pageIndex == -1`). The UI/worker must document this and either prune or mark broken outline/dest entries (or warn when deleting referenced pages).
-  - **`/Link` annotations:** Links on surviving pages pointing to deleted pages become dangling (`pageIndex == -1`). Do **not** silently rewrite arbitrary link dictionaries in Slice 1; document broken-link behavior and surface a note when a link target page is deleted.
-  - **`/PageLabels`:** Index-based in PDF; neither `FPDFPage_Delete` nor `FPDF_MovePages` updates `/PageLabels`. Document as known limitation in Slice 1; optional post-pass remapping in a later slice.
-  - **AcroForm:** `FPDF_MovePages` preserves forms; `FPDFPage_Delete` leaves orphan `/AcroForm /Fields` entries referencing removed widgets. Note in known limitations or prune orphan fields in a dedicated slice.
+  - **Outlines & Named Destinations:** Surviving targets follow moved pages automatically, **except** targets pointing at deleted pages become dangling (`pageIndex == -1`). Inspection of the pinned PDFium public headers (`fpdf_doc.h`, `fpdfview.h`) confirms PDFium only exposes read-only bookmark, page-label, and named-destination APIs (`FPDFBookmark_*`, `FPDF_GetPageLabel`, `FPDF_GetNamedDest*`), with no public API to edit or prune them. Therefore, `organizePages` **warns with counts** (`danglingOutlineCount`, `danglingLinkCount`) rather than pruning.
+  - **`/Link` annotations:** Links on surviving pages pointing to deleted pages become dangling (`pageIndex == -1`). Do **not** silently rewrite arbitrary link dictionaries; report `danglingLinkCount` so callers can warn the user.
+  - **`/PageLabels`:** Index-based in PDF; neither `FPDFPage_Delete` nor `FPDF_MovePages` updates `/PageLabels`. Document as known limitation.
+  - **AcroForm:** `FPDF_MovePages` preserves forms; `FPDFPage_Delete` leaves orphan `/AcroForm /Fields` entries referencing removed widgets. Documented in known limitations.
   - **Structure tree (`/StructTreeRoot`):** PDFium page deletion/import does not maintain tagged PDF structure trees; structure tags may become incomplete or dropped on import.
 - **Cross-document import (`FPDF_ImportPagesByIndex`):**
-  - Outlines, named destinations, `/PageLabels`, and `/AcroForm` catalog dictionaries are **dropped** by PDFium (leaving headless `/Widget` annotations if source pages had form fields, as observed by `pdftoppm`). Therefore, cross-document merge/insert must warn when importing pages with forms/outlines (or flatten source pages first if forms are present).
+  - Outlines, named destinations, `/PageLabels`, and `/AcroForm` catalog dictionaries are **dropped** by PDFium (leaving headless `/Widget` annotations if source pages had form fields, as observed by `pdftoppm`). Therefore, cross-document merge/insert must refuse importing pages containing `/Widget` annotations unless flattened first.
 
-### Decision 5: Signed and Encrypted Documents
+### Decision 5: Permissions, Signed, and Encrypted Documents
 **Recommendation:**
-- **Signed documents:** Check `signatureCount() > 0` before any rewrite. **Warn the user explicitly** (modal confirmation) that structural page operations rewrite the PDF non-incrementally and **invalidate all existing digital signatures** (`pdfsig` validation fails). Keep `FPDF_INCREMENTAL` as the strict default for all non-structural edits (annotations, form filling).
-- **Encrypted documents:** Because `FPDF_ImportPagesByIndex` + `FPDF_SaveAsCopy` writes an **unencrypted** PDF, **warn the user** before saving an unlocked encrypted document's reorganized pages to plaintext (or block merge-import of encrypted sources without password unlock + explicit plaintext-export warning).
+- **Permission flags:** Honor owner restrictions via `FPDF_GetSecurityHandlerRevision` and `FPDF_GetDocPermissions`. Unencrypted documents (`secRev == -1`) are allowed. For security handler revision 3 or later (`secRev >= 3`), require the **assemble** bit (ISO 32000-1 Table 22, bit 11 = `1 << 10`). For revision 2 (`secRev < 3`), require the **modify** bit (bit 4 = `1 << 3`). Return `PermissionDenied` before any scratch work when restricted.
+- **Signed documents:** Check `signatureCount() > 0` before any rewrite and require `allowInvalidateSignatures == true` (`SignedNotAcknowledged` otherwise). Warn the user explicitly that non-incremental save invalidates all existing digital signatures (`pdfsig` validation fails). Keep `FPDF_INCREMENTAL` as the strict default for all non-structural edits.
+- **Encrypted documents:** Require `allowDecrypt == true` (`EncryptedNotAcknowledged` otherwise) when `secRev != -1`, because exporting reorganized pages through a fresh document strips encryption (`Encrypted: no`). Warn the user explicitly before exporting plaintext.
 
 ### Decision 6: Cross-Document Import (Merge and Insert)
 **Recommendation:** Never allow `pdf_worker` to open a user path directly (Landlock read confinement forbids it). For insert/merge, the UI opens the secondary PDF read-only and passes an **`O_RDONLY` file descriptor via `SCM_RIGHTS`** alongside the existing write descriptor, reusing the same strict descriptor-typing checks in `WorkerServer` (`fcntl(F_GETFL) & O_ACCMODE == O_RDONLY`).
@@ -71,13 +72,14 @@ Every slice must satisfy the five gates in [`docs/ROADMAP.md`](ROADMAP.md):
 5. `docs/threat_model.md` entry covering descriptor typing, second-document import, signature invalidation, and encryption stripping.
 
 #### Proposed Slice Plan
-- **Slice 1 (Engine + IPC, ~350–450 LOC):** `OrganizePages` engine operation on a scratch document (`FPDFPage_Delete`, `FPDF_MovePages`, `FPDFPage_SetRotation`) + descriptor-based `OrganizePagesRequest` / `OrganizePagesResponse` IPC + `EditLog`-clean / signature-warning guards + `test_render.cpp` & `test_worker_ipc.cpp` + hostile tests + `qpdf`/`pdftoppm`/`mutool` checks.
+- **Slice 1a (T44 — Engine only):** `PageOrganizationTypes.h` (`PageSpec`, `OrganizeOptions`, `OrganizeStatus`, `OrganizeResult`) + `IDocument::organizePages` / `PdfiumDocument::organizePages` on a scratch copy from retained immutable source bytes, with validation, permission/signature/encryption/streamed guards, dangling outline/link counts, unit/hostile/mutation tests, and `ExternalEngineCompatTest` coverage.
+- **Slice 1b (T45 — IPC, worker, and client):** Descriptor-based `OrganizePagesRequest` / `OrganizePagesResponse` in `IpcMessages`, `WorkerServer` descriptor-typing exception, `WorkerClient` sync/async wrapper, and IPC/crash/watchdog tests.
 - **Slice 2 (Cross-document Insert / Merge / Split, ~350–450 LOC):** Secondary `O_RDONLY` fd import via `FPDF_ImportPagesByIndex`, encryption-stripping & form-import guards, multi-output split, hostile secondary-PDF tests.
 - **Slice 3 (Modal "Organize Pages" UI, ~400–500 LOC):** Thumbnail grid dialog in `MainWindow` / `src/ui/`, drag/button reorder, delete, rotate, insert-from-file, clean-`EditLog` & signature/encryption prompts, atomic `QSaveFile` commit, and `ViewportWidgetTestSuite` / `ViewerCharacterizationTestSuite` coverage.
 - **Slice 4 (Persistent Crop + Incremental Rotate, ~250–350 LOC):** `FPDFPage_SetCropBox` and incremental-save single-page rotate/crop actions with external-tool verification.
 
 ---
 
-## 3. Open Questions
-1. **Orphan `/AcroForm` widgets on cross-document import:** Should Slice 2 refuse importing pages that contain `/Widget` annotations unless flattened first, or strip `/Widget` annotations on import?
-2. **Dangling outlines/links on `FPDFPage_Delete`:** Should Slice 1 leave dangling `Dest` entries (PDFium default) or run a lightweight post-pass to remove outline items whose `FPDFDest_GetDestPageIndex` becomes `-1`?
+## 3. Resolved Notes & Open Questions
+- **Dangling outlines/links on `FPDFPage_Delete` (resolved):** PDFium public headers provide no bookmark/label/named-dest editing APIs, so Slice 1a reports `danglingOutlineCount` and `danglingLinkCount` instead of pruning.
+- **Orphan `/AcroForm` widgets on cross-document import (resolved):** Slice 2 will refuse importing pages containing `/Widget` annotations unless the source pages are flattened first.

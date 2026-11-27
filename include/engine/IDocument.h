@@ -2,6 +2,7 @@
 
 #include "IPage.h"
 #include "OutlineTypes.h"
+#include "PageOrganizationTypes.h"
 #include <memory>
 #include <string>
 #include <cstdint>
@@ -160,6 +161,25 @@ public:
                             std::function<void(uint64_t)> progressCallback = nullptr) {
         (void)writeFd; (void)incremental; (void)outBytesWritten; (void)progressCallback;
         return false;
+    }
+
+    /**
+     * @brief Reorders, subsets, and/or rotates pages into a new non-incremental PDF written to writeFd.
+     * The live document is never modified.
+     * @param pages Declarative output page list (sourceIndex, rotationDegrees).
+     * @param writeFd Writable file descriptor (caller retains ownership).
+     * @param options Guard acknowledgment flags.
+     * @param progressCallback Optional heartbeat callback invoked with bytes written.
+     * @return OrganizeResult with status, bytes written, and dangling outline/link counts.
+     */
+    virtual OrganizeResult organizePages(const std::vector<PageSpec>& pages,
+                                         int writeFd,
+                                         const OrganizeOptions& options = {},
+                                         std::function<void(uint64_t)> progressCallback = nullptr) const {
+        (void)pages; (void)writeFd; (void)options; (void)progressCallback;
+        OrganizeResult result;
+        result.status = OrganizeStatus::InternalError;
+        return result;
     }
 
     /**

@@ -107,3 +107,12 @@ Selecting and deleting:
 See [REDACTION.md](REDACTION.md): output is rasterised, existing signatures are invalidated.
 
 - Opening another document in the same tab discards staged redaction marks without a confirmation prompt.
+
+## Page Organization
+
+- **Page labels**: `/PageLabels` are index-based in PDF and are not remapped when pages are deleted or reordered.
+- **Dangling bookmarks and links**: Outlines and `/Link` annotations pointing to deleted pages are reported by count (`danglingOutlineCount`, `danglingLinkCount`), not pruned.
+- **Orphan form fields**: Deleting a page containing `/AcroForm` widgets removes the page from `/Pages` but leaves orphan references in `/AcroForm /Fields`.
+- **Structure tree**: Tagged PDF structure (`/StructTreeRoot`) is not maintained across structural page operations.
+- **Streamed sources**: Documents exceeding the descriptor streaming threshold (`> 512 MiB`) are unsupported by `organizePages` in Slice 1a (`StreamedSourceUnsupported`).
+- **Encrypted sources (`allowDecrypt`)**: Exporting an encrypted document with `allowDecrypt` imports the reorganized pages into a fresh unencrypted document via `FPDF_ImportPagesByIndex`, which drops bookmarks (`/Outlines`), `/PageLabels`, named destinations, and the `/AcroForm` catalog dictionary (leaving page `/Widget` annotations without `/AcroForm`), and `danglingOutlineCount` / `danglingLinkCount` do not capture those dropped catalog entries.

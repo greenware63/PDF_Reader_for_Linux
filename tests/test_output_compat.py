@@ -137,6 +137,8 @@ def main():
         ("compat_form_appearances_filled.pdf", "Latin Text Appearance Save"),
         ("compat_form_appearances_flattened.pdf", "Latin Text Appearance Flattened Export"),
         ("compat_redacted_export.pdf", "Redacted Document Export"),
+        ("compat_organized_pages.pdf", "Organized Pages Subset/Reorder/Rotate"),
+        ("compat_organized_signed.pdf", "Organized Signed Document (Invalidated Signature)"),
     ]
 
     failures = []
@@ -232,7 +234,11 @@ def main():
                 failures.append(f"{fname}: pdfinfo failed")
             else:
                 pages_line = [l for l in out.splitlines() if "Pages:" in l]
-                print(f"  [PASS] pdfinfo: Readable by Poppler ({pages_line[0].strip() if pages_line else 'Pages verified'})")
+                if fname == "compat_organized_pages.pdf" and "Pages:          3" not in out and "Pages: 3" not in " ".join(out.split()):
+                    print(f"  [FAIL] pdfinfo: Expected 3 pages in {fname}, got:\n{out}", file=sys.stderr)
+                    failures.append(f"{fname}: expected 3 pages")
+                else:
+                    print(f"  [PASS] pdfinfo: Readable by Poppler ({pages_line[0].strip() if pages_line else 'Pages verified'})")
 
             # 4. pdftoppm -r 50 (Page 1 non-blank render assertion)
             ppm_base = os.path.join(scratch_dir, f"{fname}_ppm")
@@ -271,6 +277,24 @@ def main():
                     else:
                         print("  [FAIL] pdftotext: Base text missing in annotated file", file=sys.stderr)
                         failures.append(f"{fname}: Base text missing in pdftotext")
+
+                elif fname == "compat_organized_pages.pdf":
+                    if all(m in out for m in ("PAGE 4", "PAGE 2", "PAGE 1")) and "PAGE 3" not in out:
+                        print("  [PASS] pdftotext: Organized pages contain PAGE 4, PAGE 2, PAGE 1 (PAGE 3 deleted)")
+                    else:
+                        print(f"  [FAIL] pdftotext: Unexpected page markers in {fname}: {out!r}", file=sys.stderr)
+                        failures.append(f"{fname}: Unexpected page markers in pdftotext")
+
+            if fname == "compat_organized_signed.pdf":
+                pdfsig_exe = check_tool("pdfsig", required_in_ci=False)
+                if pdfsig_exe:
+                    _, sig_out, sig_err = run_command([pdfsig_exe, fpath])
+                    combined_sig = sig_out + "\n" + sig_err
+                    if "Signature is Valid" in combined_sig:
+                        print(f"  [FAIL] pdfsig: Expected invalidated signature after rewrite, got:\n{combined_sig}", file=sys.stderr)
+                        failures.append(f"{fname}: Signature unexpectedly valid after rewrite")
+                    else:
+                        print("  [PASS] pdfsig: Signature is not valid after non-incremental rewrite (expected)")
 
                 elif fname in ("compat_form_filled.pdf", "compat_form_flattened.pdf"):
                     for val in ("CompatibilityTester", "Germany"):

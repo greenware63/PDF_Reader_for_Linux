@@ -792,6 +792,41 @@ static int dumpCompatOutputs(const std::string& outDir, const std::string& sampl
         std::cout << "  -> Preserved redaction source: " << redactBase << std::endl;
     }
 
+    // 4. Organized Pages Outputs (T44)
+    {
+        const QDir srcDir = QFileInfo(QString::fromStdString(samplePath)).dir();
+        const QString richPath = srcDir.filePath(QStringLiteral("tests/fixtures/page_org_rich.pdf"));
+        const QString signedPath = srcDir.filePath(QStringLiteral("tests/fixtures/redaction/signed.pdf"));
+
+        auto runOrganizeToFile = [](pdf::IDocument& d, const std::vector<pdf::PageSpec>& specs,
+                                    const pdf::OrganizeOptions& opts, const QString& outPath) -> bool {
+            QFile outF(outPath);
+            if (!outF.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+            const auto res = d.organizePages(specs, outF.handle(), opts);
+            outF.close();
+            return res.status == pdf::OrganizeStatus::Ok && res.bytesWritten > 0;
+        };
+
+        auto docRich = pdf::createDocument();
+        if (docRich->loadFromFile(richPath.toStdString()) != pdf::DocumentError::None ||
+            !runOrganizeToFile(*docRich, {{3, 90}, {1, 180}, {0, 0}}, {},
+                               dir.filePath(QStringLiteral("compat_organized_pages.pdf")))) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to generate compat_organized_pages.pdf" << std::endl;
+            return 1;
+        }
+
+        auto docSigned = pdf::createDocument();
+        pdf::OrganizeOptions sigOpts;
+        sigOpts.allowInvalidateSignatures = true;
+        if (docSigned->loadFromFile(signedPath.toStdString()) != pdf::DocumentError::None ||
+            !runOrganizeToFile(*docSigned, {{0, 90}}, sigOpts,
+                               dir.filePath(QStringLiteral("compat_organized_signed.pdf")))) {
+            std::cerr << "[FAIL] dumpCompatOutputs: Failed to generate compat_organized_signed.pdf" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Generated: compat_organized_pages.pdf and compat_organized_signed.pdf" << std::endl;
+    }
+
     std::cout << "[COMPAT-DUMP] All compatibility outputs successfully produced." << std::endl;
     return 0;
 }
@@ -5897,8 +5932,340 @@ int main(int argc, char* argv[]) {
         std::cout << "  -> Passed: Saved AP text, flattened extraction, and persian_name rectangle ink verified." << std::endl;
     }
 
+    // --- TEST 49: Page Organization (T44) - subset, reorder, relative rotation, dangling counts, live-doc immutability ---
+    std::cout << "[TEST 49] Testing PdfiumDocument::organizePages subset, reorder, rotation, and live-doc immutability..." << std::endl;
+    {
+        const QDir rootDir = QFileInfo(QString::fromStdString(samplePath)).dir();
+        const std::string richPath = rootDir.filePath(QStringLiteral("tests/fixtures/page_org_rich.pdf")).toStdString();
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(richPath) != pdf::DocumentError::None || doc->pageCount() != 4) {
+            std::cerr << "[FAIL] Test 49: failed to load page_org_rich.pdf" << std::endl;
+            return 1;
+        }
+
+        QTemporaryDir tdir;
+        if (!tdir.isValid()) return 1;
+        const QString out1 = tdir.filePath(QStringLiteral("org1.pdf"));
+        QFile f1(out1);
+        if (!f1.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto res1 = doc->organizePages({{3, 90}, {1, 180}, {0, 270}}, f1.handle());
+        const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        f1.close();
+
+        if (res1.status != pdf::OrganizeStatus::Ok || res1.bytesWritten == 0) {
+            std::cerr << "[FAIL] Test 49: organizePages failed with status=" << static_cast<int>(res1.status) << std::endl;
+            return 1;
+        }
+        // Page index 2 was deleted: Bookmark 3 and Link 2 on page 0 both targeted index 2.
+        if (res1.danglingOutlineCount != 1 || res1.danglingLinkCount != 1) {
+            std::cerr << "[FAIL] Test 49: expected danglingOutlineCount=1, danglingLinkCount=1, got "
+                      << res1.danglingOutlineCount << ", " << res1.danglingLinkCount << std::endl;
+            return 1;
+        }
+        std::cout << "  -> organizePages (with link scan) completed in " << elapsedUs << " us" << std::endl;
+
+        // Live document must remain completely unchanged.
+        if (doc->pageCount() != 4 ||
+            std::abs(doc->pageSizePoints(0).first - 400.0) > 1.0 ||
+            !QString::fromStdU16String(doc->getPage(0)->extractText().text).contains(QStringLiteral("PAGE 1"))) {
+            std::cerr << "[FAIL] Test 49: live document was mutated by organizePages" << std::endl;
+            return 1;
+        }
+
+        // Reload and verify organized output: sizes, text markers, and rotations.
+        auto outDoc = pdf::createDocument();
+        if (outDoc->loadFromFile(out1.toStdString()) != pdf::DocumentError::None || outDoc->pageCount() != 3) {
+            std::cerr << "[FAIL] Test 49: failed to reload org1.pdf or wrong pageCount" << std::endl;
+            return 1;
+        }
+        const struct { double w; double h; const char* marker; int rot; } expected[3] = {
+            {500.0, 700.0, "PAGE 4", 90},   // 700x500 rotated 90 deg -> 500x700 in pageSizePoints
+            {500.0, 700.0, "PAGE 2", 180},
+            {600.0, 400.0, "PAGE 1", 270},  // 400x600 rotated 270 deg -> 600x400 in pageSizePoints
+        };
+        for (int i = 0; i < 3; ++i) {
+            const auto sz = outDoc->pageSizePoints(i);
+            const QString txt = QString::fromStdU16String(outDoc->getPage(i)->extractText().text);
+            if (std::abs(sz.first - expected[i].w) > 1.0 || std::abs(sz.second - expected[i].h) > 1.0 ||
+                !txt.contains(QString::fromLatin1(expected[i].marker))) {
+                std::cerr << "[FAIL] Test 49: page " << i << " mismatch: size=(" << sz.first << "," << sz.second
+                          << ") text=" << txt.toStdString() << std::endl;
+                return 1;
+            }
+        }
+
+        // Relative rotation check: rotate page 0 (already 90) by another 90 -> 180 (back to 700x500).
+        const QString out2 = tdir.filePath(QStringLiteral("org2.pdf"));
+        QFile f2(out2);
+        if (!f2.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+        const auto res2 = outDoc->organizePages({{0, 90}}, f2.handle());
+        f2.close();
+        auto outDoc2 = pdf::createDocument();
+        if (res2.status != pdf::OrganizeStatus::Ok ||
+            outDoc2->loadFromFile(out2.toStdString()) != pdf::DocumentError::None ||
+            std::abs(outDoc2->pageSizePoints(0).first - 700.0) > 1.0 ||
+            std::abs(outDoc2->pageSizePoints(0).second - 500.0) > 1.0) {
+            std::cerr << "[FAIL] Test 49: relative rotation did not add to existing page rotation" << std::endl;
+            return 1;
+        }
+        std::cout << "  -> Passed: subset, reorder, relative rotation, dangling counts, and live-doc immutability verified." << std::endl;
+    }
+
+    // --- TEST 50: Page Organization (T44) - permission, signature, encryption, and streamed-source guards ---
+    std::cout << "[TEST 50] Testing PdfiumDocument::organizePages permission, signature, encryption, and streamed guards..." << std::endl;
+    {
+        const QDir rootDir = QFileInfo(QString::fromStdString(samplePath)).dir();
+        QTemporaryDir tdir;
+        if (!tdir.isValid()) return 1;
+
+        auto checkZeroBytes = [&](const QString& p) -> bool {
+            return QFileInfo(p).size() == 0;
+        };
+
+        // 1. R3+ assemble denied
+        {
+            auto d = pdf::createDocument();
+            const std::string p = rootDir.filePath(QStringLiteral("tests/fixtures/page_org_perm_r3_denied.pdf")).toStdString();
+            if (d->loadFromFile(p, "userpw") != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Test 50: failed to load r3_denied" << std::endl;
+                return 1;
+            }
+            const QString out = tdir.filePath(QStringLiteral("r3_denied_out.pdf"));
+            QFile f(out);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+            pdf::OrganizeOptions opts;
+            opts.allowDecrypt = true;
+            const auto res = d->organizePages({{0, 0}}, f.handle(), opts);
+            f.close();
+            if (res.status != pdf::OrganizeStatus::PermissionDenied || !checkZeroBytes(out) || d->pageCount() != 4) {
+                std::cerr << "[FAIL] Test 50: R3+ assemble denied did not return PermissionDenied with 0 bytes" << std::endl;
+                return 1;
+            }
+        }
+
+        // 2. R2 modify denied
+        {
+            auto d = pdf::createDocument();
+            const std::string p = rootDir.filePath(QStringLiteral("tests/fixtures/page_org_perm_r2_denied.pdf")).toStdString();
+            if (d->loadFromFile(p, "userpw") != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Test 50: failed to load r2_denied" << std::endl;
+                return 1;
+            }
+            const QString out = tdir.filePath(QStringLiteral("r2_denied_out.pdf"));
+            QFile f(out);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+            pdf::OrganizeOptions opts;
+            opts.allowDecrypt = true;
+            const auto res = d->organizePages({{0, 0}}, f.handle(), opts);
+            f.close();
+            if (res.status != pdf::OrganizeStatus::PermissionDenied || !checkZeroBytes(out)) {
+                std::cerr << "[FAIL] Test 50: R2 modify denied did not return PermissionDenied with 0 bytes" << std::endl;
+                return 1;
+            }
+        }
+
+        // 3. R4+ assemble allowed (with other restrictions): EncryptedNotAcknowledged then Ok with allowDecrypt -> reloads without password
+        {
+            auto d = pdf::createDocument();
+            const std::string p = rootDir.filePath(QStringLiteral("tests/fixtures/page_org_perm_r4_allowed.pdf")).toStdString();
+            if (d->loadFromFile(p, "userpw") != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Test 50: failed to load r4_allowed" << std::endl;
+                return 1;
+            }
+            const QString out1 = tdir.filePath(QStringLiteral("r4_noack.pdf"));
+            QFile f1(out1);
+            if (!f1.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+            const auto res1 = d->organizePages({{0, 0}}, f1.handle(), {});
+            f1.close();
+            if (res1.status != pdf::OrganizeStatus::EncryptedNotAcknowledged || !checkZeroBytes(out1)) {
+                std::cerr << "[FAIL] Test 50: expected EncryptedNotAcknowledged" << std::endl;
+                return 1;
+            }
+
+            const QString out2 = tdir.filePath(QStringLiteral("r4_ack.pdf"));
+            QFile f2(out2);
+            if (!f2.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+            pdf::OrganizeOptions opts;
+            opts.allowDecrypt = true;
+            const auto res2 = d->organizePages({{0, 0}}, f2.handle(), opts);
+            f2.close();
+            auto reloaded = pdf::createDocument();
+            const auto reloadErr = reloaded->loadFromFile(out2.toStdString());
+            if (res2.status != pdf::OrganizeStatus::Ok ||
+                reloadErr != pdf::DocumentError::None ||
+                reloaded->pageCount() != 1 ||
+                !reloaded->getOutline().empty()) {
+                std::cerr << "[FAIL] Test 50: allowDecrypt output failed, still requires password, or unexpectedly kept outlines (status="
+                          << static_cast<int>(res2.status) << " reloadErr=" << static_cast<int>(reloadErr)
+                          << " pages=" << reloaded->pageCount()
+                          << " outlines=" << reloaded->getOutline().size() << ")" << std::endl;
+                return 1;
+            }
+        }
+
+        // 4. Signed document: SignedNotAcknowledged then Ok with allowInvalidateSignatures
+        {
+            auto d = pdf::createDocument();
+            const std::string p = rootDir.filePath(QStringLiteral("tests/fixtures/redaction/signed.pdf")).toStdString();
+            if (d->loadFromFile(p) != pdf::DocumentError::None) return 1;
+            const QString out1 = tdir.filePath(QStringLiteral("sig_noack.pdf"));
+            QFile f1(out1);
+            if (!f1.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+            const auto res1 = d->organizePages({{0, 0}}, f1.handle(), {});
+            f1.close();
+            if (res1.status != pdf::OrganizeStatus::SignedNotAcknowledged || !checkZeroBytes(out1)) {
+                std::cerr << "[FAIL] Test 50: expected SignedNotAcknowledged" << std::endl;
+                return 1;
+            }
+
+            const QString out2 = tdir.filePath(QStringLiteral("sig_ack.pdf"));
+            QFile f2(out2);
+            if (!f2.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+            pdf::OrganizeOptions opts;
+            opts.allowInvalidateSignatures = true;
+            const auto res2 = d->organizePages({{0, 90}}, f2.handle(), opts);
+            f2.close();
+            if (res2.status != pdf::OrganizeStatus::Ok || res2.bytesWritten == 0) {
+                std::cerr << "[FAIL] Test 50: allowInvalidateSignatures failed" << std::endl;
+                return 1;
+            }
+        }
+
+        // 5. Streamed source (> threshold) -> StreamedSourceUnsupported
+        {
+            pdf::PdfiumDocument::setDescriptorStreamThresholdForTesting(64);
+            QFile srcF(rootDir.filePath(QStringLiteral("tests/fixtures/page_org_rich.pdf")));
+            if (!srcF.open(QIODevice::ReadOnly)) return 1;
+            auto d = pdf::createDocument();
+            const auto loadErr = d->loadFromDescriptor(srcF.handle(), "", false);
+            srcF.close();
+            pdf::PdfiumDocument::resetDescriptorStreamThresholdForTesting();
+            if (loadErr != pdf::DocumentError::None) {
+                std::cerr << "[FAIL] Test 50: failed to load streamed descriptor" << std::endl;
+                return 1;
+            }
+            const QString out = tdir.filePath(QStringLiteral("streamed_out.pdf"));
+            QFile f(out);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+            const auto res = d->organizePages({{0, 0}}, f.handle(), {});
+            f.close();
+            if (res.status != pdf::OrganizeStatus::StreamedSourceUnsupported || !checkZeroBytes(out)) {
+                std::cerr << "[FAIL] Test 50: expected StreamedSourceUnsupported" << std::endl;
+                return 1;
+            }
+        }
+        std::cout << "  -> Passed: permission, signature, encryption, and streamed-source guards verified." << std::endl;
+    }
+
+    // --- TEST 51: Page Organization (T44) - invalid specs and hostile fixtures ---
+    std::cout << "[TEST 51] Testing PdfiumDocument::organizePages invalid specs and hostile fixtures..." << std::endl;
+    {
+        const QDir rootDir = QFileInfo(QString::fromStdString(samplePath)).dir();
+        QTemporaryDir tdir;
+        if (!tdir.isValid()) return 1;
+
+        auto doc = pdf::createDocument();
+        if (doc->loadFromFile(rootDir.filePath(QStringLiteral("tests/fixtures/page_org_rich.pdf")).toStdString()) != pdf::DocumentError::None) {
+            return 1;
+        }
+        const std::vector<std::vector<pdf::PageSpec>> badSpecs = {
+            {},                                  // empty
+            {{0, 0}, {0, 90}},                   // duplicate
+            {{-1, 0}},                           // negative
+            {{4, 0}},                            // out of range
+            {{0, 45}},                           // bad rotation
+            {{0, -90}},                          // bad rotation
+            {{0, 360}},                          // bad rotation
+        };
+        for (size_t i = 0; i < badSpecs.size(); ++i) {
+            const QString out = tdir.filePath(QStringLiteral("bad_%1.pdf").arg(i));
+            QFile f(out);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+            const auto res = doc->organizePages(badSpecs[i], f.handle());
+            f.close();
+            if (res.status != pdf::OrganizeStatus::InvalidSpec || QFileInfo(out).size() != 0) {
+                std::cerr << "[FAIL] Test 51: bad spec " << i << " did not return InvalidSpec with 0 bytes" << std::endl;
+                return 1;
+            }
+        }
+        // Over the 10,000 cap on a >10,000-page document (kills off-by-one on kMaxOrganizedPages)
+        {
+            std::string bigPdf = "%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [";
+            constexpr int kPages = 10001;
+            std::vector<size_t> offs(static_cast<size_t>(kPages + 3), 0);
+            for (int p = 0; p < kPages; ++p) {
+                if (p > 0) bigPdf += ' ';
+                bigPdf += std::to_string(p + 3) + " 0 R";
+            }
+            bigPdf += "] /Count " + std::to_string(kPages) + " >>\nendobj\n";
+            // Fix offsets for obj 1 and 2
+            offs[1] = 9;
+            offs[2] = bigPdf.find("2 0 obj");
+            for (int p = 0; p < kPages; ++p) {
+                offs[static_cast<size_t>(p + 3)] = bigPdf.size();
+                bigPdf += std::to_string(p + 3) + " 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>\nendobj\n";
+            }
+            const size_t xrefPos = bigPdf.size();
+            bigPdf += "xref\n0 " + std::to_string(kPages + 3) + "\n0000000000 65535 f \n";
+            for (int i = 1; i <= kPages + 2; ++i) {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%010zu 00000 n \n", offs[static_cast<size_t>(i)]);
+                bigPdf += buf;
+            }
+            bigPdf += "trailer\n<< /Size " + std::to_string(kPages + 3) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xrefPos) + "\n%%EOF\n";
+
+            auto bigDoc = pdf::createDocument();
+            if (bigDoc->loadFromMemory(bigPdf.data(), bigPdf.size()) != pdf::DocumentError::None ||
+                bigDoc->pageCount() != kPages) {
+                std::cerr << "[FAIL] Test 51: failed to load 10,001-page PDF" << std::endl;
+                return 1;
+            }
+            std::vector<pdf::PageSpec> overCap;
+            overCap.reserve(kPages);
+            for (int p = 0; p < kPages; ++p) overCap.push_back({p, 0});
+            const QString out = tdir.filePath(QStringLiteral("overcap.pdf"));
+            QFile f(out);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+            const auto res = bigDoc->organizePages(overCap, f.handle());
+            f.close();
+            if (res.status != pdf::OrganizeStatus::InvalidSpec || QFileInfo(out).size() != 0) {
+                std::cerr << "[FAIL] Test 51: over-cap spec did not return InvalidSpec" << std::endl;
+                return 1;
+            }
+        }
+        // Bad fd
+        if (doc->organizePages({{0, 0}}, -1).status != pdf::OrganizeStatus::InvalidSpec) {
+            std::cerr << "[FAIL] Test 51: writeFd=-1 did not return InvalidSpec" << std::endl;
+            return 1;
+        }
+
+        // Hostile fixtures: no crash or hang
+        const char* hostileNames[] = {
+            "tests/fixtures/redaction/pagetree_loop.pdf",
+            "tests/fixtures/redaction/lying_length.pdf",
+            "tests/fixtures/redaction/form_recursion.pdf",
+            "tests/fixtures/redaction/huge_page.pdf",
+        };
+        for (const char* name : hostileNames) {
+            auto hd = pdf::createDocument();
+            if (hd->loadFromFile(rootDir.filePath(QString::fromLatin1(name)).toStdString()) == pdf::DocumentError::None &&
+                hd->pageCount() > 0) {
+                const QString out = tdir.filePath(QStringLiteral("hostile_%1.pdf").arg(QFileInfo(QString::fromLatin1(name)).baseName()));
+                QFile f(out);
+                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    (void)hd->organizePages({{0, 0}}, f.handle());
+                    f.close();
+                }
+            }
+        }
+        std::cout << "  -> Passed: invalid specs and hostile fixtures handled cleanly." << std::endl;
+    }
+
     std::cout << "========================================" << std::endl;
-    std::cout << " ALL 48 TESTS PASSED SUCCESSFULLY!      " << std::endl;
+    std::cout << " ALL 51 TESTS PASSED SUCCESSFULLY!      " << std::endl;
     std::cout << "========================================" << std::endl;
     return 0;
 }

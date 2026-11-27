@@ -17,21 +17,23 @@ import sys
 import tempfile
 
 
-def normalize_pdf(qpdf_exe, in_path, out_path):
+def normalize_pdf(qpdf_exe, in_path, out_path, password=None):
     """Normalize a PDF via qpdf --qdf with uncompressed streams, no original object IDs,
     and strip the trailer line matching `^  /ID \\[` so that differing compression or ID
     generation does not cause false-positive drift failures.
     """
     tmp_qdf = out_path + ".raw.qdf"
-    cmd = [
-        qpdf_exe,
+    cmd = [qpdf_exe]
+    if password:
+        cmd.extend(["--decrypt", f"--password={password}"])
+    cmd.extend([
         "--qdf",
         "--object-streams=disable",
         "--no-original-object-ids",
         "--stream-data=uncompress",
         in_path,
         tmp_qdf,
-    ]
+    ])
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     # qpdf exit codes: 0 = ok, 3 = succeeded with warnings (output is still written), 2 = error.
     if res.returncode not in (0, 3):
@@ -129,13 +131,13 @@ def main():
         spec = importlib.util.spec_from_file_location("hostile_form_generator", generator_script)
         generator = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(generator)
-        fixtures = [(entry[0], bool(entry[2])) for entry in generator.FIXTURES]
+        fixtures = [(entry[0], entry[2]) for entry in generator.FIXTURES]
         if not fixtures:
             print("Error: generator registry FIXTURES is empty", file=sys.stderr)
             return 1
 
         mismatches = []
-        for name, compressed_by_qpdf in fixtures:
+        for name, compress_spec in fixtures:
             committed_pdf = os.path.join(fixtures_dir, name)
             generated_pdf = os.path.join(regen_dir, name)
 
@@ -148,7 +150,7 @@ def main():
                 mismatches.append(name)
                 continue
 
-            if not compressed_by_qpdf:
+            if not compress_spec:
                 if filecmp.cmp(committed_pdf, generated_pdf, shallow=False):
                     print(f"  OK (raw bytes identical, written without qpdf): {name}")
                 else:
@@ -157,12 +159,13 @@ def main():
                     mismatches.append(name)
                 continue
 
+            pw = "userpw" if isinstance(compress_spec, tuple) else None
             norm_committed = os.path.join(norm_dir, name + ".committed.norm.qdf")
             norm_generated = os.path.join(norm_dir, name + ".generated.norm.qdf")
 
             try:
-                normalize_pdf(qpdf_exe, committed_pdf, norm_committed)
-                normalize_pdf(qpdf_exe, generated_pdf, norm_generated)
+                normalize_pdf(qpdf_exe, committed_pdf, norm_committed, password=pw)
+                normalize_pdf(qpdf_exe, generated_pdf, norm_generated, password=pw)
             except Exception as e:
                 print(f"Error normalizing {name}: {e}", file=sys.stderr)
                 mismatches.append(name)
