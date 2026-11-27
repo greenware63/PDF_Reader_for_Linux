@@ -6096,10 +6096,12 @@ int main(int argc, char* argv[]) {
             const auto reloadErr = reloaded->loadFromFile(out2.toStdString());
             if (res2.status != pdf::OrganizeStatus::Ok ||
                 reloadErr != pdf::DocumentError::None ||
-                reloaded->pageCount() != 1) {
-                std::cerr << "[FAIL] Test 50: allowDecrypt output failed or still requires password (status="
+                reloaded->pageCount() != 1 ||
+                !reloaded->getOutline().empty()) {
+                std::cerr << "[FAIL] Test 50: allowDecrypt output failed, still requires password, or unexpectedly kept outlines (status="
                           << static_cast<int>(res2.status) << " reloadErr=" << static_cast<int>(reloadErr)
-                          << " pages=" << reloaded->pageCount() << ")" << std::endl;
+                          << " pages=" << reloaded->pageCount()
+                          << " outlines=" << reloaded->getOutline().size() << ")" << std::endl;
                 return 1;
             }
         }
