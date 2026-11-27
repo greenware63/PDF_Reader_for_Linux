@@ -39,6 +39,10 @@ public:
     FlattenResult flatten(FlattenMode mode = FlattenMode::NormalDisplay) override;
     bool saveAsCopy(int writeFd, bool incremental, uint64_t& outBytesWritten,
                     std::function<void(uint64_t)> progressCallback = nullptr) override;
+    OrganizeResult organizePages(const std::vector<PageSpec>& pages,
+                                 int writeFd,
+                                 const OrganizeOptions& options = {},
+                                 std::function<void(uint64_t)> progressCallback = nullptr) const override;
     int signatureCount() const override;
     void close() override;
     bool isOpen() const override { return m_doc != nullptr; }
@@ -50,6 +54,9 @@ private:
 
     DocumentHandle m_doc{nullptr};
     std::shared_ptr<FormEnv> m_form;
+    std::shared_ptr<const std::vector<uint8_t>> m_sourceBuffer;
+    std::string m_sourcePassword;
+    bool m_isStreamedSource{false};
     DocumentError m_lastError{DocumentError::None};
 };
 

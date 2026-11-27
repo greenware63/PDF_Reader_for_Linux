@@ -16,7 +16,7 @@ An advanced, security-focused PDF reader and editor for Linux (C++20, Qt 6, PDFi
 | **Sandboxed worker (Landlock ABI 1–5, Seccomp BPF, rlimits, SCM_RIGHTS)** | **Supported** | [`test_worker_ipc.cpp`](test_worker_ipc.cpp) (Tests 8, 10, 15, 16, 18, 19), [`docs/threat_model.md`](docs/threat_model.md) |
 | **Digital signatures** | **Not supported** | [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) (invalidated on redaction/incremental save) |
 | **OCR (Optical Character Recognition)** | **Not supported** | [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) |
-| **Page organization (Insert, delete, reorder, rotate pages on disk)** | **Not supported** | [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) (view rotation only) |
+| **Page organization (Insert, delete, reorder, rotate pages on disk)** | **Partial** | Engine `organizePages` (delete, reorder, rotate on scratch copy with permission/signature/encryption guards) verified in [`test_render.cpp`](test_render.cpp) (Tests 49–51); IPC, UI, and insert/merge pending (see [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md)) |
 | **External viewer compatibility (Acrobat, Foxit, Okular)** | **Unverified** | Tracked in [`docs/EXTERNAL_VIEWER_CHECKLIST.md`](docs/EXTERNAL_VIEWER_CHECKLIST.md) |
 
 For an evidence-backed capability audit against commercial PDF workstations and the phased implementation plan, see [`docs/PARITY_MATRIX.md`](docs/PARITY_MATRIX.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md).

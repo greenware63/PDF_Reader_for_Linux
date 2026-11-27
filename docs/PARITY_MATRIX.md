@@ -9,8 +9,8 @@ This matrix audits every capability advertised on the [PDF Reader Pro Features C
 | Status | Count | Description |
 | :--- | :---: | :--- |
 | **Supported** | **11** | Fully implemented in the engine/UI with verified automated test coverage. |
-| **Partial** | **6** | Implemented with specific specification or UI limitations recorded below. |
-| **Not supported** | **36** | Not currently implemented in the engine or UI. |
+| **Partial** | **8** | Implemented with specific specification or UI limitations recorded below. |
+| **Not supported** | **34** | Not currently implemented in the engine or UI. |
 | **Out of scope** | **5** | Deferred by architectural policy until core document features are complete (AI features). |
 | **Unverified** | **1** | Interoperability across external desktop viewers (tracked in [`docs/EXTERNAL_VIEWER_CHECKLIST.md`](EXTERNAL_VIEWER_CHECKLIST.md); marked "Not yet run"). |
 | **Total Features Audited** | **59** | Complete vendor catalog feature set (58) plus external desktop viewer interoperability (1). |
@@ -58,11 +58,11 @@ This matrix audits every capability advertised on the [PDF Reader Pro Features C
 | **Area OCR** | OCR | **Not supported** | [`README.md`](../README.md) | Rectangular marquee OCR extraction is not supported; verified by search (`git grep -i "areaocr\|marqueeocr" src/` returns no matches). |
 | **Batch OCR** | OCR | **Not supported** | [`README.md`](../README.md) | Batch OCR processing is not supported; verified by search (`git grep -i "batchocr" src/` returns no matches). |
 | **Insert pages** | Pages | **Not supported** | [`README.md`](../README.md) | Inserting pages from external PDFs or blank pages is not supported; verified by search (`git grep -i "insertpage\|importpage" src/engine/` returns no matches). |
-| **Delete pages** | Pages | **Not supported** | [`README.md`](../README.md) | Deleting pages from PDF structure on disk is not supported; verified by search (`git grep -i "deletepage" src/engine/` returns no matches). |
+| **Delete pages** | Pages | **Partial** | [`src/engine/PdfiumDocument.cpp`](../src/engine/PdfiumDocument.cpp) (`PdfiumDocument::organizePages`), [`test_render.cpp`](../test_render.cpp) (`[TEST 49] Testing PdfiumDocument::organizePages subset, reorder, rotation, and live-doc immutability...`), [`test_render.cpp`](../test_render.cpp) (`[TEST 50] Testing PdfiumDocument::organizePages permission, signature, encryption, and streamed guards...`) | Engine-level subset/delete via scratch copy and descriptor write implemented with permission, signature, and encryption guards; IPC and UI pending (Slices 1b/3). |
 | **Split pages** | Pages | **Not supported** | [`README.md`](../README.md) | Splitting multi-page documents into separate PDF files is not supported; verified by search (`git grep -i "splitdocument\|splitpages" src/` returns no matches). |
 | **Replace pages** | Pages | **Not supported** | [`README.md`](../README.md) | Replacing specific pages with external pages is not supported; verified by search (`git grep -i "replacepage" src/` returns no matches). |
 | **Combine pages** | Pages | **Not supported** | [`README.md`](../README.md) | Combining multiple PDF files into a single document is not supported; verified by search (`git grep -i "combinepages\|concatpages" src/` returns no matches). |
-| **Reorder pages** | Pages | **Not supported** | [`README.md`](../README.md) | Drag-and-drop page reordering in thumbnail list is not supported (thumbnail panel is navigation-only); verified by search (`git grep -i "movepage\|reorderpage" src/` returns no matches). |
+| **Reorder pages** | Pages | **Partial** | [`src/engine/PdfiumDocument.cpp`](../src/engine/PdfiumDocument.cpp) (`PdfiumDocument::organizePages`), [`test_render.cpp`](../test_render.cpp) (`[TEST 49] Testing PdfiumDocument::organizePages subset, reorder, rotation, and live-doc immutability...`), [`test_render.cpp`](../test_render.cpp) (`[TEST 51] Testing PdfiumDocument::organizePages invalid specs and hostile fixtures...`) | Engine-level reorder and relative rotation via `FPDF_MovePages` / `FPDFPage_SetRotation` implemented on scratch copy; IPC and UI pending (Slices 1b/3). |
 | **Crop pages** | Pages | **Not supported** | [`README.md`](../README.md) | Modifying page boundary boxes (`/MediaBox`, `/CropBox`) on disk is not supported; verified by search (`git grep -i "croppage\|setcropbox" src/` returns no matches). |
 | **Merge PDFs** | Pages | **Not supported** | [`README.md`](../README.md) | Multi-document merging is not supported; verified by search (`git grep -i "mergepdf\|mergedocuments" src/` returns no matches). |
 | **Batch processing (Pages)** | Pages | **Not supported** | [`README.md`](../README.md) | Batch page manipulation operations are not supported; verified by search (`git grep -i "batchpage" src/` returns no matches). |

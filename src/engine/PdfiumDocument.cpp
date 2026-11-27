@@ -1,5 +1,6 @@
 #include "PdfiumDocument.h"
 #include <fpdf_doc.h>
+#include <fpdf_annot.h>
 #include <fpdf_edit.h>
 #include <fpdf_transformpage.h>
 #include <fpdf_ppo.h>
@@ -15,6 +16,8 @@
 #include <vector>
 #include <cmath>
 #include <cerrno>
+#include <fstream>
+#include <queue>
 
 #ifdef _WIN32
 #include <io.h>
@@ -189,6 +192,25 @@ DocumentError PdfiumDocument::loadFromFile(const std::string& filePath, const st
         return m_lastError;
     }
 
+    // Retain immutable source bytes for scratch-based page organization (never re-open from path later).
+    std::shared_ptr<const std::vector<uint8_t>> retainedBuffer;
+    bool isStreamed = false;
+    {
+        std::ifstream ifs(filePath, std::ios::binary | std::ios::ate);
+        if (ifs.good()) {
+            const auto sz = static_cast<size_t>(ifs.tellg());
+            if (sz > s_streamThreshold.load()) {
+                isStreamed = true;
+            } else if (sz > 0) {
+                auto buf = std::make_shared<std::vector<uint8_t>>(sz);
+                ifs.seekg(0, std::ios::beg);
+                if (ifs.read(reinterpret_cast<char*>(buf->data()), static_cast<std::streamsize>(sz))) {
+                    retainedBuffer = std::move(buf);
+                }
+            }
+        }
+    }
+
     // Success: atomically swap active document handle
     auto env = makeFormEnv(newDoc);
     m_doc = DocumentHandle(newDoc, [env](FPDF_DOCUMENT d) {
@@ -200,6 +222,9 @@ DocumentError PdfiumDocument::loadFromFile(const std::string& filePath, const st
         }
     });
     m_form = env;
+    m_sourceBuffer = std::move(retainedBuffer);
+    m_sourcePassword = password;
+    m_isStreamedSource = isStreamed;
     m_lastError = DocumentError::None;
     return DocumentError::None;
 }
@@ -247,6 +272,9 @@ DocumentError PdfiumDocument::loadFromBuffer(std::shared_ptr<const std::vector<u
     // Tie memory buffer lifetime directly to DocumentHandle deleter.
     // Keeps memory valid as long as either PdfiumDocument or any PdfiumPage exists!
     auto env = makeFormEnv(newDoc);
+    m_sourceBuffer = bufferCopy;
+    m_sourcePassword = password;
+    m_isStreamedSource = false;
     m_doc = DocumentHandle(newDoc, [buf = std::move(bufferCopy), env](FPDF_DOCUMENT d) {
         if (d) {
             std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
@@ -366,6 +394,9 @@ DocumentError PdfiumDocument::loadFromDescriptor(int fd, const std::string& pass
             FPDF_CloseDocument(d);
         }
     });
+    m_sourceBuffer.reset();
+    m_sourcePassword = password;
+    m_isStreamedSource = true;
     m_lastError = DocumentError::None;
     return DocumentError::None;
 }
@@ -598,6 +629,9 @@ PixelBuffer PdfiumDocument::renderThumbnail(int pageIndex, int targetWidth) {
 void PdfiumDocument::close() {
     m_form.reset();
     m_doc.reset();
+    m_sourceBuffer.reset();
+    m_sourcePassword.clear();
+    m_isStreamedSource = false;
     m_lastError = DocumentError::None;
 }
 
@@ -778,6 +812,257 @@ int PdfiumDocument::signatureCount() const {
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
     if (!m_doc) return 0;
     return FPDF_GetSignatureCount(m_doc.get());
+}
+
+OrganizeResult PdfiumDocument::organizePages(const std::vector<PageSpec>& pages,
+                                             int writeFd,
+                                             const OrganizeOptions& options,
+                                             std::function<void(uint64_t)> progressCallback) const {
+    OrganizeResult result;
+    std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
+    if (!m_doc) {
+        result.status = OrganizeStatus::InternalError;
+        return result;
+    }
+
+    // 1. Validate spec and fd before checking guards or touching writeFd.
+    const int srcCount = FPDF_GetPageCount(m_doc.get());
+    if (writeFd < 0 || srcCount <= 0 || pages.empty() ||
+        pages.size() > kMaxOrganizedPages || pages.size() > static_cast<size_t>(srcCount)) {
+        result.status = OrganizeStatus::InvalidSpec;
+        return result;
+    }
+
+    std::vector<bool> keep(static_cast<size_t>(srcCount), false);
+    for (const auto& spec : pages) {
+        if (spec.sourceIndex < 0 || spec.sourceIndex >= srcCount) {
+            result.status = OrganizeStatus::InvalidSpec;
+            return result;
+        }
+        if (keep[static_cast<size_t>(spec.sourceIndex)]) {
+            result.status = OrganizeStatus::InvalidSpec;
+            return result;
+        }
+        if (spec.rotationDegrees != 0 && spec.rotationDegrees != 90 &&
+            spec.rotationDegrees != 180 && spec.rotationDegrees != 270) {
+            result.status = OrganizeStatus::InvalidSpec;
+            return result;
+        }
+        keep[static_cast<size_t>(spec.sourceIndex)] = true;
+    }
+
+    // 2. Guards in order: permissions -> signatures -> encrypted -> streamed source.
+    const int secRev = FPDF_GetSecurityHandlerRevision(m_doc.get());
+    if (secRev != -1) {
+        const unsigned long perms = FPDF_GetDocPermissions(m_doc.get());
+        // ISO 32000-1 Table 22 (1-based bits): R3+ requires assemble (bit 11 = 1<<10); R2 requires modify (bit 4 = 1<<3).
+        const unsigned long requiredBit = (secRev >= 3) ? (1UL << 10) : (1UL << 3);
+        if ((perms & requiredBit) == 0) {
+            result.status = OrganizeStatus::PermissionDenied;
+            return result;
+        }
+    }
+
+    if (FPDF_GetSignatureCount(m_doc.get()) > 0 && !options.allowInvalidateSignatures) {
+        result.status = OrganizeStatus::SignedNotAcknowledged;
+        return result;
+    }
+
+    if (secRev != -1 && !options.allowDecrypt) {
+        result.status = OrganizeStatus::EncryptedNotAcknowledged;
+        return result;
+    }
+
+    if (m_isStreamedSource || !m_sourceBuffer || m_sourceBuffer->empty()) {
+        result.status = OrganizeStatus::StreamedSourceUnsupported;
+        return result;
+    }
+
+    // 3. Open scratch document from retained immutable source bytes and password (never from a path).
+    const char* pwd = m_sourcePassword.empty() ? nullptr : m_sourcePassword.c_str();
+    FPDF_DOCUMENT scratchDoc = FPDF_LoadMemDocument64(m_sourceBuffer->data(), m_sourceBuffer->size(), pwd);
+    if (!scratchDoc) {
+        result.status = OrganizeStatus::InternalError;
+        return result;
+    }
+    struct ScratchGuard {
+        FPDF_DOCUMENT doc;
+        ~ScratchGuard() {
+            if (doc) FPDF_CloseDocument(doc);
+        }
+    } scratchGuard{scratchDoc};
+
+    if (FPDF_GetPageCount(scratchDoc) != srcCount) {
+        result.status = OrganizeStatus::InternalError;
+        return result;
+    }
+
+    // 4a. Delete unlisted pages from highest index to lowest so remaining indices stay valid.
+    for (int i = srcCount - 1; i >= 0; --i) {
+        if (!keep[static_cast<size_t>(i)]) {
+            FPDFPage_Delete(scratchDoc, i);
+        }
+    }
+
+    const int keptCount = static_cast<int>(pages.size());
+    if (FPDF_GetPageCount(scratchDoc) != keptCount) {
+        result.status = OrganizeStatus::InternalError;
+        return result;
+    }
+
+    // 4b. Map kept source indices to post-delete indices and reorder if not already ascending.
+    std::vector<int> postDeleteIndex(static_cast<size_t>(srcCount), -1);
+    int nextIdx = 0;
+    for (int i = 0; i < srcCount; ++i) {
+        if (keep[static_cast<size_t>(i)]) {
+            postDeleteIndex[static_cast<size_t>(i)] = nextIdx++;
+        }
+    }
+
+    std::vector<int> targetOrder;
+    targetOrder.reserve(pages.size());
+    bool needsMove = false;
+    for (int i = 0; i < keptCount; ++i) {
+        const int mapped = postDeleteIndex[static_cast<size_t>(pages[static_cast<size_t>(i)].sourceIndex)];
+        if (mapped != i) {
+            needsMove = true;
+        }
+        targetOrder.push_back(mapped);
+    }
+
+    if (needsMove) {
+        if (!FPDF_MovePages(scratchDoc, targetOrder.data(), static_cast<unsigned long>(targetOrder.size()), 0)) {
+            result.status = OrganizeStatus::InternalError;
+            return result;
+        }
+    }
+
+    // 4c. Apply relative rotation (added to each page's existing rotation).
+    for (int i = 0; i < keptCount; ++i) {
+        const int deg = pages[static_cast<size_t>(i)].rotationDegrees;
+        if (deg == 0) {
+            continue;
+        }
+        FPDF_PAGE pg = FPDF_LoadPage(scratchDoc, i);
+        if (!pg) {
+            result.status = OrganizeStatus::InternalError;
+            return result;
+        }
+        int cur = FPDFPage_GetRotation(pg);
+        if (cur < 0) cur = 0;
+        const int delta = deg / 90;
+        FPDFPage_SetRotation(pg, (cur + delta) % 4);
+        FPDF_ClosePage(pg);
+    }
+
+    // 5a. Post-pass: count dangling outline items (cycle-safe, capped).
+    constexpr int kMaxOutlineNodes = 10000;
+    int outlineVisitedCount = 0;
+    std::unordered_set<FPDF_BOOKMARK> visitedBookmarks;
+    std::queue<FPDF_BOOKMARK> bmQueue;
+    for (FPDF_BOOKMARK top = FPDFBookmark_GetFirstChild(scratchDoc, nullptr);
+         top && outlineVisitedCount < kMaxOutlineNodes;
+         top = FPDFBookmark_GetNextSibling(scratchDoc, top)) {
+        if (visitedBookmarks.insert(top).second) {
+            bmQueue.push(top);
+            ++outlineVisitedCount;
+        } else {
+            break;
+        }
+    }
+    while (!bmQueue.empty()) {
+        FPDF_BOOKMARK bm = bmQueue.front();
+        bmQueue.pop();
+
+        FPDF_DEST dest = FPDFBookmark_GetDest(scratchDoc, bm);
+        if (!dest) {
+            FPDF_ACTION act = FPDFBookmark_GetAction(bm);
+            if (act) {
+                dest = FPDFAction_GetDest(scratchDoc, act);
+            }
+        }
+        if (dest && FPDFDest_GetDestPageIndex(scratchDoc, dest) < 0) {
+            ++result.danglingOutlineCount;
+        }
+
+        for (FPDF_BOOKMARK child = FPDFBookmark_GetFirstChild(scratchDoc, bm);
+             child && outlineVisitedCount < kMaxOutlineNodes;
+             child = FPDFBookmark_GetNextSibling(scratchDoc, child)) {
+            if (visitedBookmarks.insert(child).second) {
+                bmQueue.push(child);
+                ++outlineVisitedCount;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 5b. Post-pass: count dangling /Link annotations on kept pages (capped).
+    constexpr int kMaxLinkScanAnnotations = 50000;
+    int scannedAnnots = 0;
+    for (int i = 0; i < keptCount && scannedAnnots < kMaxLinkScanAnnotations; ++i) {
+        FPDF_PAGE pg = FPDF_LoadPage(scratchDoc, i);
+        if (!pg) {
+            continue;
+        }
+        const int annotCount = FPDFPage_GetAnnotCount(pg);
+        for (int a = 0; a < annotCount && scannedAnnots < kMaxLinkScanAnnotations; ++a) {
+            ++scannedAnnots;
+            FPDF_ANNOTATION annot = FPDFPage_GetAnnot(pg, a);
+            if (!annot) {
+                continue;
+            }
+            if (FPDFAnnot_GetSubtype(annot) == FPDF_ANNOT_LINK) {
+                FPDF_LINK link = FPDFAnnot_GetLink(annot);
+                if (link) {
+                    FPDF_DEST dest = FPDFLink_GetDest(scratchDoc, link);
+                    if (!dest) {
+                        FPDF_ACTION act = FPDFLink_GetAction(link);
+                        if (act) {
+                            dest = FPDFAction_GetDest(scratchDoc, act);
+                        }
+                    }
+                    if (dest && FPDFDest_GetDestPageIndex(scratchDoc, dest) < 0) {
+                        ++result.danglingLinkCount;
+                    }
+                }
+            }
+            FPDFPage_CloseAnnot(annot);
+        }
+        FPDF_ClosePage(pg);
+    }
+
+    // 6. Save non-incremental copy to writeFd.
+    // Note: FPDF_SaveAsCopy on an encrypted scratchDoc preserves /Encrypt, so when allowDecrypt
+    // is acknowledged for an encrypted source, import the organized pages into a fresh unencrypted doc.
+    FPDF_DOCUMENT docToSave = scratchDoc;
+    FPDF_DOCUMENT decryptedDoc = nullptr;
+    struct DecryptedGuard {
+        FPDF_DOCUMENT& doc;
+        ~DecryptedGuard() {
+            if (doc) FPDF_CloseDocument(doc);
+        }
+    } decryptedGuard{decryptedDoc};
+
+    if (secRev != -1) {
+        decryptedDoc = FPDF_CreateNewDocument();
+        if (!decryptedDoc || !FPDF_ImportPagesByIndex(decryptedDoc, scratchDoc, nullptr, 0, 0)) {
+            result.status = OrganizeStatus::SaveFailed;
+            return result;
+        }
+        docToSave = decryptedDoc;
+    }
+
+    FdWriter writer(writeFd, std::move(progressCallback));
+    if (FPDF_SaveAsCopy(docToSave, &writer, FPDF_NO_INCREMENTAL) == 0 ||
+        writer.failed || writer.bytesWritten == 0) {
+        result.status = OrganizeStatus::SaveFailed;
+        return result;
+    }
+
+    result.status = OrganizeStatus::Ok;
+    result.bytesWritten = writer.bytesWritten;
+    return result;
 }
 
 std::unique_ptr<IDocument> createDocument() {

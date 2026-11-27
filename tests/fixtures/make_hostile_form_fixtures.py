@@ -411,6 +411,66 @@ def identity_and_topology():
     return f.finish()
 
 
+def page_org_rich():
+    """4-page PDF with unique page sizes, text markers ('PAGE 1'..'PAGE 4'), outlines, and /Link annots."""
+    sizes = [(400, 600), (500, 700), (612, 792), (700, 500)]
+    f = Pdf()
+    cat = f.reserve()
+    pages_id = f.reserve()
+    font = f.add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    outlines_id = f.reserve()
+
+    page_ids = [f.reserve() for _ in sizes]
+    bm_ids = [f.reserve() for _ in sizes]
+    link1 = f.add(b"<< /Type /Annot /Subtype /Link /Rect [72 400 200 430] /Border [0 0 0] /Dest [%d 0 R /Fit] >>" % page_ids[1])
+    link2 = f.add(b"<< /Type /Annot /Subtype /Link /Rect [72 350 200 380] /Border [0 0 0] /Dest [%d 0 R /Fit] >>" % page_ids[2])
+
+    for i, (w, h) in enumerate(sizes):
+        stream = ("BT /F1 18 Tf 72 %d Td (PAGE %d) Tj ET" % (h - 72, i + 1)).encode("ascii")
+        c_id = f.add(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
+        annots_part = b" /Annots [%d 0 R %d 0 R]" % (link1, link2) if i == 0 else b""
+        f.objs[page_ids[i] - 1] = (
+            b"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d] /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R%s >>"
+            % (pages_id, w, h, font, c_id, annots_part)
+        )
+
+    for i in range(len(sizes)):
+        prev_part = b" /Prev %d 0 R" % bm_ids[i - 1] if i > 0 else b""
+        next_part = b" /Next %d 0 R" % bm_ids[i + 1] if i + 1 < len(sizes) else b""
+        f.objs[bm_ids[i] - 1] = (
+            b"<< /Title (Bookmark %d) /Parent %d 0 R%s%s /Dest [%d 0 R /Fit] >>"
+            % (i + 1, outlines_id, prev_part, next_part, page_ids[i])
+        )
+
+    f.objs[outlines_id - 1] = b"<< /Type /Outlines /First %d 0 R /Last %d 0 R /Count %d >>" % (
+        bm_ids[0], bm_ids[-1], len(sizes)
+    )
+    kids = b" ".join(b"%d 0 R" % pid for pid in page_ids)
+    f.objs[pages_id - 1] = b"<< /Type /Pages /Kids [%s] /Count %d >>" % (kids, len(page_ids))
+    f.objs[cat - 1] = b"<< /Type /Catalog /Pages %d 0 R /Outlines %d 0 R >>" % (pages_id, outlines_id)
+    return f.build(cat)
+
+
+def qpdf_encrypt(raw_bytes, out_path, key_bits, extra_flags):
+    tmp = out_path + ".tmp.pdf"
+    with open(tmp, "wb") as fh:
+        fh.write(raw_bytes)
+    try:
+        cmd = ["qpdf"]
+        if key_bits < 256:
+            cmd.append("--allow-weak-crypto")
+        cmd.extend(["--encrypt", "userpw", "ownerpw", str(key_bits), *extra_flags, "--", tmp, out_path])
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 # (file name, builder, compress with qpdf). The malformed fixture is written as it is: qpdf cannot represent integers
 # beyond 64 bits and would silently turn those objects into null, which would defeat the point of the fixture.
 FIXTURES = [
@@ -423,6 +483,10 @@ FIXTURES = [
     ("hostile_form_long_names.pdf", long_names, True),
     ("hostile_form_cycles_and_malformed.pdf", cycles_and_malformed, False),
     ("forms_identity_and_topology.pdf", identity_and_topology, True),
+    ("page_org_rich.pdf", page_org_rich, True),
+    ("page_org_perm_r3_denied.pdf", page_org_rich, (256, ["--assemble=n", "--modify-other=n"])),
+    ("page_org_perm_r4_allowed.pdf", page_org_rich, (256, ["--assemble=y", "--modify-other=n"])),
+    ("page_org_perm_r2_denied.pdf", page_org_rich, (40, ["--modify=n"])),
 ]
 
 
@@ -431,7 +495,10 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     for name, build, compress in FIXTURES:
         path = os.path.join(outdir, name)
-        if compress:
+        if isinstance(compress, tuple):
+            key_bits, flags = compress
+            qpdf_encrypt(build(), path, key_bits, flags)
+        elif compress:
             qpdf_compress(build(), path)
         else:
             with open(path, "wb") as fh:
