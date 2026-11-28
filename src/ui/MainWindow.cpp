@@ -38,8 +38,16 @@
 #include <QPointer>
 #include <QFileInfo>
 #include <QFile>
+#include <QTemporaryFile>
 #include <QCryptographicHash>
+#include "OrganizePagesDialog.h"
 #include "RedactionFileSafety.h"
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace ui {
 
@@ -248,8 +256,8 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (m_redactionBusy) {
-        // A burn-in redaction is waiting on the worker and still holds this window's viewer.
+    if (m_workerBusy) {
+        // A worker operation (redaction or page organization) is in flight and holds this window's viewer.
         event->ignore();
         return;
     }
@@ -523,6 +531,9 @@ void MainWindow::setupActions() {
     exportPdfAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P));
 
     fileMenu->addAction(tr("Export &Flattened PDF..."), this, &MainWindow::exportFlattenedPdfAction);
+
+    m_organizePagesAction = fileMenu->addAction(tr("&Organize Pages..."), this, &MainWindow::organizePages);
+    m_organizePagesAction->setEnabled(false);
 
     fileMenu->addSeparator();
     QAction* closeAction = fileMenu->addAction(tr("&Close Tab"), this, &MainWindow::closeCurrentTab);
@@ -1013,7 +1024,7 @@ void MainWindow::closeCurrentTab() {
 }
 
 void MainWindow::closeTab(int index) {
-    if (m_redactionBusy) {
+    if (m_workerBusy) {
         return;
     }
     if (!m_docTabs || index < 0 || index >= m_docTabs->count()) {
@@ -1061,6 +1072,7 @@ void MainWindow::onCurrentTabChanged(int index) {
     if (index < 0 || !m_docTabs) {
         updateStickyNoteAction();
         onEditLogDirtyChanged(false);
+        updateOrganizePagesAction();
         return;
     }
     if (m_viewer && m_viewer->isDocumentOpen()) {
@@ -1070,9 +1082,11 @@ void MainWindow::onCurrentTabChanged(int index) {
     if (!m_viewer) {
         updateStickyNoteAction();
         onEditLogDirtyChanged(false);
+        updateOrganizePagesAction();
         return;
     }
     onEditLogDirtyChanged(m_viewer->editLog().isDirty());
+    updateOrganizePagesAction();
 
     if (m_thumbnailWidget) {
         m_thumbnailWidget->setViewer(m_viewer);
@@ -1468,6 +1482,7 @@ void MainWindow::onDocumentLoaded(const QString& title, int totalPages) {
 
     if (senderViewer == currentViewer()) {
         updateStickyNoteAction();
+        updateOrganizePagesAction();
         closePasswordDialog();
         if (m_findBar) {
             m_findBar->clear();
@@ -1800,8 +1815,8 @@ void MainWindow::applyAndSaveRedactions() {
     {
         struct BusyGuard {
             MainWindow* w;
-            explicit BusyGuard(MainWindow* win) : w(win) { w->m_redactionBusy = true; w->setEnabled(false); }
-            ~BusyGuard() { w->setEnabled(true); w->m_redactionBusy = false; }
+            explicit BusyGuard(MainWindow* win) : w(win) { w->m_workerBusy = true; w->setEnabled(false); }
+            ~BusyGuard() { w->setEnabled(true); w->m_workerBusy = false; }
         } busy(this);
         statusBar()->showMessage(tr("Applying burn-in redaction in sandboxed worker…"));
         QApplication::setOverrideCursor(Qt::WaitCursor);
@@ -2017,6 +2032,274 @@ void MainWindow::redoEdit() {
 void MainWindow::onEditLogDirtyChanged(bool dirty) {
     if (m_saveAction) {
         m_saveAction->setEnabled(dirty);
+    }
+    updateOrganizePagesAction();
+}
+
+void MainWindow::updateOrganizePagesAction() {
+    if (!m_organizePagesAction) {
+        return;
+    }
+    auto* v = currentViewer();
+    const bool enabled = v && v->isDocumentOpen() &&
+                         !v->isSaveInProgress() && !v->isEditInProgress() && !m_workerBusy;
+    m_organizePagesAction->setEnabled(enabled);
+}
+
+bool MainWindow::validateOrganizedOutput(const QString& filePath,
+                                         uint64_t expectedBytes,
+                                         int expectedPageCount,
+                                         QByteArray& outBytes,
+                                         QString* error) {
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (error) *error = tr("Failed to open organized temporary file for validation.");
+        return false;
+    }
+    outBytes = f.readAll();
+    if (outBytes.isEmpty() || static_cast<uint64_t>(outBytes.size()) != expectedBytes ||
+        !outBytes.startsWith("%PDF-") || !outBytes.contains("%%EOF")) {
+        if (error) *error = tr("Organized output failed PDF structure validation.");
+        outBytes.clear();
+        return false;
+    }
+
+    pdf::ipc::WorkerClient verifyClient;
+    const auto openRes = verifyClient.openDocumentSync(1, filePath.toStdString());
+    verifyClient.closeDocumentSync();
+    verifyClient.stop();
+    if (openRes.error != pdf::DocumentError::None || openRes.pageCount != expectedPageCount) {
+        if (error) *error = tr("Organized output failed re-parse verification in a fresh worker.");
+        outBytes.clear();
+        return false;
+    }
+    return true;
+}
+
+bool MainWindow::organizeDocumentToFile(const QString& outputPath,
+                                        const std::vector<pdf::PageSpec>& specs,
+                                        const pdf::OrganizeOptions& options,
+                                        OrganizeOutcome* outcome) {
+    OrganizeOutcome localOutcome;
+    auto finish = [&](bool ok) -> bool {
+        if (outcome) {
+            *outcome = localOutcome;
+        }
+        return ok;
+    };
+
+    auto* viewer = currentViewer();
+    if (!viewer || !viewer->isDocumentOpen() || outputPath.isEmpty() ||
+        viewer->isSaveInProgress() || viewer->isEditInProgress() || m_workerBusy) {
+        localOutcome.errorMessage = tr("No document is ready for page organization.");
+        return finish(false);
+    }
+
+    if (viewer->editLog().isDirty()) {
+        localOutcome.status = pdf::OrganizeStatus::InvalidSpec;
+        localOutcome.dirtyEditLogRefused = true;
+        localOutcome.errorMessage = tr("Unsaved edits must be saved before organizing pages.");
+        return finish(false);
+    }
+
+    const QString sourcePath = viewer->currentFilePath();
+    if (!sourcePath.isEmpty() && safety::isSameFile(sourcePath, outputPath)) {
+        localOutcome.status = pdf::OrganizeStatus::InvalidSpec;
+        localOutcome.errorMessage = tr("Organized output cannot overwrite the open source document.");
+        return finish(false);
+    }
+
+    QTemporaryFile tempFile(QDir::tempPath() + QStringLiteral("/pdf_org_XXXXXX.pdf"));
+    if (!tempFile.open()) {
+        localOutcome.status = pdf::OrganizeStatus::SaveFailed;
+        localOutcome.errorMessage = tr("Failed to create temporary file for page organization.");
+        return finish(false);
+    }
+
+#ifdef _WIN32
+    const int dupFd = ::_dup(tempFile.handle());
+#else
+    const int dupFd = ::fcntl(tempFile.handle(), F_DUPFD_CLOEXEC, 0);
+#endif
+    if (dupFd < 0) {
+        localOutcome.status = pdf::OrganizeStatus::SaveFailed;
+        localOutcome.errorMessage = tr("Failed to duplicate temporary file descriptor.");
+        return finish(false);
+    }
+
+    const int64_t documentId = viewer->currentDocumentId();
+    pdf::ipc::OrganizePagesResponse response;
+    {
+        struct BusyGuard {
+            MainWindow* w;
+            explicit BusyGuard(MainWindow* win) : w(win) {
+                w->m_workerBusy = true;
+                w->setEnabled(false);
+                w->updateOrganizePagesAction();
+            }
+            ~BusyGuard() {
+                w->setEnabled(true);
+                w->m_workerBusy = false;
+                w->updateOrganizePagesAction();
+            }
+        } busy(this);
+        statusBar()->showMessage(tr("Organizing pages in sandboxed worker…"));
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        response = viewer->renderWorker().organizePagesSync(documentId, dupFd, specs, options);
+        QApplication::restoreOverrideCursor();
+    }
+
+    localOutcome.status = response.status;
+    localOutcome.bytesWritten = response.bytesWritten;
+    localOutcome.danglingOutlineCount = response.danglingOutlineCount;
+    localOutcome.danglingLinkCount = response.danglingLinkCount;
+    localOutcome.catalogEntriesDropped = response.catalogEntriesDropped;
+    localOutcome.errorMessage = response.errorMessage;
+
+    if (!response.success) {
+        statusBar()->showMessage(tr("Page organization failed."), 5000);
+        return finish(false);
+    }
+
+    // Validate the worker's output before reading/committing fresh bytes.
+    if (!tempFile.flush()) {
+        localOutcome.status = pdf::OrganizeStatus::SaveFailed;
+        localOutcome.validationFailed = true;
+        localOutcome.errorMessage = tr("Failed to flush organized temporary file.");
+        return finish(false);
+    }
+    QByteArray bytes;
+    QString valError;
+    if (!validateOrganizedOutput(tempFile.fileName(), response.bytesWritten,
+                                 static_cast<int>(specs.size()), bytes, &valError)) {
+        localOutcome.status = pdf::OrganizeStatus::SaveFailed;
+        localOutcome.validationFailed = true;
+        localOutcome.errorMessage = valError;
+        return finish(false);
+    }
+
+    QString writeError;
+    if (!safety::writeFileAtomically(outputPath, bytes, &writeError)) {
+        localOutcome.status = pdf::OrganizeStatus::SaveFailed;
+        localOutcome.errorMessage = writeError;
+        return finish(false);
+    }
+
+    statusBar()->showMessage(tr("Organized PDF saved to: %1").arg(outputPath), 6000);
+    return finish(true);
+}
+
+void MainWindow::organizePages() {
+    auto* viewer = currentViewer();
+    if (!viewer || !viewer->isDocumentOpen() ||
+        viewer->isSaveInProgress() || viewer->isEditInProgress() || m_workerBusy) {
+        return;
+    }
+
+    if (viewer->editLog().isDirty()) {
+        const auto choice = QMessageBox::question(
+            this,
+            tr("Save Unsaved Edits First"),
+            tr("This document has unsaved edits. Because page organization rebuilds from the saved file, "
+               "unsaved edits would not appear in the organized output.\n\n"
+               "Do you want to save your edits before organizing pages?"),
+            QMessageBox::Save | QMessageBox::Cancel,
+            QMessageBox::Save);
+        if (choice != QMessageBox::Save || !saveViewerWithConfirmation(this, viewer) ||
+            viewer->editLog().isDirty()) {
+            return;
+        }
+    }
+
+    OrganizePagesDialog dialog(viewer, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const std::vector<pdf::PageSpec> specs = dialog.pageSpecs();
+
+    const QString sourcePath = viewer->currentFilePath();
+    const QFileInfo sourceInfo(sourcePath);
+    const QString defaultName = sourceInfo.completeBaseName().isEmpty()
+        ? QStringLiteral("organized.pdf")
+        : sourceInfo.completeBaseName() + QStringLiteral("_organized.pdf");
+
+    QString savePath;
+    for (;;) {
+        savePath = QFileDialog::getSaveFileName(this, tr("Save Organized PDF"), defaultName, tr("PDF Files (*.pdf)"));
+        if (savePath.isEmpty()) {
+            return;
+        }
+        if (!savePath.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) {
+            savePath += QStringLiteral(".pdf");
+        }
+        if (sourcePath.isEmpty() || !safety::isSameFile(sourcePath, savePath)) {
+            break;
+        }
+        QMessageBox::warning(this, tr("Choose a Different File"),
+                             tr("Organizing pages always writes a new PDF copy and cannot replace the open source document."));
+    }
+
+    pdf::OrganizeOptions opts;
+    OrganizeOutcome outcome;
+    bool ok = organizeDocumentToFile(savePath, specs, opts, &outcome);
+
+    for (int attempt = 0; !ok && attempt < 2; ++attempt) {
+        if (outcome.status == pdf::OrganizeStatus::SignedNotAcknowledged && !opts.allowInvalidateSignatures) {
+            const auto ans = QMessageBox::warning(
+                this,
+                tr("Digital Signatures Will Be Invalidated"),
+                tr("This document contains digital signatures. Organizing pages rewrites the document "
+                   "and will invalidate all digital signatures in the output copy.\n\nContinue anyway?"),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (ans != QMessageBox::Yes) {
+                return;
+            }
+            opts.allowInvalidateSignatures = true;
+            ok = organizeDocumentToFile(savePath, specs, opts, &outcome);
+        } else if (outcome.status == pdf::OrganizeStatus::EncryptedNotAcknowledged && !opts.allowDecrypt) {
+            const auto ans = QMessageBox::warning(
+                this,
+                tr("Encryption Removal & Catalog Notice"),
+                tr("This document is encrypted. Organizing pages will remove encryption in the output copy, "
+                   "and bookmarks, page labels, and interactive forms will not carry over.\n\nContinue anyway?"),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (ans != QMessageBox::Yes) {
+                return;
+            }
+            opts.allowDecrypt = true;
+            ok = organizeDocumentToFile(savePath, specs, opts, &outcome);
+        } else {
+            break;
+        }
+    }
+
+    if (!ok) {
+        QMessageBox::critical(this, tr("Organize Pages Failed"),
+                              tr("Could not organize pages:\n%1").arg(outcome.errorMessage));
+        return;
+    }
+
+    QString summary = tr("<p><b>Organized PDF saved successfully!</b></p>"
+                         "<ul>"
+                         "<li><b>Pages written:</b> %1</li>"
+                         "<li><b>Dangling bookmarks:</b> %2</li>"
+                         "<li><b>Dangling links:</b> %3</li>"
+                         "</ul>")
+                          .arg(specs.size())
+                          .arg(outcome.danglingOutlineCount)
+                          .arg(outcome.danglingLinkCount);
+    if (outcome.catalogEntriesDropped) {
+        summary += tr("<p><b>Warning:</b> Encryption was removed; bookmarks, page labels, and forms were not carried over.</p>");
+    }
+    summary += tr("<p><i>Note: PDF page labels are not remapped when pages are reordered or deleted.</i></p>");
+
+    QMessageBox box(QMessageBox::Information, tr("Organize Pages Complete"), summary, QMessageBox::Ok, this);
+    QPushButton* openNewTabBtn = box.addButton(tr("Open in New Tab"), QMessageBox::ActionRole);
+    box.exec();
+    if (box.clickedButton() == openNewTabBtn) {
+        openFile(savePath, true);
     }
 }
 

@@ -269,6 +269,10 @@ add_executable(pdf-reader
     src/ui/ViewerAnnotationBuilder.h
     src/ui/ViewerAnnotationBuilder.cpp
     src/ui/PdfViewerWidget.cpp
+    src/ui/PageOrganizePlan.h
+    src/ui/PageOrganizePlan.cpp
+    src/ui/OrganizePagesDialog.h
+    src/ui/OrganizePagesDialog.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
 )
@@ -329,6 +333,10 @@ add_executable(test_widget
     src/ui/ThumbnailListWidget.cpp
     src/ui/SearchResultsWidget.h
     src/ui/SearchResultsWidget.cpp
+    src/ui/PageOrganizePlan.h
+    src/ui/PageOrganizePlan.cpp
+    src/ui/OrganizePagesDialog.h
+    src/ui/OrganizePagesDialog.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/ui/FreeTextLayout.h
@@ -375,6 +383,10 @@ add_executable(test_redaction_rotation
     src/ui/ThumbnailListWidget.cpp
     src/ui/SearchResultsWidget.h
     src/ui/SearchResultsWidget.cpp
+    src/ui/PageOrganizePlan.h
+    src/ui/PageOrganizePlan.cpp
+    src/ui/OrganizePagesDialog.h
+    src/ui/OrganizePagesDialog.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/ui/FreeTextLayout.h
@@ -416,6 +428,55 @@ target_include_directories(test_redaction_file_safety PRIVATE
 )
 target_link_libraries(test_redaction_file_safety PRIVATE Qt6::Core)
 
+# Page organization model + MainWindow seam + consent/busy/commit-safety tests.
+add_executable(test_organize_pages
+    tests/ui/test_organize_pages.cpp
+    src/ui/ColorMode.h
+    src/ui/FindBar.h
+    src/ui/FindBar.cpp
+    src/ui/ThumbnailListWidget.h
+    src/ui/ThumbnailListWidget.cpp
+    src/ui/SearchResultsWidget.h
+    src/ui/SearchResultsWidget.cpp
+    src/ui/PageOrganizePlan.h
+    src/ui/PageOrganizePlan.cpp
+    src/ui/OrganizePagesDialog.h
+    src/ui/OrganizePagesDialog.cpp
+    src/ui/MainWindow.h
+    src/ui/MainWindow.cpp
+    src/ui/FreeTextLayout.h
+    src/ui/FreeTextLayout.cpp
+    src/ui/ViewerLayoutController.h
+    src/ui/ViewerLayoutController.cpp
+    src/ui/ViewerTileController.h
+    src/ui/ViewerTileController.cpp
+    src/ui/ViewerSelectionController.h
+    src/ui/ViewerSelectionController.cpp
+    src/ui/ViewerSearchController.h
+    src/ui/ViewerSearchController.cpp
+    src/ui/ViewerRedactionController.h
+    src/ui/ViewerRedactionController.cpp
+    src/ui/ViewerInkController.cpp
+    src/ui/ViewerAnnotationBuilder.h
+    src/ui/ViewerAnnotationBuilder.cpp
+    src/ui/PdfViewerWidget.cpp
+)
+target_include_directories(test_organize_pages PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/support
+)
+target_link_libraries(test_organize_pages PRIVATE
+    Qt6::Widgets
+    Qt6::PrintSupport
+    pdf_engine
+    pdf_ipc
+)
+if(ENABLE_TEST_HOOKS)
+    target_compile_definitions(test_organize_pages PRIVATE PDF_WORKER_TEST_HOOKS=1)
+endif()
+add_dependencies(test_organize_pages pdf_worker)
+
 # RFC Pass 0 Viewer Characterization Suite (BRIEF T24)
 add_executable(test_viewer_characterization
     tests/ui/test_viewer_characterization.cpp
@@ -427,6 +488,10 @@ add_executable(test_viewer_characterization
     src/ui/ThumbnailListWidget.cpp
     src/ui/SearchResultsWidget.h
     src/ui/SearchResultsWidget.cpp
+    src/ui/PageOrganizePlan.h
+    src/ui/PageOrganizePlan.cpp
+    src/ui/OrganizePagesDialog.h
+    src/ui/OrganizePagesDialog.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/ui/FreeTextLayout.h
@@ -471,6 +536,10 @@ add_executable(test_password_prompt
     src/ui/ThumbnailListWidget.cpp
     src/ui/SearchResultsWidget.h
     src/ui/SearchResultsWidget.cpp
+    src/ui/PageOrganizePlan.h
+    src/ui/PageOrganizePlan.cpp
+    src/ui/OrganizePagesDialog.h
+    src/ui/OrganizePagesDialog.cpp
     src/ui/MainWindow.h
     src/ui/MainWindow.cpp
     src/ui/FreeTextLayout.h
@@ -630,6 +699,10 @@ add_test(
 add_test(
     NAME RedactionFileSafetyTestSuite
     COMMAND test_redaction_file_safety
+)
+add_test(
+    NAME OrganizePagesTestSuite
+    COMMAND test_organize_pages "${CMAKE_CURRENT_SOURCE_DIR}/sample.pdf"
 )
 add_test(
     NAME WorkerIpcTestSuite

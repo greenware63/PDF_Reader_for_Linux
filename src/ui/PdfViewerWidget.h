@@ -263,6 +263,8 @@ public:
     QString pageLabel(int pageIndex) const;
     const std::vector<QString>& pageLabels() const noexcept { return m_pageLabels; }
     void requestThumbnail(int pageIndex, int targetWidth = 140);
+    void requestUnrotatedThumbnail(int pageIndex, int targetWidth = 128);
+    void setOrganizeThumbnailMode(bool active) noexcept { m_organizeThumbnailMode = active; }
     // Redaction APIs
     bool isRedactionMode() const noexcept { return m_redactionController.isMode(); }
     void setRedactionMode(bool enabled);
@@ -292,6 +294,8 @@ Q_SIGNALS:
     void pageLabelsReady(const std::vector<QString>& labels);
     void thumbnailReady(int pageIndex, const QImage& image);
     void thumbnailFailed(int pageIndex);
+    void organizeThumbnailReady(int pageIndex, const QImage& image);
+    void organizeThumbnailFailed(int pageIndex);
     void loadError(const QString& errorMessage);
     void documentOpenFailed(const QString& filePath, pdf::DocumentError error);
     void loadingChanged(bool loading, const QString& fileName);
@@ -380,6 +384,7 @@ private:
 
     bool m_hasDocument{false};
     bool m_outlineRequestPending{false};
+    bool m_organizeThumbnailMode{false};
     int m_pageCount{0};
     int64_t m_currentDocumentId{1};
     uint64_t m_currentGeneration{1};

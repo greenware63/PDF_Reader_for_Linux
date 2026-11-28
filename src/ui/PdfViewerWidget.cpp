@@ -105,13 +105,21 @@ PdfViewerWidget::PdfViewerWidget(QWidget* parent)
                     QImage img(reinterpret_cast<const uchar*>(buffer.data()),
                                buffer.width(), buffer.height(), static_cast<qsizetype>(buffer.stride()),
                                QImage::Format_RGB32);
-                    Q_EMIT thumbnailReady(pageIndex, img.copy());
+                    if (m_organizeThumbnailMode) {
+                        Q_EMIT organizeThumbnailReady(pageIndex, img.copy());
+                    } else {
+                        Q_EMIT thumbnailReady(pageIndex, img.copy());
+                    }
                 }
             });
     connect(&m_renderWorker, &pdf::ipc::WorkerClient::thumbnailFailed, this,
             [this](int64_t documentId, int pageIndex) {
                 if (documentId == m_currentDocumentId) {
-                    Q_EMIT thumbnailFailed(pageIndex);
+                    if (m_organizeThumbnailMode) {
+                        Q_EMIT organizeThumbnailFailed(pageIndex);
+                    } else {
+                        Q_EMIT thumbnailFailed(pageIndex);
+                    }
                 }
             });
     connect(&m_renderWorker, &pdf::ipc::WorkerClient::formFieldsReady, this,
@@ -539,6 +547,12 @@ QString PdfViewerWidget::pageLabel(int pageIndex) const {
 void PdfViewerWidget::requestThumbnail(int pageIndex, int targetWidth) {
     if (m_hasDocument && pageIndex >= 0 && pageIndex < m_pageCount) {
         m_renderWorker.requestThumbnail(m_currentDocumentId, pageIndex, targetWidth, rotation());
+    }
+}
+
+void PdfViewerWidget::requestUnrotatedThumbnail(int pageIndex, int targetWidth) {
+    if (m_hasDocument && pageIndex >= 0 && pageIndex < m_pageCount) {
+        m_renderWorker.requestThumbnail(m_currentDocumentId, pageIndex, targetWidth, 0);
     }
 }
 
