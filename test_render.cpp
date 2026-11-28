@@ -6075,6 +6075,10 @@ int main(int argc, char* argv[]) {
                 std::cerr << "[FAIL] Test 50: failed to load r4_allowed" << std::endl;
                 return 1;
             }
+            if (d->getOutline().empty()) {
+                std::cerr << "[FAIL] Test 50: control assertion failed — r4_allowed source has no outline" << std::endl;
+                return 1;
+            }
             const QString out1 = tdir.filePath(QStringLiteral("r4_noack.pdf"));
             QFile f1(out1);
             if (!f1.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
@@ -6255,9 +6259,17 @@ int main(int argc, char* argv[]) {
                 hd->pageCount() > 0) {
                 const QString out = tdir.filePath(QStringLiteral("hostile_%1.pdf").arg(QFileInfo(QString::fromLatin1(name)).baseName()));
                 QFile f(out);
-                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                    (void)hd->organizePages({{0, 0}}, f.handle());
-                    f.close();
+                if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 1;
+                const auto res = hd->organizePages({{0, 0}}, f.handle());
+                f.close();
+                const bool validStatus =
+                    (res.status == pdf::OrganizeStatus::Ok && res.bytesWritten > 0 && QFileInfo(out).size() > 0) ||
+                    (res.status != pdf::OrganizeStatus::Ok && res.bytesWritten == 0 && QFileInfo(out).size() == 0);
+                if (!validStatus) {
+                    std::cerr << "[FAIL] Test 51: hostile fixture " << name << " returned inconsistent status="
+                              << static_cast<int>(res.status) << " bytes=" << res.bytesWritten
+                              << " fileSize=" << QFileInfo(out).size() << std::endl;
+                    return 1;
                 }
             }
         }

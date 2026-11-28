@@ -5,7 +5,11 @@ Generates output PDFs from the application's engine save and export paths:
   1. compat_annotated_save.pdf: Saved PDF with Highlight and Text Note annotations.
   2. compat_form_filled.pdf: Incremental save with modified AcroForm values.
   3. compat_form_flattened.pdf: Exported flattened PDF with burned-in form widgets.
-  4. compat_redacted_export.pdf: Redacted export asserting canary text elimination.
+  4. compat_form_appearances_filled.pdf: Incremental save with Latin/Persian text appearances.
+  5. compat_form_appearances_flattened.pdf: Flattened export preserving Latin/Persian text appearances.
+  6. compat_redacted_export.pdf: Redacted export asserting canary text elimination.
+  7. compat_organized_pages.pdf: Reorganized subset/reordered/rotated PDF.
+  8. compat_organized_signed.pdf: Reorganized signed PDF verifying signature invalidation.
 
 Runs each produced output through independent external PDF analysis and rendering engines:
   - qpdf --check: structural validation and cross-reference integrity.
@@ -13,10 +17,11 @@ Runs each produced output through independent external PDF analysis and renderin
   - pdfinfo (Poppler): metadata, dimensions, and page count verification.
   - pdftoppm (Poppler): page 1 rasterization asserting valid non-blank rendering.
   - pdftotext (Poppler): text extraction asserting form values survive, unredacted text survives,
-    and redacted export has zero text layer (guarantee G2).
+    organized page markers match, and redacted export has zero text layer (guarantee G2).
+  - pdfsig (Poppler): verifies organized signed output reports a non-valid signature.
   - mutool info / mutool draw (MuPDF): independent engine parsing and raster verification.
-  - Redaction pixel comparison: asserts inside-box pixels are solid black (0xFF000000) and
-    outside-box pixels match the unredacted source within tolerance (mean < 4.0, bigFrac < 0.015).
+  - Redaction pixel comparison (Poppler and MuPDF): asserts inside-box pixels are solid black (0x000000)
+    and outside-box pixels match the unredacted source within tolerance (mean < 4.0, bigFrac < 0.015).
 
 Behavior:
   - In CI (CI=1): Fails closed (exit 1) if required external tools (qpdf, poppler-utils, mupdf-tools) are missing.
@@ -79,6 +84,85 @@ def verify_ppm_non_blank(ppm_path):
     return any(b < 240 for b in data)
 
 
+def verify_redaction_pixels(engine_label, src_file, out_file, fname, failures):
+    """Verify inside-box pixels are solid black (0x000000) and outside-box pixels match source."""
+    data_src, ws, hs = read_ppm(src_file)
+    data_out, wo, ho = read_ppm(out_file)
+
+    if not data_src:
+        print(f"  [FAIL] Pixel verification ({engine_label}): Unreadable source PPM image at {src_file}", file=sys.stderr)
+        failures.append(f"{fname}: Unreadable {engine_label} source PPM image")
+        return False
+    if not data_out:
+        print(f"  [FAIL] Pixel verification ({engine_label}): Unreadable output PPM image at {out_file}", file=sys.stderr)
+        failures.append(f"{fname}: Unreadable {engine_label} output PPM image")
+        return False
+    if ws != wo or hs != ho:
+        print(f"  [FAIL] Pixel verification ({engine_label}): Dimension mismatch: source {ws}x{hs} vs output {wo}x{ho}", file=sys.stderr)
+        failures.append(f"{fname}: {engine_label} dimension mismatch: source {ws}x{hs} vs output {wo}x{ho}")
+        return False
+
+    scale = 150.0 / 72.0
+    # Redaction rectangle in PDF points: left=80, top=680, right=260, bottom=720
+    # Pixel box with 1px edgeGrow:
+    bx0 = int(80.0 * scale) - 1
+    by0 = int(680.0 * scale) - 1
+    bx1 = int(260.0 * scale) + 1
+    by1 = int(720.0 * scale) + 1
+
+    all_black = True
+    non_black_count = 0
+    total_inside = 0
+    for y in range(max(0, by0 + 2), min(ho, by1 - 2)):
+        for x in range(max(0, bx0 + 2), min(wo, bx1 - 2)):
+            total_inside += 1
+            off = (y * wo + x) * 3
+            r, g, b = data_out[off], data_out[off + 1], data_out[off + 2]
+            if r != 0 or g != 0 or b != 0:
+                all_black = False
+                non_black_count += 1
+
+    if all_black:
+        print(f"  [PASS] Pixel verification ({engine_label}): Pixels inside redaction rectangle are solid black (0x000000) ({total_inside} px inspected)")
+    else:
+        print(f"  [FAIL] Pixel verification ({engine_label}): {non_black_count}/{total_inside} non-black pixels found inside redaction rectangle!", file=sys.stderr)
+        failures.append(f"{fname}: {engine_label} redaction box contains non-black pixels ({non_black_count}/{total_inside})")
+
+    # Outside box: dilate mask by 6 pixels (matching tests/redaction/test_redaction.cpp)
+    mask_x0 = max(0, bx0 - 6)
+    mask_y0 = max(0, by0 - 6)
+    mask_x1 = min(wo, bx1 + 6)
+    mask_y1 = min(ho, by1 + 6)
+
+    sum_d = 0
+    cnt = 0
+    big = 0
+    for y in range(ho):
+        in_y = (mask_y0 <= y < mask_y1)
+        for x in range(wo):
+            if in_y and (mask_x0 <= x < mask_x1):
+                continue
+            off = (y * wo + x) * 3
+            ra, ga, ba = data_src[off], data_src[off + 1], data_src[off + 2]
+            rb, gb, bb = data_out[off], data_out[off + 1], data_out[off + 2]
+            d = (abs(int(ra) - int(rb)) + abs(int(ga) - int(gb)) + abs(int(ba) - int(bb))) // 3
+            sum_d += d
+            cnt += 1
+            if d > 96:
+                big += 1
+
+    mean = (sum_d / float(cnt)) if cnt > 0 else 0.0
+    big_frac = (big / float(cnt)) if cnt > 0 else 0.0
+
+    if mean < 4.0 and big_frac < 0.015:
+        print(f"  [PASS] Pixel verification ({engine_label}): Outside-box pixels match source render (mean diff={mean:.2f} < 4.0, strong diff={big_frac*100:.2f}% < 1.5%)")
+    else:
+        print(f"  [FAIL] Pixel verification ({engine_label}): Outside-box difference exceeds tolerance (mean={mean:.2f}, bigFrac={big_frac:.3f})", file=sys.stderr)
+        failures.append(f"{fname}: {engine_label} outside-box pixel diff exceeded tolerance (mean={mean:.2f}, bigFrac={big_frac:.3f})")
+
+    return True
+
+
 def main():
     source_root = sys.argv[1] if len(sys.argv) > 1 else "."
     test_render_bin = sys.argv[2] if len(sys.argv) > 2 else "test_render"
@@ -91,13 +175,14 @@ def main():
     pdfinfo_exe = check_tool("pdfinfo", required_in_ci=True)
     pdftoppm_exe = check_tool("pdftoppm", required_in_ci=True)
     pdftotext_exe = check_tool("pdftotext", required_in_ci=True)
+    pdfsig_exe = check_tool("pdfsig", required_in_ci=True)
     mutool_exe = check_tool("mutool", required_in_ci=True)
 
     if os.environ.get("CI"):
         missing_ci = []
         for name, tool in [("qpdf", qpdf_exe), ("pdfinfo", pdfinfo_exe),
                            ("pdftoppm", pdftoppm_exe), ("pdftotext", pdftotext_exe),
-                           ("mutool", mutool_exe)]:
+                           ("pdfsig", pdfsig_exe), ("mutool", mutool_exe)]:
             if tool is None:
                 missing_ci.append(name)
         if missing_ci:
@@ -142,7 +227,9 @@ def main():
     ]
 
     failures = []
-    redaction_pixel_verified = False
+    redaction_pixel_verified_poppler = False
+    redaction_pixel_verified_mupdf = False
+    form_value_assertions = 0
 
     with tempfile.TemporaryDirectory() as scratch_dir:
         # Step B: Run external tools and deepened assertions on each output
@@ -285,19 +372,9 @@ def main():
                         print(f"  [FAIL] pdftotext: Unexpected page markers in {fname}: {out!r}", file=sys.stderr)
                         failures.append(f"{fname}: Unexpected page markers in pdftotext")
 
-            if fname == "compat_organized_signed.pdf":
-                pdfsig_exe = check_tool("pdfsig", required_in_ci=False)
-                if pdfsig_exe:
-                    _, sig_out, sig_err = run_command([pdfsig_exe, fpath])
-                    combined_sig = sig_out + "\n" + sig_err
-                    if "Signature is Valid" in combined_sig:
-                        print(f"  [FAIL] pdfsig: Expected invalidated signature after rewrite, got:\n{combined_sig}", file=sys.stderr)
-                        failures.append(f"{fname}: Signature unexpectedly valid after rewrite")
-                    else:
-                        print("  [PASS] pdfsig: Signature is not valid after non-incremental rewrite (expected)")
-
                 elif fname in ("compat_form_filled.pdf", "compat_form_flattened.pdf"):
                     for val in ("CompatibilityTester", "Germany"):
+                        form_value_assertions += 1
                         present = (val in out)
                         if not present:
                             print(f"  [FAIL] pdftotext: Expected form value '{val}' not found in {fname}", file=sys.stderr)
@@ -309,11 +386,24 @@ def main():
                     normalized_text = " ".join(out.split())
                     for val in ("LatinAppearanceName", "ExternalPersianField",
                                 "First external line", "Second external line"):
+                        form_value_assertions += 1
                         if val not in normalized_text:
                             print(f"  [FAIL] pdftotext: Expected form value '{val}' not found in {fname}", file=sys.stderr)
                             failures.append(f"{fname}: Missing form value '{val}' in pdftotext")
                         else:
                             print(f"  [PASS] pdftotext: Form value '{val}' verified in {fname}")
+
+            if fname == "compat_organized_signed.pdf" and pdfsig_exe:
+                _, sig_out, sig_err = run_command([pdfsig_exe, fpath])
+                combined_sig = sig_out + "\n" + sig_err
+                if "Signature #1:" not in combined_sig or "Signature Validation:" not in combined_sig:
+                    print(f"  [FAIL] pdfsig: Could not parse Signature #1 / Signature Validation:\n{combined_sig}", file=sys.stderr)
+                    failures.append(f"{fname}: pdfsig did not report Signature #1 / Signature Validation")
+                elif "Signature is Valid" in combined_sig:
+                    print(f"  [FAIL] pdfsig: Expected invalidated signature after rewrite, got:\n{combined_sig}", file=sys.stderr)
+                    failures.append(f"{fname}: Signature unexpectedly valid after rewrite")
+                else:
+                    print("  [PASS] pdfsig: Signature #1 reported with non-valid status after non-incremental rewrite")
 
             if fname in ("compat_form_appearances_filled.pdf", "compat_form_appearances_flattened.pdf"):
                 for page_number, label, left, bottom, right, top in (
@@ -370,86 +460,23 @@ def main():
                     out_file = f"{out_ppm_base}-1.ppm"
 
                     if c1 != 0 or c2 != 0:
-                        print(f"  [FAIL] Pixel verification: pdftoppm rasterization failed (src={c1}, out={c2}):\n{e1}\n{e2}", file=sys.stderr)
+                        print(f"  [FAIL] Pixel verification (Poppler): pdftoppm rasterization failed (src={c1}, out={c2}):\n{e1}\n{e2}", file=sys.stderr)
                         failures.append(f"{fname}: pdftoppm failed during pixel verification")
                     else:
-                        data_src, ws, hs = read_ppm(src_file)
-                        data_out, wo, ho = read_ppm(out_file)
+                        if verify_redaction_pixels("Poppler", src_file, out_file, fname, failures):
+                            redaction_pixel_verified_poppler = True
 
-                        if not data_src:
-                            print(f"  [FAIL] Pixel verification: Unreadable source PPM image at {src_file}", file=sys.stderr)
-                            failures.append(f"{fname}: Unreadable source PPM image")
-                        elif not data_out:
-                            print(f"  [FAIL] Pixel verification: Unreadable output PPM image at {out_file}", file=sys.stderr)
-                            failures.append(f"{fname}: Unreadable output PPM image")
-                        elif ws != wo or hs != ho:
-                            print(f"  [FAIL] Pixel verification: Dimension mismatch: source {ws}x{hs} vs output {wo}x{ho}", file=sys.stderr)
-                            failures.append(f"{fname}: Dimension mismatch: source {ws}x{hs} vs output {wo}x{ho}")
+                    if mutool_exe:
+                        src_mu_ppm = os.path.join(scratch_dir, "redact_src_mutool.ppm")
+                        out_mu_ppm = os.path.join(scratch_dir, "redact_out_mutool.ppm")
+                        m1, _, me1 = run_command([mutool_exe, "draw", "-r", "150", "-F", "ppm", "-o", src_mu_ppm, redact_src, "1"])
+                        m2, _, me2 = run_command([mutool_exe, "draw", "-r", "150", "-F", "ppm", "-o", out_mu_ppm, fpath, "1"])
+                        if m1 != 0 or m2 != 0:
+                            print(f"  [FAIL] Pixel verification (MuPDF): mutool draw failed (src={m1}, out={m2}):\n{me1}\n{me2}", file=sys.stderr)
+                            failures.append(f"{fname}: mutool draw failed during pixel verification")
                         else:
-                            scale = 150.0 / 72.0
-                            # Redaction rectangle in PDF points: left=80, top=680, right=260, bottom=720
-                            # Pixel box with 1px edgeGrow:
-                            bx0 = int(80.0 * scale) - 1
-                            by0 = int(680.0 * scale) - 1
-                            bx1 = int(260.0 * scale) + 1
-                            by1 = int(720.0 * scale) + 1
-
-                            # A. Inside box: verify solid black (0, 0, 0)
-                            # Test inside rect with 2px margin from edge
-                            all_black = True
-                            non_black_count = 0
-                            total_inside = 0
-                            for y in range(max(0, by0 + 2), min(ho, by1 - 2)):
-                                for x in range(max(0, bx0 + 2), min(wo, bx1 - 2)):
-                                    total_inside += 1
-                                    off = (y * wo + x) * 3
-                                    r, g, b = data_out[off], data_out[off + 1], data_out[off + 2]
-                                    if r != 0 or g != 0 or b != 0:
-                                        all_black = False
-                                        non_black_count += 1
-
-                            if all_black:
-                                print(f"  [PASS] Pixel verification: Pixels inside redaction rectangle are solid black (0x000000) ({total_inside} px inspected)")
-                            else:
-                                print(f"  [FAIL] Pixel verification: {non_black_count}/{total_inside} non-black pixels found inside redaction rectangle!", file=sys.stderr)
-                                failures.append(f"{fname}: Redaction box contains non-black pixels ({non_black_count}/{total_inside})")
-
-                            # B. Outside box: cross-engine comparison against source render
-                            # Dilate mask by 6 pixels (matching tests/redaction/test_redaction.cpp line 341)
-                            mask_x0 = max(0, bx0 - 6)
-                            mask_y0 = max(0, by0 - 6)
-                            mask_x1 = min(wo, bx1 + 6)
-                            mask_y1 = min(ho, by1 + 6)
-
-                            sum_d = 0
-                            cnt = 0
-                            big = 0
-                            for y in range(ho):
-                                in_y = (mask_y0 <= y < mask_y1)
-                                for x in range(wo):
-                                    if in_y and (mask_x0 <= x < mask_x1):
-                                        continue
-                                    off = (y * wo + x) * 3
-                                    ra, ga, ba = data_src[off], data_src[off + 1], data_src[off + 2]
-                                    rb, gb, bb = data_out[off], data_out[off + 1], data_out[off + 2]
-                                    d = (abs(int(ra) - int(rb)) + abs(int(ga) - int(gb)) + abs(int(ba) - int(bb))) // 3
-                                    sum_d += d
-                                    cnt += 1
-                                    if d > 96:
-                                        big += 1
-
-                            mean = (sum_d / float(cnt)) if cnt > 0 else 0.0
-                            big_frac = (big / float(cnt)) if cnt > 0 else 0.0
-
-                            # Tolerance commitment from docs/REDACTION.md §234 and test_redaction.cpp lines 354-355:
-                            # mean < 4.0 intensity levels, bigFrac < 0.015 (1.5%)
-                            if mean < 4.0 and big_frac < 0.015:
-                                print(f"  [PASS] Pixel verification: Outside-box pixels match source render (mean diff={mean:.2f} < 4.0, strong diff={big_frac*100:.2f}% < 1.5%)")
-                            else:
-                                print(f"  [FAIL] Pixel verification: Outside-box difference exceeds tolerance (mean={mean:.2f}, bigFrac={big_frac:.3f})", file=sys.stderr)
-                                failures.append(f"{fname}: Outside-box pixel diff exceeded tolerance (mean={mean:.2f}, bigFrac={big_frac:.3f})")
-
-                            redaction_pixel_verified = True
+                            if verify_redaction_pixels("MuPDF", src_mu_ppm, out_mu_ppm, fname, failures):
+                                redaction_pixel_verified_mupdf = True
 
             # 7. mutool info & draw (when installed, required in CI)
             if mutool_exe:
@@ -466,10 +493,19 @@ def main():
                     else:
                         print(f"  [PASS] mutool (MuPDF): Document parsed and rasterized page 1 to PNG ({os.path.getsize(mutool_png)} bytes)")
 
-        # 3. Regression guard: ensure redaction pixel verification actually ran
-        if not redaction_pixel_verified:
-            print("  [FAIL] Regression guard: redaction pixel verification did not run!", file=sys.stderr)
-            failures.append("compat_redacted_export.pdf: redaction pixel verification did not run")
+        # 3. Regression guards: ensure redaction pixel verification & form-value assertions actually ran
+        if not redaction_pixel_verified_poppler:
+            print("  [FAIL] Regression guard: Poppler redaction pixel verification did not run!", file=sys.stderr)
+            failures.append("compat_redacted_export.pdf: Poppler redaction pixel verification did not run")
+        if mutool_exe and not redaction_pixel_verified_mupdf:
+            print("  [FAIL] Regression guard: MuPDF redaction pixel verification did not run!", file=sys.stderr)
+            failures.append("compat_redacted_export.pdf: MuPDF redaction pixel verification did not run")
+        expected_form_value_assertions = 12
+        if form_value_assertions != expected_form_value_assertions:
+            print(f"  [FAIL] Regression guard: expected {expected_form_value_assertions} form-value assertions, ran {form_value_assertions}!", file=sys.stderr)
+            failures.append(f"form_value_assertions mismatch: expected {expected_form_value_assertions}, ran {form_value_assertions}")
+        else:
+            print(f"  [PASS] Vacuity guard: {form_value_assertions}/{expected_form_value_assertions} form-value assertions executed")
 
         if failures:
             print("\n====================================================")
