@@ -1493,7 +1493,12 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
                                       << " ms). Terminating hung worker." << std::endl;
                             m_watchdogTimer.stop();
                             m_process.kill();
-                            static const char* const kOpNames[] = {"Idle", "Open", "Tile", "Thumbnail", "Print", "Extract", "Search", "Redact"};
+                            static const char* const kOpNames[] = {
+                                "Idle", "Open", "Tile", "Thumbnail", "Print",
+                                "Extract", "Search", "Redact", "Annotate", "Save", "Organize"
+                            };
+                            static_assert(sizeof(kOpNames) / sizeof(kOpNames[0]) == static_cast<size_t>(WorkerOp::Organize) + 1,
+                                          "kOpNames must cover all WorkerOp values");
                             const char* opName = response.currentOp < sizeof(kOpNames) / sizeof(kOpNames[0])
                                                      ? kOpNames[response.currentOp] : "Unknown";
                             failWorker(tr("PDF worker engine stalled (operation heartbeat frozen): %1 made no progress for %2 ms (limit %3 ms).")

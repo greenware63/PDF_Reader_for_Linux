@@ -4350,15 +4350,15 @@ int main(int argc, char* argv[]) {
 #endif
         };
 
-        // 44a. Round-trip on page_org_rich.pdf: reorder + delete + rotate
+        // 44a. Round-trip on page_org_rich.pdf: reorder + delete + rotate + invalid-spec + fd ownership
         {
             pdf::ipc::WorkerClient client;
             auto openRes = client.openDocumentSync(440, richPdf.toStdString());
-            if (openRes.error != pdf::DocumentError::None || openRes.pageCount < 3) {
+            if (openRes.error != pdf::DocumentError::None || openRes.pageCount < 3 || openRes.pageSizes.size() < 3) {
                 std::cerr << "[FAIL] 44a: Failed to open page_org_rich.pdf" << std::endl;
                 return 1;
             }
-            const auto origSize0 = client.openDocumentSync(440, richPdf.toStdString()).pageSizes[0];
+            const auto srcSizes = openRes.pageSizes;
             const QString outPath = tempDir.filePath(QStringLiteral("org_roundtrip.pdf"));
             const int fd = openWriteFd(outPath);
             if (fd < 0) {
@@ -4368,6 +4368,12 @@ int main(int argc, char* argv[]) {
 
             std::vector<pdf::PageSpec> specs = {{2, 90}, {0, 180}};
             auto resp = client.organizePagesSync(440, fd, specs, {});
+#ifdef Q_OS_LINUX
+            if (::fcntl(fd, F_GETFD) != -1 || errno != EBADF) {
+                std::cerr << "[FAIL] 44a: Caller's writeFd was not closed after organizePagesSync success" << std::endl;
+                return 1;
+            }
+#endif
             const qint64 diskSize = QFileInfo(outPath).size();
             if (!resp.success || resp.status != pdf::OrganizeStatus::Ok ||
                 resp.bytesWritten == 0 || static_cast<qint64>(resp.bytesWritten) != diskSize) {
@@ -4377,9 +4383,15 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
-            // Wrong documentId returns failure and keeps worker alive
+            // Wrong documentId returns failure, closes caller fd, and keeps worker alive
             const int badDocFd = openWriteFd(tempDir.filePath(QStringLiteral("org_baddoc.pdf")));
             auto badDocResp = client.organizePagesSync(999999, badDocFd, specs, {});
+#ifdef Q_OS_LINUX
+            if (::fcntl(badDocFd, F_GETFD) != -1 || errno != EBADF) {
+                std::cerr << "[FAIL] 44a: Caller's writeFd was not closed after organizePagesSync failure" << std::endl;
+                return 1;
+            }
+#endif
             if (badDocResp.success) {
                 std::cerr << "[FAIL] 44a: Expected failure for wrong documentId" << std::endl;
                 return 1;
@@ -4389,24 +4401,75 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
 
+            // Wire-level invalid specs (negative index, bad rotation, duplicate) -> InvalidSpec, 0 bytes
+            auto checkInvalidSpec = [&](const std::vector<pdf::PageSpec>& badSpecs, const char* label) -> bool {
+                const QString badOut = tempDir.filePath(QStringLiteral("invalid_%1.pdf").arg(QString::fromLatin1(label)));
+                const int badFd = openWriteFd(badOut);
+                auto r = client.organizePagesSync(440, badFd, badSpecs, {});
+#ifdef Q_OS_LINUX
+                if (::fcntl(badFd, F_GETFD) != -1 || errno != EBADF) {
+                    std::cerr << "[FAIL] 44a (" << label << "): Caller's writeFd was not closed" << std::endl;
+                    return false;
+                }
+#endif
+                if (r.success || r.status != pdf::OrganizeStatus::InvalidSpec ||
+                    r.bytesWritten != 0 || QFileInfo(badOut).size() != 0) {
+                    std::cerr << "[FAIL] 44a (" << label << "): expected InvalidSpec with 0 bytes (status="
+                              << static_cast<int>(r.status) << ", bytes=" << r.bytesWritten
+                              << ", disk=" << QFileInfo(badOut).size() << ")" << std::endl;
+                    return false;
+                }
+                return true;
+            };
+            if (!checkInvalidSpec({{-1, 0}}, "neg_index") ||
+                !checkInvalidSpec({{0, 45}}, "bad_rot") ||
+                !checkInvalidSpec({{0, 0}, {0, 0}}, "duplicate")) {
+                return 1;
+            }
+
             client.closeDocumentSync();
             client.stop();
 
-            // Reload output in a fresh worker and verify page count + rotation
+            // Early-fail path on stopped WorkerClient must also close caller's fd
+            const QString earlyPath = tempDir.filePath(QStringLiteral("org_earlyfail.pdf"));
+            const int earlyFd = openWriteFd(earlyPath);
+            client.requestOrganizePages(440, earlyFd, specs, {});
+#ifdef Q_OS_LINUX
+            if (::fcntl(earlyFd, F_GETFD) != -1 || errno != EBADF) {
+                std::cerr << "[FAIL] 44a: Caller's writeFd was not closed on early-fail path" << std::endl;
+                return 1;
+            }
+#endif
+
+            // Reload output in a fresh worker and verify page count + per-page rotated dimensions
             pdf::ipc::WorkerClient verifyClient;
             auto verifyOpen = verifyClient.openDocumentSync(441, outPath.toStdString());
-            if (verifyOpen.error != pdf::DocumentError::None || verifyOpen.pageCount != 2) {
+            if (verifyOpen.error != pdf::DocumentError::None || verifyOpen.pageCount != 2 ||
+                verifyOpen.pageSizes.size() != 2) {
                 std::cerr << "[FAIL] 44a: Reloaded organized PDF has unexpected pageCount=" << verifyOpen.pageCount << std::endl;
                 return 1;
             }
-            // Page 0 had 90 deg added -> width/height should be swapped compared to unrotated page 2 if non-square,
-            // and render cleanly.
+            const auto& outSize0 = verifyOpen.pageSizes[0];
+            const auto& outSize1 = verifyOpen.pageSizes[1];
+            if (std::abs(outSize0.first - srcSizes[2].second) >= 0.01 ||
+                std::abs(outSize0.second - srcSizes[2].first) >= 0.01) {
+                std::cerr << "[FAIL] 44a: Organized page 0 (src page 2 + 90 deg) dimensions mismatch: got ("
+                          << outSize0.first << "x" << outSize0.second << "), expected ("
+                          << srcSizes[2].second << "x" << srcSizes[2].first << ")" << std::endl;
+                return 1;
+            }
+            if (std::abs(outSize1.first - srcSizes[0].first) >= 0.01 ||
+                std::abs(outSize1.second - srcSizes[0].second) >= 0.01) {
+                std::cerr << "[FAIL] 44a: Organized page 1 (src page 0 + 180 deg) dimensions mismatch: got ("
+                          << outSize1.first << "x" << outSize1.second << "), expected ("
+                          << srcSizes[0].first << "x" << srcSizes[0].second << ")" << std::endl;
+                return 1;
+            }
             pdf::PixelBuffer pb = verifyClient.renderPageForPrintSync(441, 0, 1.0, 1.0, 0);
             if (!pb.isValid() || pb.width() <= 0 || pb.height() <= 0) {
                 std::cerr << "[FAIL] 44a: Organized page 0 failed to render" << std::endl;
                 return 1;
             }
-            (void)origSize0;
             verifyClient.closeDocumentSync();
             verifyClient.stop();
         }
@@ -4688,9 +4751,13 @@ int main(int argc, char* argv[]) {
             }
             hangClient.hangEngineForTesting();
             const int hangFd = openWriteFd(tempDir.filePath(QStringLiteral("hang.pdf")));
+            QElapsedTimer hangTimer;
+            hangTimer.start();
             auto hangResp = hangClient.organizePagesSync(444, hangFd, {{0, 0}}, {}, 5000);
-            if (hangResp.success) {
-                std::cerr << "[FAIL] 44d: hung organizePagesSync unexpectedly succeeded" << std::endl;
+            const qint64 hangElapsed = hangTimer.elapsed();
+            if (hangResp.success || hangElapsed >= 2500) {
+                std::cerr << "[FAIL] 44d: hung organizePagesSync failed check (success=" << hangResp.success
+                          << ", elapsedMs=" << hangElapsed << ")" << std::endl;
                 return 1;
             }
             hangClient.stop();
@@ -4702,15 +4769,36 @@ int main(int argc, char* argv[]) {
             }
             crashClient.killWorkerForTesting();
             const int crashFd = openWriteFd(tempDir.filePath(QStringLiteral("crash.pdf")));
+            QElapsedTimer crashTimer;
+            crashTimer.start();
             auto crashResp = crashClient.organizePagesSync(445, crashFd, {{0, 0}}, {}, 5000);
-            if (crashResp.success) {
-                std::cerr << "[FAIL] 44d: crashed organizePagesSync unexpectedly succeeded" << std::endl;
+            const qint64 crashElapsed = crashTimer.elapsed();
+            if (crashResp.success || crashElapsed >= 2500) {
+                std::cerr << "[FAIL] 44d: crashed organizePagesSync failed check (success=" << crashResp.success
+                          << ", elapsedMs=" << crashElapsed << ")" << std::endl;
                 return 1;
             }
             crashClient.stop();
 
+            // Fresh client works cleanly after hang and crash
+            {
+                pdf::ipc::WorkerClient recoveryClient;
+                if (recoveryClient.openDocumentSync(447, richPdf.toStdString()).error != pdf::DocumentError::None) {
+                    std::cerr << "[FAIL] 44d: fresh client failed to open after hang/crash" << std::endl;
+                    return 1;
+                }
+                const int recFd = openWriteFd(tempDir.filePath(QStringLiteral("rec.pdf")));
+                auto recResp = recoveryClient.organizePagesSync(447, recFd, {{0, 0}}, {}, 5000);
+                if (!recResp.success || recResp.bytesWritten == 0) {
+                    std::cerr << "[FAIL] 44d: fresh client failed organizePagesSync after hang/crash" << std::endl;
+                    return 1;
+                }
+                recoveryClient.closeDocumentSync();
+                recoveryClient.stop();
+            }
+
             // Watchdog progress: verify WorkerOp::Organize advances engineProgressed during organizePages
-            const QString bigPdfPath = tempDir.filePath(QStringLiteral("org_500p.pdf"));
+            const QString bigPdfPath = tempDir.filePath(QStringLiteral("org_10000p.pdf"));
             {
                 QByteArray pdfBytes("%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
                 QList<qint64> offsets;
@@ -4736,7 +4824,7 @@ int main(int argc, char* argv[]) {
                             QByteArray::number(xrefPos) + "\n%%EOF\n";
                 QFile bf(bigPdfPath);
                 if (!bf.open(QIODevice::WriteOnly) || bf.write(pdfBytes) != pdfBytes.size()) {
-                    std::cerr << "[FAIL] 44d: failed to write 500-page PDF" << std::endl;
+                    std::cerr << "[FAIL] 44d: failed to write 10000-page PDF" << std::endl;
                     return 1;
                 }
             }
