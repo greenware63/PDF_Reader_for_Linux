@@ -209,6 +209,14 @@ void testPayloadWithAllTypes(const uint8_t* data, size_t size) {
         SetFormFieldChoiceResponse msg;
         deserialize(payload, msg);
     }
+    {
+        OrganizePagesRequest msg;
+        deserialize(payload, msg);
+    }
+    {
+        OrganizePagesResponse msg;
+        deserialize(payload, msg);
+    }
 }
 
 } // namespace
@@ -415,6 +423,16 @@ int main(int argc, char* argv[]) {
     }
     {
         SetFormFieldChoiceResponse res{42, 0, QStringLiteral("combo1"), 0, true, {}};
+        QByteArray b = serialize(res);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        OrganizePagesRequest req{42, {{1, 90}, {0, 180}}, true, false};
+        QByteArray b = serialize(req);
+        corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
+    }
+    {
+        OrganizePagesResponse res{42, true, pdf::OrganizeStatus::Ok, 12345, 1, 2, false, {}};
         QByteArray b = serialize(res);
         corpus.push_back(std::vector<uint8_t>(b.begin(), b.end()));
     }

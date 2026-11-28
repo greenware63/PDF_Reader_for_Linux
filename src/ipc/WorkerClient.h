@@ -100,6 +100,14 @@ public:
     SaveDocumentResponse saveDocumentSync(int64_t documentId, int writeFd, bool incremental,
                                           const QString& tempFilePath = "", int timeoutMs = 60000);
 
+    void requestOrganizePages(int64_t documentId, int writeFd,
+                              const std::vector<pdf::PageSpec>& pages,
+                              const pdf::OrganizeOptions& options = {});
+    OrganizePagesResponse organizePagesSync(int64_t documentId, int writeFd,
+                                            const std::vector<pdf::PageSpec>& pages,
+                                            const pdf::OrganizeOptions& options = {},
+                                            int timeoutMs = 60000);
+
 Q_SIGNALS:
     void tileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key,
                    const pdf::PixelBuffer& buffer);
@@ -139,6 +147,8 @@ Q_SIGNALS:
     void annotationRemoveFailed(int64_t documentId, int pageIndex, const QString& errorMessage);
     void documentSaved(int64_t documentId, uint64_t bytesWritten);
     void documentSaveFailed(int64_t documentId, const QString& errorMessage);
+    void pagesOrganized(const pdf::ipc::OrganizePagesResponse& response);
+    void organizePagesFailed(int64_t documentId, const QString& errorMessage);
     /// The worker's engine heartbeat advanced while busy (observed through the watchdog ping).
     void engineProgressed();
 
@@ -159,6 +169,7 @@ private:
     bool sendOpenDocumentPacket(const OpenDocumentRequest& request, int docFd);
     bool sendPacketWithFd(MessageType type, const QByteArray& payload, int fd);
     bool sendSaveDocumentPacket(const SaveDocumentRequest& request, int saveFd);
+    bool sendOrganizePagesPacket(const OrganizePagesRequest& request, int writeFd);
     void flushOutgoing();
     void failWorker(const QString& message);
     WorkerControlResponse requestControl(const WorkerControlRequest& request);

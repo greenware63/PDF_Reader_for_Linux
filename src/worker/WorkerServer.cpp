@@ -47,6 +47,7 @@ bool isRequestType(uint32_t type) {
         case ipc::MessageType::AddAnnotationRequest:
         case ipc::MessageType::RemoveAnnotationRequest:
         case ipc::MessageType::SaveDocumentRequest:
+        case ipc::MessageType::OrganizePagesRequest:
         case ipc::MessageType::SharedMemoryAck:
         case ipc::MessageType::WorkerControlRequest:
             return true;
@@ -129,6 +130,8 @@ WorkerServer::WorkerServer(const QString& serverName, QObject* parent)
             this, &WorkerServer::onDocumentSaved, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::documentSaveFailed,
             this, &WorkerServer::onDocumentSaveFailed, Qt::QueuedConnection);
+    connect(&m_engineWorker, &pdf::RenderWorker::pagesOrganized,
+            this, &WorkerServer::onPagesOrganized, Qt::QueuedConnection);
     connect(&m_engineWorker, &pdf::RenderWorker::idle,
             this, &WorkerServer::onIdle, Qt::QueuedConnection);
 }
@@ -420,7 +423,39 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
 #endif
         fds.clear();
     };
-    if (!fds.empty() && type != ipc::MessageType::OpenDocumentRequest && type != ipc::MessageType::SaveDocumentRequest) {
+    auto validateWritableDescriptor = [&closeAll](std::vector<int>& incomingFds, const char* opName, QString& errorOut) -> int {
+#ifdef Q_OS_LINUX
+        if (incomingFds.size() != 1) {
+            std::cerr << "[WorkerServer] Rejected " << opName << " with " << incomingFds.size()
+                      << " descriptors (expected exactly 1)." << std::endl;
+            closeAll();
+            errorOut = QStringLiteral("%1 requires exactly 1 descriptor").arg(QString::fromLatin1(opName));
+            return -1;
+        }
+        const int fd = incomingFds.front();
+        incomingFds.clear();
+
+        int fl = ::fcntl(fd, F_GETFL);
+        if (fl == -1 || ((fl & O_ACCMODE) != O_WRONLY && (fl & O_ACCMODE) != O_RDWR)) {
+            std::cerr << "[WorkerServer] Rejected " << opName << ": descriptor is not open for writing." << std::endl;
+            ::close(fd);
+            errorOut = QStringLiteral("Descriptor is not open for writing");
+            return -1;
+        }
+        return fd;
+#else
+        (void)opName;
+        (void)errorOut;
+        const int fd = incomingFds.empty() ? -1 : incomingFds.front();
+        incomingFds.clear();
+        return fd;
+#endif
+    };
+
+    // Security policy: only OpenDocumentRequest, SaveDocumentRequest, and OrganizePagesRequest accept file descriptors.
+    if (!fds.empty() && type != ipc::MessageType::OpenDocumentRequest &&
+        type != ipc::MessageType::SaveDocumentRequest &&
+        type != ipc::MessageType::OrganizePagesRequest) {
         std::cerr << "[WorkerServer] Rejected " << fds.size()
                   << " unsolicited descriptor(s) on a message type that does not accept them; message dropped."
                   << std::endl;
@@ -641,31 +676,15 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
         case ipc::MessageType::SaveDocumentRequest: {
             ipc::SaveDocumentRequest req;
             const bool parsed = ipc::deserialize(payload, req);
+            QString fdError;
+            const int saveFd = validateWritableDescriptor(fds, "SaveDocumentRequest", fdError);
 #ifdef Q_OS_LINUX
-            if (fds.size() != 1) {
-                std::cerr << "[WorkerServer] Rejected SaveDocumentRequest with " << fds.size()
-                          << " descriptors (expected exactly 1)." << std::endl;
-                closeAll();
+            if (saveFd < 0) {
                 if (parsed) {
-                    onDocumentSaveFailed(req.documentId, QStringLiteral("SaveDocumentRequest requires exactly 1 descriptor"));
+                    onDocumentSaveFailed(req.documentId, fdError);
                 }
                 break;
             }
-            const int saveFd = fds.front();
-            fds.clear();
-
-            int fl = ::fcntl(saveFd, F_GETFL);
-            if (fl == -1 || ((fl & O_ACCMODE) != O_WRONLY && (fl & O_ACCMODE) != O_RDWR)) {
-                std::cerr << "[WorkerServer] Rejected SaveDocumentRequest: descriptor is not open for writing." << std::endl;
-                ::close(saveFd);
-                if (parsed) {
-                    onDocumentSaveFailed(req.documentId, QStringLiteral("Descriptor is not open for writing"));
-                }
-                break;
-            }
-#else
-            const int saveFd = fds.empty() ? -1 : fds.front();
-            fds.clear();
 #endif
             if (parsed) {
                 m_engineWorker.requestSaveDocument(req.documentId, saveFd, req.incremental, req.tempFilePath);
@@ -673,6 +692,37 @@ void WorkerServer::dispatchMessage(ipc::MessageType type, const QByteArray& payl
 #ifdef Q_OS_LINUX
                 ::close(saveFd);
 #endif
+            }
+            break;
+        }
+
+        case ipc::MessageType::OrganizePagesRequest: {
+            ipc::OrganizePagesRequest req;
+            const bool parsed = ipc::deserialize(payload, req);
+            QString fdError;
+            const int writeFd = validateWritableDescriptor(fds, "OrganizePagesRequest", fdError);
+#ifdef Q_OS_LINUX
+            if (writeFd < 0) {
+                pdf::OrganizeResult fail;
+                fail.status = pdf::OrganizeStatus::InvalidSpec;
+                onPagesOrganized(parsed ? req.documentId : 0, fail, fdError);
+                break;
+            }
+#endif
+            if (parsed) {
+                pdf::OrganizeOptions opts;
+                opts.allowInvalidateSignatures = req.allowInvalidateSignatures;
+                opts.allowDecrypt = req.allowDecrypt;
+                m_engineWorker.requestOrganizePages(req.documentId, writeFd, req.pages, opts);
+            } else {
+                if (writeFd >= 0) {
+#ifdef Q_OS_LINUX
+                    ::close(writeFd);
+#endif
+                }
+                pdf::OrganizeResult fail;
+                fail.status = pdf::OrganizeStatus::InvalidSpec;
+                onPagesOrganized(0, fail, QStringLiteral("Malformed OrganizePagesRequest payload"));
             }
             break;
         }
@@ -1136,6 +1186,19 @@ void WorkerServer::onDocumentSaveFailed(int64_t documentId, const QString& error
     res.success = false;
     res.errorMessage = errorMessage;
     sendPacket(ipc::MessageType::SaveDocumentResponse, ipc::serialize(res));
+}
+
+void WorkerServer::onPagesOrganized(int64_t documentId, const pdf::OrganizeResult& result, const QString& errorMessage) {
+    ipc::OrganizePagesResponse res;
+    res.documentId = documentId;
+    res.success = (result.status == pdf::OrganizeStatus::Ok && result.bytesWritten > 0);
+    res.status = result.status;
+    res.bytesWritten = result.bytesWritten;
+    res.danglingOutlineCount = result.danglingOutlineCount;
+    res.danglingLinkCount = result.danglingLinkCount;
+    res.catalogEntriesDropped = result.catalogEntriesDropped;
+    res.errorMessage = errorMessage;
+    sendPacket(ipc::MessageType::OrganizePagesResponse, ipc::serialize(res));
 }
 
 } // namespace pdf::worker

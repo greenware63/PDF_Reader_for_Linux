@@ -1126,6 +1126,91 @@ void RenderWorker::requestSaveDocument(int64_t documentId, int writeFd, bool inc
     m_cv.notify_one();
 }
 
+void RenderWorker::requestOrganizePages(int64_t documentId, int writeFd,
+                                        const std::vector<PageSpec>& pages,
+                                        const OrganizeOptions& options) {
+    auto closeFd = [](int fd) {
+        if (fd >= 0) {
+#ifdef _WIN32
+            ::_close(fd);
+#else
+            ::close(fd);
+#endif
+        }
+    };
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_running.load() || documentId != m_activeDocumentId.load()) {
+        closeFd(writeFd);
+        OrganizeResult fail;
+        fail.status = OrganizeStatus::InternalError;
+        Q_EMIT pagesOrganized(documentId, fail, QStringLiteral("Worker not running or document mismatch"));
+        return;
+    }
+
+    m_controlQueue.push_back({[this, documentId, writeFd, pages, options, closeFd]() {
+        struct FdCleanup {
+            int fd;
+            decltype(closeFd) closer;
+            ~FdCleanup() { closer(fd); }
+        } fdCleaner{writeFd, closeFd};
+
+        if (!m_running.load() || documentId != m_activeDocumentId.load() || !m_workerDocument) {
+            OrganizeResult fail;
+            fail.status = OrganizeStatus::InternalError;
+            Q_EMIT pagesOrganized(documentId, fail, QStringLiteral("Document is not open"));
+            return;
+        }
+
+        noteProgress(ipc::WorkerOp::Organize);
+        struct OrganizeGuard {
+            RenderWorker* w;
+            ~OrganizeGuard() { w->noteProgress(ipc::WorkerOp::Idle); }
+        } guard{this};
+
+        if (writeFd < 0) {
+            OrganizeResult fail;
+            fail.status = OrganizeStatus::InvalidSpec;
+            Q_EMIT pagesOrganized(documentId, fail, QStringLiteral("Invalid destination file descriptor"));
+            return;
+        }
+
+        auto heartbeat = [this](uint64_t) {
+            noteProgress(ipc::WorkerOp::Organize);
+        };
+
+        OrganizeResult res = m_workerDocument->organizePages(pages, writeFd, options, heartbeat);
+        QString errMsg;
+        if (res.status != OrganizeStatus::Ok) {
+            switch (res.status) {
+                case OrganizeStatus::InvalidSpec:
+                    errMsg = QStringLiteral("Invalid page organization specification");
+                    break;
+                case OrganizeStatus::PermissionDenied:
+                    errMsg = QStringLiteral("Document permissions forbid page organization");
+                    break;
+                case OrganizeStatus::SignedNotAcknowledged:
+                    errMsg = QStringLiteral("Organizing a signed document requires acknowledgment");
+                    break;
+                case OrganizeStatus::EncryptedNotAcknowledged:
+                    errMsg = QStringLiteral("Organizing an encrypted document requires acknowledgment");
+                    break;
+                case OrganizeStatus::StreamedSourceUnsupported:
+                    errMsg = QStringLiteral("Page organization is unsupported for streamed sources");
+                    break;
+                case OrganizeStatus::SaveFailed:
+                    errMsg = QStringLiteral("Failed to write organized document");
+                    break;
+                default:
+                    errMsg = QStringLiteral("Internal error during page organization");
+                    break;
+            }
+        }
+        Q_EMIT pagesOrganized(documentId, res, errMsg);
+    }});
+    m_cv.notify_one();
+}
+
 void RenderWorker::requestPageText(int64_t documentId, int pageIndex) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_running.load() || documentId != m_activeDocumentId.load()) {
