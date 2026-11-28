@@ -169,11 +169,31 @@ PdfiumDocument::~PdfiumDocument() {
 }
 
 DocumentError PdfiumDocument::loadFromFile(const std::string& filePath, const std::string& password) {
+    bool isStreamed = false;
+    {
+        std::ifstream ifs(filePath, std::ios::binary | std::ios::ate);
+        if (ifs.good()) {
+            const auto pos = ifs.tellg();
+            if (pos > 0) {
+                const auto sz = static_cast<size_t>(pos);
+                if (sz > s_streamThreshold.load()) {
+                    isStreamed = true;
+                } else {
+                    auto buf = std::make_shared<std::vector<uint8_t>>(sz);
+                    ifs.seekg(0, std::ios::beg);
+                    if (ifs.read(reinterpret_cast<char*>(buf->data()), static_cast<std::streamsize>(sz))) {
+                        return loadFromBuffer(std::move(buf), password);
+                    }
+                }
+            }
+        }
+    }
+
     const char* pwd = password.empty() ? nullptr : password.c_str();
 
     std::lock_guard<std::recursive_mutex> lock(getPdfiumMutex());
 
-    // Load into temporary handle first so existing document is preserved on failure
+    // Fallback for streamed sources (> threshold) or unreadable/empty files.
     FPDF_DOCUMENT newDoc = FPDF_LoadDocument(filePath.c_str(), pwd);
     if (!newDoc) {
         unsigned long err = FPDF_GetLastError();
@@ -192,25 +212,6 @@ DocumentError PdfiumDocument::loadFromFile(const std::string& filePath, const st
         return m_lastError;
     }
 
-    // Retain immutable source bytes for scratch-based page organization (never re-open from path later).
-    std::shared_ptr<const std::vector<uint8_t>> retainedBuffer;
-    bool isStreamed = false;
-    {
-        std::ifstream ifs(filePath, std::ios::binary | std::ios::ate);
-        if (ifs.good()) {
-            const auto sz = static_cast<size_t>(ifs.tellg());
-            if (sz > s_streamThreshold.load()) {
-                isStreamed = true;
-            } else if (sz > 0) {
-                auto buf = std::make_shared<std::vector<uint8_t>>(sz);
-                ifs.seekg(0, std::ios::beg);
-                if (ifs.read(reinterpret_cast<char*>(buf->data()), static_cast<std::streamsize>(sz))) {
-                    retainedBuffer = std::move(buf);
-                }
-            }
-        }
-    }
-
     // Success: atomically swap active document handle
     auto env = makeFormEnv(newDoc);
     m_doc = DocumentHandle(newDoc, [env](FPDF_DOCUMENT d) {
@@ -222,7 +223,7 @@ DocumentError PdfiumDocument::loadFromFile(const std::string& filePath, const st
         }
     });
     m_form = env;
-    m_sourceBuffer = std::move(retainedBuffer);
+    m_sourceBuffer.reset();
     m_sourcePassword = password;
     m_isStreamedSource = isStreamed;
     m_lastError = DocumentError::None;
@@ -878,6 +879,12 @@ OrganizeResult PdfiumDocument::organizePages(const std::vector<PageSpec>& pages,
         return result;
     }
 
+    auto pingProgress = [&progressCallback]() {
+        if (progressCallback) {
+            progressCallback(0);
+        }
+    };
+
     // 3. Open scratch document from retained immutable source bytes and password (never from a path).
     const char* pwd = m_sourcePassword.empty() ? nullptr : m_sourcePassword.c_str();
     FPDF_DOCUMENT scratchDoc = FPDF_LoadMemDocument64(m_sourceBuffer->data(), m_sourceBuffer->size(), pwd);
@@ -896,6 +903,7 @@ OrganizeResult PdfiumDocument::organizePages(const std::vector<PageSpec>& pages,
         result.status = OrganizeStatus::InternalError;
         return result;
     }
+    pingProgress();
 
     // 4a. Delete unlisted pages from highest index to lowest so remaining indices stay valid.
     for (int i = srcCount - 1; i >= 0; --i) {
@@ -909,6 +917,7 @@ OrganizeResult PdfiumDocument::organizePages(const std::vector<PageSpec>& pages,
         result.status = OrganizeStatus::InternalError;
         return result;
     }
+    pingProgress();
 
     // 4b. Map kept source indices to post-delete indices and reorder if not already ascending.
     std::vector<int> postDeleteIndex(static_cast<size_t>(srcCount), -1);
@@ -939,6 +948,9 @@ OrganizeResult PdfiumDocument::organizePages(const std::vector<PageSpec>& pages,
 
     // 4c. Apply relative rotation (added to each page's existing rotation).
     for (int i = 0; i < keptCount; ++i) {
+        if ((i & 63) == 63) {
+            pingProgress();
+        }
         const int deg = pages[static_cast<size_t>(i)].rotationDegrees;
         if (deg == 0) {
             continue;
@@ -954,6 +966,7 @@ OrganizeResult PdfiumDocument::organizePages(const std::vector<PageSpec>& pages,
         FPDFPage_SetRotation(pg, (cur + delta) % 4);
         FPDF_ClosePage(pg);
     }
+    pingProgress();
 
     // 5a. Post-pass: count dangling outline items (cycle-safe, capped).
     constexpr int kMaxOutlineNodes = 10000;
@@ -973,6 +986,9 @@ OrganizeResult PdfiumDocument::organizePages(const std::vector<PageSpec>& pages,
     while (!bmQueue.empty()) {
         FPDF_BOOKMARK bm = bmQueue.front();
         bmQueue.pop();
+        if ((outlineVisitedCount & 63) == 0) {
+            pingProgress();
+        }
 
         FPDF_DEST dest = FPDFBookmark_GetDest(scratchDoc, bm);
         if (!dest) {
@@ -996,11 +1012,15 @@ OrganizeResult PdfiumDocument::organizePages(const std::vector<PageSpec>& pages,
             }
         }
     }
+    pingProgress();
 
     // 5b. Post-pass: count dangling /Link annotations on kept pages (capped).
     constexpr int kMaxLinkScanAnnotations = 50000;
     int scannedAnnots = 0;
     for (int i = 0; i < keptCount && scannedAnnots < kMaxLinkScanAnnotations; ++i) {
+        if ((i & 63) == 0) {
+            pingProgress();
+        }
         FPDF_PAGE pg = FPDF_LoadPage(scratchDoc, i);
         if (!pg) {
             continue;
@@ -1031,6 +1051,7 @@ OrganizeResult PdfiumDocument::organizePages(const std::vector<PageSpec>& pages,
         }
         FPDF_ClosePage(pg);
     }
+    pingProgress();
 
     // 6. Save non-incremental copy to writeFd.
     // Note: FPDF_SaveAsCopy on an encrypted scratchDoc preserves /Encrypt, so when allowDecrypt
@@ -1050,6 +1071,7 @@ OrganizeResult PdfiumDocument::organizePages(const std::vector<PageSpec>& pages,
             result.status = OrganizeStatus::SaveFailed;
             return result;
         }
+        result.catalogEntriesDropped = true;
         docToSave = decryptedDoc;
     }
 

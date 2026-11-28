@@ -203,6 +203,14 @@ public:
     void requestSaveDocument(int64_t documentId, int writeFd, bool incremental, const QString& tempFilePath = "");
 
     /**
+     * @brief Reorders, deletes, and/or rotates pages into a writable file descriptor asynchronously.
+     * Delivered via pagesOrganized().
+     */
+    void requestOrganizePages(int64_t documentId, int writeFd,
+                              const std::vector<PageSpec>& pages,
+                              const OrganizeOptions& options = {});
+
+    /**
      * @brief Synchronously extracts text for a page on the worker thread (blocks caller).
      */
     std::shared_ptr<const PageText> getPageTextSync(int64_t documentId, int pageIndex);
@@ -354,6 +362,8 @@ Q_SIGNALS:
     /// Emitted when document save completes on the worker thread.
     void documentSaved(int64_t documentId, uint64_t bytesWritten);
     void documentSaveFailed(int64_t documentId, const QString& errorMessage);
+    /// Emitted when page organization completes (or fails with a structured status) on the worker thread.
+    void pagesOrganized(int64_t documentId, const pdf::OrganizeResult& result, const QString& errorMessage);
     /// Emitted when search finds matches on a page.
     void searchMatchesFound(int64_t documentId, int64_t searchId, int pageIndex, const std::vector<pdf::SearchMatch>& matches);
     /// Emitted as search progresses page-by-page.

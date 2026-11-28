@@ -364,6 +364,24 @@ struct SaveDocumentResponse {
     QString errorMessage;
 };
 
+struct OrganizePagesRequest {
+    int64_t documentId{0};
+    std::vector<pdf::PageSpec> pages;
+    bool allowInvalidateSignatures{false};
+    bool allowDecrypt{false};
+};
+
+struct OrganizePagesResponse {
+    int64_t documentId{0};
+    bool success{false};
+    pdf::OrganizeStatus status{pdf::OrganizeStatus::InternalError};
+    uint64_t bytesWritten{0};
+    int danglingOutlineCount{0};
+    int danglingLinkCount{0};
+    bool catalogEntriesDropped{false};
+    QString errorMessage;
+};
+
 // AcroForms (Phase 2 M5 Slice 1 Read-Only)
 struct ListFormFieldsRequest {
     int64_t documentId{0};
@@ -566,6 +584,12 @@ QDataStream& operator>>(QDataStream& in, SaveDocumentRequest& req);
 
 QDataStream& operator<<(QDataStream& out, const SaveDocumentResponse& res);
 QDataStream& operator>>(QDataStream& in, SaveDocumentResponse& res);
+
+QDataStream& operator<<(QDataStream& out, const OrganizePagesRequest& req);
+QDataStream& operator>>(QDataStream& in, OrganizePagesRequest& req);
+
+QDataStream& operator<<(QDataStream& out, const OrganizePagesResponse& res);
+QDataStream& operator>>(QDataStream& in, OrganizePagesResponse& res);
 
 QDataStream& operator<<(QDataStream& out, const ListFormFieldsRequest& req);
 QDataStream& operator>>(QDataStream& in, ListFormFieldsRequest& req);

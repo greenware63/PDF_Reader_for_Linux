@@ -58,6 +58,7 @@ bool isKnownMessageType(uint32_t type) {
         case MessageType::AddAnnotationResponse:
         case MessageType::RemoveAnnotationResponse:
         case MessageType::SaveDocumentResponse:
+        case MessageType::OrganizePagesResponse:
         case MessageType::WorkerError:
         case MessageType::WorkerControlResponse:
             return true;
@@ -339,6 +340,10 @@ bool WorkerClient::sendOpenDocumentPacket(const OpenDocumentRequest& request, in
 
 bool WorkerClient::sendSaveDocumentPacket(const SaveDocumentRequest& request, int saveFd) {
     return sendPacketWithFd(MessageType::SaveDocumentRequest, serialize(request), saveFd);
+}
+
+bool WorkerClient::sendOrganizePagesPacket(const OrganizePagesRequest& request, int writeFd) {
+    return sendPacketWithFd(MessageType::OrganizePagesRequest, serialize(request), writeFd);
 }
 
 void WorkerClient::flushOutgoing() {
@@ -1314,6 +1319,103 @@ SaveDocumentResponse WorkerClient::saveDocumentSync(int64_t documentId, int writ
     return result;
 }
 
+void WorkerClient::requestOrganizePages(int64_t documentId, int writeFd,
+                                          const std::vector<pdf::PageSpec>& pages,
+                                          const pdf::OrganizeOptions& options) {
+    if (m_stopping || m_failureReported) {
+        if (writeFd >= 0) {
+#if defined(_WIN32)
+            _close(writeFd);
+#else
+            ::close(writeFd);
+#endif
+        }
+        Q_EMIT organizePagesFailed(documentId, tr("Worker is stopped or failed."));
+        return;
+    }
+    OrganizePagesRequest req;
+    req.documentId = documentId;
+    req.pages = pages;
+    req.allowInvalidateSignatures = options.allowInvalidateSignatures;
+    req.allowDecrypt = options.allowDecrypt;
+    sendOrganizePagesPacket(req, writeFd);
+}
+
+OrganizePagesResponse WorkerClient::organizePagesSync(int64_t documentId, int writeFd,
+                                                      const std::vector<pdf::PageSpec>& pages,
+                                                      const pdf::OrganizeOptions& options,
+                                                      int timeoutMs) {
+    if (!ensureConnected()) {
+        if (writeFd >= 0) {
+#if defined(_WIN32)
+            _close(writeFd);
+#else
+            ::close(writeFd);
+#endif
+        }
+        OrganizePagesResponse fail;
+        fail.documentId = documentId;
+        fail.success = false;
+        fail.status = pdf::OrganizeStatus::InternalError;
+        fail.errorMessage = tr("Worker connection unavailable.");
+        return fail;
+    }
+
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    OrganizePagesResponse result;
+    result.documentId = documentId;
+    result.success = false;
+    result.status = pdf::OrganizeStatus::InternalError;
+
+    const auto readyConn = connect(this, &WorkerClient::pagesOrganized, &loop,
+        [&](const OrganizePagesResponse& resp) {
+            if (resp.documentId == documentId || resp.documentId == 0) {
+                result = resp;
+                loop.quit();
+            }
+        });
+
+    const auto failConn = connect(this, &WorkerClient::organizePagesFailed, &loop,
+        [&](int64_t docId, const QString& error) {
+            if (docId == documentId || docId == 0) {
+                result.success = false;
+                result.status = pdf::OrganizeStatus::InternalError;
+                result.errorMessage = error;
+                loop.quit();
+            }
+        });
+
+    const auto workerFailConn = connect(this, &WorkerClient::workerFailed, &loop,
+        [&](const QString& error) {
+            result.documentId = documentId;
+            result.success = false;
+            result.status = pdf::OrganizeStatus::InternalError;
+            result.errorMessage = error;
+            loop.quit();
+        });
+
+    const auto progressConn = connect(this, &WorkerClient::engineProgressed, &loop,
+        [&]() { timeout.start(timeoutMs); });
+
+    connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+    requestOrganizePages(documentId, writeFd, pages, options);
+    timeout.start(timeoutMs);
+    loop.exec();
+
+    disconnect(readyConn);
+    disconnect(failConn);
+    disconnect(workerFailConn);
+    disconnect(progressConn);
+
+    if (!result.success && result.errorMessage.isEmpty()) {
+        result.errorMessage = tr("Timed out waiting for organizePages response from worker.");
+    }
+    return result;
+}
+
 void WorkerClient::stop() {
     if (m_stopping) {
         return;
@@ -1391,7 +1493,12 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
                                       << " ms). Terminating hung worker." << std::endl;
                             m_watchdogTimer.stop();
                             m_process.kill();
-                            static const char* const kOpNames[] = {"Idle", "Open", "Tile", "Thumbnail", "Print", "Extract", "Search", "Redact"};
+                            static const char* const kOpNames[] = {
+                                "Idle", "Open", "Tile", "Thumbnail", "Print",
+                                "Extract", "Search", "Redact", "Annotate", "Save", "Organize"
+                            };
+                            static_assert(sizeof(kOpNames) / sizeof(kOpNames[0]) == static_cast<size_t>(WorkerOp::Organize) + 1,
+                                          "kOpNames must cover all WorkerOp values");
                             const char* opName = response.currentOp < sizeof(kOpNames) / sizeof(kOpNames[0])
                                                      ? kOpNames[response.currentOp] : "Unknown";
                             failWorker(tr("PDF worker engine stalled (operation heartbeat frozen): %1 made no progress for %2 ms (limit %3 ms).")
@@ -1731,6 +1838,16 @@ void WorkerClient::dispatchMessage(MessageType type, const QByteArray& payload) 
                 }
             } else {
                 Q_EMIT documentSaveFailed(0, tr("Failed to deserialize SaveDocumentResponse."));
+            }
+            break;
+        }
+
+        case MessageType::OrganizePagesResponse: {
+            OrganizePagesResponse response;
+            if (deserialize(payload, response)) {
+                Q_EMIT pagesOrganized(response);
+            } else {
+                Q_EMIT organizePagesFailed(0, tr("Failed to deserialize OrganizePagesResponse."));
             }
             break;
         }

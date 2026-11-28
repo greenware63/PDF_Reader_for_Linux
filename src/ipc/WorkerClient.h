@@ -96,9 +96,27 @@ public:
                                             const pdf::AnnotationItem& annotation,
                                             int timeoutMs = 10000);
 
+    /**
+     * @brief Requests an asynchronous document save into @p writeFd.
+     * Takes ownership of @p writeFd and closes it after sending or on any early failure.
+     */
     void requestSaveDocument(int64_t documentId, int writeFd, bool incremental, const QString& tempFilePath = "");
+    /// Synchronous wrapper around requestSaveDocument(). Takes ownership of @p writeFd and closes it.
     SaveDocumentResponse saveDocumentSync(int64_t documentId, int writeFd, bool incremental,
                                           const QString& tempFilePath = "", int timeoutMs = 60000);
+
+    /**
+     * @brief Requests asynchronous page organization into @p writeFd.
+     * Takes ownership of @p writeFd and closes it after sending or on any early failure.
+     */
+    void requestOrganizePages(int64_t documentId, int writeFd,
+                              const std::vector<pdf::PageSpec>& pages,
+                              const pdf::OrganizeOptions& options = {});
+    /// Synchronous wrapper around requestOrganizePages(). Takes ownership of @p writeFd and closes it.
+    OrganizePagesResponse organizePagesSync(int64_t documentId, int writeFd,
+                                            const std::vector<pdf::PageSpec>& pages,
+                                            const pdf::OrganizeOptions& options = {},
+                                            int timeoutMs = 60000);
 
 Q_SIGNALS:
     void tileReady(int64_t documentId, uint64_t generation, const pdf::TileKey& key,
@@ -139,6 +157,8 @@ Q_SIGNALS:
     void annotationRemoveFailed(int64_t documentId, int pageIndex, const QString& errorMessage);
     void documentSaved(int64_t documentId, uint64_t bytesWritten);
     void documentSaveFailed(int64_t documentId, const QString& errorMessage);
+    void pagesOrganized(const pdf::ipc::OrganizePagesResponse& response);
+    void organizePagesFailed(int64_t documentId, const QString& errorMessage);
     /// The worker's engine heartbeat advanced while busy (observed through the watchdog ping).
     void engineProgressed();
 
@@ -159,6 +179,7 @@ private:
     bool sendOpenDocumentPacket(const OpenDocumentRequest& request, int docFd);
     bool sendPacketWithFd(MessageType type, const QByteArray& payload, int fd);
     bool sendSaveDocumentPacket(const SaveDocumentRequest& request, int saveFd);
+    bool sendOrganizePagesPacket(const OrganizePagesRequest& request, int writeFd);
     void flushOutgoing();
     void failWorker(const QString& message);
     WorkerControlResponse requestControl(const WorkerControlRequest& request);

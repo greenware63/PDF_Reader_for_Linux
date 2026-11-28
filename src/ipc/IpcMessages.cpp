@@ -1578,6 +1578,78 @@ QDataStream& operator>>(QDataStream& in, SaveDocumentResponse& res) {
     return in;
 }
 
+// OrganizePagesRequest
+QDataStream& operator<<(QDataStream& out, const OrganizePagesRequest& req) {
+    out << static_cast<qint64>(req.documentId)
+        << static_cast<quint32>(req.pages.size());
+    for (const auto& spec : req.pages) {
+        out << static_cast<qint32>(spec.sourceIndex)
+            << static_cast<qint32>(spec.rotationDegrees);
+    }
+    out << req.allowInvalidateSignatures << req.allowDecrypt;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, OrganizePagesRequest& req) {
+    qint64 docId = 0;
+    quint32 count = 0;
+    in >> docId >> count;
+    if (in.status() != QDataStream::Ok || count > pdf::kMaxOrganizedPages) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    req.documentId = docId;
+    req.pages.clear();
+    req.pages.reserve(count);
+    for (quint32 i = 0; i < count; ++i) {
+        qint32 srcIdx = 0;
+        qint32 rot = 0;
+        in >> srcIdx >> rot;
+        if (in.status() != QDataStream::Ok) {
+            req.pages.clear();
+            return in;
+        }
+        req.pages.push_back({srcIdx, rot});
+    }
+    in >> req.allowInvalidateSignatures >> req.allowDecrypt;
+    return in;
+}
+
+// OrganizePagesResponse
+QDataStream& operator<<(QDataStream& out, const OrganizePagesResponse& res) {
+    out << static_cast<qint64>(res.documentId)
+        << res.success
+        << static_cast<quint32>(res.status)
+        << static_cast<quint64>(res.bytesWritten)
+        << static_cast<qint32>(res.danglingOutlineCount)
+        << static_cast<qint32>(res.danglingLinkCount)
+        << res.catalogEntriesDropped
+        << res.errorMessage;
+    return out;
+}
+
+QDataStream& operator>>(QDataStream& in, OrganizePagesResponse& res) {
+    qint64 docId = 0;
+    quint32 statusVal = 0;
+    quint64 bytes = 0;
+    qint32 danglingOutlines = 0;
+    qint32 danglingLinks = 0;
+    in >> docId >> res.success >> statusVal >> bytes
+       >> danglingOutlines >> danglingLinks >> res.catalogEntriesDropped >> res.errorMessage;
+    if (in.status() != QDataStream::Ok ||
+        statusVal > static_cast<quint32>(pdf::OrganizeStatus::InternalError) ||
+        res.errorMessage.size() > 4096) {
+        in.setStatus(QDataStream::ReadCorruptData);
+        return in;
+    }
+    res.documentId = docId;
+    res.status = static_cast<pdf::OrganizeStatus>(statusVal);
+    res.bytesWritten = bytes;
+    res.danglingOutlineCount = danglingOutlines;
+    res.danglingLinkCount = danglingLinks;
+    return in;
+}
+
 // ListFormFieldsRequest
 QDataStream& operator<<(QDataStream& out, const ListFormFieldsRequest& req) {
     out << static_cast<qint64>(req.documentId) << static_cast<qint32>(req.pageIndex);

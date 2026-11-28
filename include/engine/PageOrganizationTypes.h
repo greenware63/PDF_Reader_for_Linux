@@ -32,6 +32,7 @@ struct OrganizeResult {
     uint64_t bytesWritten{0};
     int danglingOutlineCount{0};
     int danglingLinkCount{0};
+    bool catalogEntriesDropped{false};
 };
 
 } // namespace pdf
