@@ -72,6 +72,33 @@ public:
     /// Exports the currently active document to a flattened PDF file (all interactive forms burned in). @return true on success.
     bool exportFlattenedPdf(const QString& outputPath, int fromPage = -1, int toPage = -1);
 
+    /// Result details from organizeDocumentToFile().
+    struct OrganizeOutcome {
+        pdf::OrganizeStatus status{pdf::OrganizeStatus::InternalError};
+        uint64_t bytesWritten{0};
+        int danglingOutlineCount{0};
+        int danglingLinkCount{0};
+        bool catalogEntriesDropped{false};
+        bool dirtyEditLogRefused{false};
+        bool validationFailed{false};
+        QString errorMessage;
+    };
+
+    /// Organizes pages of the currently active document into @p outputPath via a temp fd + validation + atomic commit.
+    bool organizeDocumentToFile(const QString& outputPath,
+                                const std::vector<pdf::PageSpec>& specs,
+                                const pdf::OrganizeOptions& options = {},
+                                OrganizeOutcome* outcome = nullptr);
+
+    /// Validates a worker-written organized PDF file before atomic commit.
+    static bool validateOrganizedOutput(const QString& filePath,
+                                        uint64_t expectedBytes,
+                                        int expectedPageCount,
+                                        QByteArray& outBytes,
+                                        QString* error = nullptr);
+
+    bool isWorkerBusy() const noexcept { return m_workerBusy; }
+
     /// Color mode / dark mode / reading theme status.
     ColorMode colorMode() const noexcept { return m_colorMode; }
     void setColorMode(ColorMode mode);
@@ -108,6 +135,7 @@ public Q_SLOTS:
     void printDocument();
     void exportAsPdf();
     void exportFlattenedPdfAction();
+    void organizePages();
     void toggleRedactionMode();
     void markSelectionForRedaction();
     void clearRedactionMarks();
@@ -188,8 +216,11 @@ private:
     QAction* m_markSelectionRedactAction{nullptr};
     QAction* m_clearRedactionsAction{nullptr};
     QAction* m_applyRedactionsAction{nullptr};
+    void updateOrganizePagesAction();
+
     QLabel* m_redactStatusLabel{nullptr};
-    bool m_redactionBusy{false};
+    bool m_workerBusy{false};
+    QAction* m_organizePagesAction{nullptr};
     QAction* m_saveAction{nullptr};
     QAction* m_saveAsAction{nullptr};
     QAction* m_undoAction{nullptr};
